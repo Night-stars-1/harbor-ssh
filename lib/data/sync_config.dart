@@ -63,20 +63,25 @@ class CloudSyncConfig {
     gistId: id,
   );
 
-  CloudSyncConfig withGitHubAccount(String token, String login) =>
-      CloudSyncConfig(
-        provider: provider,
-        url: url,
-        username: username,
-        password: password,
-        encryptionPassword: encryptionPassword,
-        automatic: token.isEmpty && provider == SyncProvider.gist
-            ? false
-            : automatic,
-        token: token,
-        githubLogin: login,
-        gistId: gistId,
-      );
+  CloudSyncConfig withGitHubAccount(String token, String login) {
+    final sameAccount =
+        token.isNotEmpty &&
+        login.isNotEmpty &&
+        login.toLowerCase() == githubLogin.toLowerCase();
+    return CloudSyncConfig(
+      provider: provider,
+      url: url,
+      username: username,
+      password: password,
+      encryptionPassword: encryptionPassword,
+      automatic: !sameAccount && provider == SyncProvider.gist
+          ? false
+          : automatic,
+      token: token,
+      githubLogin: login,
+      gistId: sameAccount ? gistId : '',
+    );
+  }
 
   Uri get directory {
     final uri = Uri.tryParse(url.trim());

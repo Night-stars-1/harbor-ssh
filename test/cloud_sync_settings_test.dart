@@ -43,7 +43,7 @@ void main() {
     model.dispose();
   });
   for (final width in [320.0, 1280.0]) {
-    testWidgets('Gist 设置适配 $width，保留服务草稿并回填创建的 ID', (tester) async {
+    testWidgets('Gist 设置适配 $width，自动记录存档且无需填写 ID', (tester) async {
       tester.view.physicalSize = Size(width, 900);
       tester.view.devicePixelRatio = 1;
       addTearDown(tester.view.resetPhysicalSize);
@@ -94,16 +94,11 @@ void main() {
       await tester.tap(find.text('保存并同步'));
       await tester.pumpAndSettle();
       expect(model.cloudSync.settings!.provider, SyncProvider.gist);
-      expect(
-        tester.widget<TextField>(field('Gist ID')).controller!.text,
-        '0123456789abcdef',
-      );
+      expect(field('Gist ID'), findsNothing);
+      expect(model.cloudSync.settings!.gistId, '0123456789abcdef');
       await tester.pumpWidget(page(1));
       await tester.pumpAndSettle();
-      expect(
-        tester.widget<TextField>(field('Gist ID')).controller!.text,
-        '0123456789abcdef',
-      );
+      expect(field('Gist ID'), findsNothing);
       expect(field('GitHub Token'), findsNothing);
       expect(find.text('@harbor-user'), findsOneWidget);
       expect(tester.takeException(), isNull);

@@ -215,6 +215,11 @@ class CloudSync extends ChangeNotifier {
     // Login is independent of completing the sync form. Tokens stay in the
     // same secure store as the existing configuration, never preferences.
     await repository.secrets.write(_settingsKey, jsonEncode(next.toJson()));
+    if (settings?.gistId != next.gistId && next.provider == SyncProvider.gist) {
+      _reviewedLocal = null;
+      _reviewedRemote = null;
+      lastSync = null;
+    }
     settings = next;
     failed = false;
     message = token.isEmpty ? '已退出 GitHub 登录' : 'GitHub 登录成功';
@@ -251,12 +256,24 @@ class CloudSync extends ChangeNotifier {
       await repository.secrets.write(_settingsKey, jsonEncode(config.toJson()));
       final storage = SyncStorage(repository);
       await storage.recover();
+      final backend = _backend(config);
+      if (backend is GistSyncBackend) {
+        final resolvedId = await backend.resolve();
+        if (resolvedId != null && resolvedId != config.normalizedGistId) {
+          config = config.withGistId(resolvedId);
+          settings = config;
+          _notify();
+          await repository.secrets.write(
+            _settingsKey,
+            jsonEncode(config.toJson()),
+          );
+        }
+      }
       final local = await storage.capture();
       final baseData = await repository.preferences.read(config.baselineKey);
       final base = baseData == null
           ? SyncSnapshot.empty()
           : await _decode(baseData, config);
-      final backend = _backend(config);
       final response = await backend.read();
       if (response.content == null && baseData != null) {
         throw const SyncFailure('云端同步文件已被删除，请恢复该文件或更换同步位置');

@@ -18,11 +18,10 @@ class _CloudSyncSettingsState extends State<CloudSyncSettings> {
   final _username = TextEditingController();
   final _password = TextEditingController();
   final _encryption = TextEditingController();
-  final _gistId = TextEditingController();
   bool _authenticating = false;
   bool _hadGitHubAccount = false;
   SyncProvider _provider = SyncProvider.webdav;
-  String _knownGistId = '';
+  String _knownGitHubLogin = '';
   final _visibleSecrets = <TextEditingController>{};
   bool _automatic = false;
   String? _activeAction;
@@ -36,8 +35,7 @@ class _CloudSyncSettingsState extends State<CloudSyncSettings> {
     final config = widget.controller.settings;
     if (config != null) {
       _provider = config.provider;
-      _gistId.text = config.gistId;
-      _knownGistId = config.gistId;
+      _knownGitHubLogin = config.githubLogin;
       _url.text = config.url;
       _username.text = config.username;
       _password.text = config.password;
@@ -48,13 +46,12 @@ class _CloudSyncSettingsState extends State<CloudSyncSettings> {
 
   void _onSyncChanged() {
     final config = widget.controller.settings;
-    if (config != null && config.gistId != _knownGistId) {
-      if (_knownGistId.isEmpty &&
-          _gistId.text.trim().isEmpty &&
-          config.gistId.isNotEmpty) {
-        setState(() => _gistId.text = config.gistId);
+    if (config != null &&
+        config.githubLogin.toLowerCase() != _knownGitHubLogin.toLowerCase()) {
+      if (_knownGitHubLogin.isNotEmpty && _provider == SyncProvider.gist) {
+        setState(() => _automatic = false);
       }
-      _knownGistId = config.gistId;
+      _knownGitHubLogin = config.githubLogin;
     }
     final failure = widget.controller.failed ? widget.controller.message : null;
     final changed = failure != _lastFailure;
@@ -81,7 +78,7 @@ class _CloudSyncSettingsState extends State<CloudSyncSettings> {
   @override
   void dispose() {
     widget.controller.removeListener(_onSyncChanged);
-    for (final field in [_url, _username, _password, _encryption, _gistId]) {
+    for (final field in [_url, _username, _password, _encryption]) {
       field.dispose();
     }
     super.dispose();
@@ -89,7 +86,7 @@ class _CloudSyncSettingsState extends State<CloudSyncSettings> {
 
   CloudSyncConfig get _settings => CloudSyncConfig(
     provider: _provider,
-    gistId: _gistId.text.trim(),
+    gistId: widget.controller.settings?.gistId ?? '',
     token: widget.controller.settings?.token ?? '',
     githubLogin: widget.controller.settings?.githubLogin ?? '',
     url: _url.text.trim(),
@@ -318,16 +315,6 @@ class _CloudSyncSettingsState extends State<CloudSyncSettings> {
                       _automatic = false;
                     }
                   }),
-                ),
-                SettingsRow(
-                  title: 'Gist ID',
-                  description: '留空时首次同步创建 Secret Gist',
-                  control: _field(
-                    'Gist ID',
-                    _gistId,
-                    hint: 'Gist ID 或链接',
-                    enabled: !busy,
-                  ),
                 ),
               ],
             )

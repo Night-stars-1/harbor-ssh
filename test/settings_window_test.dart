@@ -105,7 +105,7 @@ void main() {
     await remote.saveGitHubAccount('oauth-test-token', 'harbor-user');
     expect(model.cloudSync.settings!.token, 'oauth-test-token');
     expect(remote.settings!.githubLogin, 'harbor-user');
-    expect(remote.settings!.gistId, gist.gistId);
+    expect(remote.settings!.gistId, isEmpty);
     await remote.saveGitHubAccount('', '');
     expect(remote.settings!.token, isEmpty);
     expect(remote.settings!.githubLogin, isEmpty);

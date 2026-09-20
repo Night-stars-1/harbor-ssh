@@ -47,6 +47,7 @@ void main() {
     var exists = false, statusOverride = 0;
     Map<String, Object?> document() => {
       'id': gistId,
+      'owner': {'login': 'test-user'},
       'history': [
         {'version': 'revision-$revision'},
       ],
@@ -66,6 +67,8 @@ void main() {
         request.response.statusCode = statusOverride;
       } else if (request.uri.path == '/user') {
         request.response.write('{"login":"test-user"}');
+      } else if (request.method == 'GET' && request.uri.path == '/gists') {
+        request.response.write(jsonEncode(exists ? [document()] : []));
       } else if (request.method == 'POST' && request.uri.path == '/gists') {
         final body = jsonDecode(await utf8.decoder.bind(request).join()) as Map;
         expect(body['public'], isFalse);
@@ -139,15 +142,20 @@ void main() {
       (a.preferences as MemoryStore).values.values.join(),
       isNot(contains(gistConfig.token)),
     );
-    await syncB.saveSettings(gistConfig.withGistId(gistId));
+    // A second device only needs the same account and encryption password.
+    await syncB.saveSettings(gistConfig);
     await syncB.testConnection(syncB.settings!);
     await syncB.synchronize();
+    expect(syncB.settings!.gistId, gistId);
+    expect(posts, 1);
     expect((await b.credentials(testHost.id))!.password, 'ssh-secret');
     expect((await b.userCredentials(key.id))!.privateKey, 'private-key');
     expect((await b.loadUsers()).single.publicKey, key.publicKey);
     expect(patches, 0);
     await b.saveHosts([testHost.withFavorite(true)]);
     await syncB.synchronize();
+    // Losing the local ID still restores the existing merge baseline.
+    await syncA.saveSettings(gistConfig);
     await syncA.synchronize();
     expect((await a.loadHosts()).single.favorite, isTrue);
     Host renamed(String name) =>
