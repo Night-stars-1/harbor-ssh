@@ -500,7 +500,7 @@ class _WorkspaceState extends State<Workspace> {
                               _terminalController.selectOption('ai'),
                           icon: const Icon(
                             Icons.auto_awesome_outlined,
-                            semanticLabel: 'AI 任务',
+                            semanticLabel: 'AI 助手',
                           ),
                         ),
                       if (terminalSession != null)

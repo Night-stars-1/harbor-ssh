@@ -462,7 +462,7 @@ class _TerminalPaneState extends State<TerminalPane> {
                       icon: const Icon(
                         Icons.auto_awesome_outlined,
                         size: 20,
-                        semanticLabel: 'AI 任务',
+                        semanticLabel: 'AI 助手',
                       ),
                     ),
                   FileBrowserButton(

@@ -55,10 +55,67 @@ class _TerminalAiPanelState extends State<TerminalAiPanel> {
     super.dispose();
   }
 
-  void _start() {
+  void _send() {
     final text = _input.text.trim();
     if (text.isEmpty) return;
     widget.task.start(text);
+    if (widget.task.running) _input.clear();
+  }
+
+  Widget _composer(AiTaskController task) {
+    final colors = Theme.of(context).colorScheme;
+    return Material(
+      color: colors.surfaceContainerHighest,
+      shape: HarborShapes.superellipse(BorderRadius.circular(24)),
+      child: Padding(
+        padding: const EdgeInsets.all(8),
+        child: Row(
+          crossAxisAlignment: CrossAxisAlignment.end,
+          children: [
+            Expanded(
+              child: TextField(
+                key: const ValueKey('ai-task-input'),
+                controller: _input,
+                enabled: !task.running,
+                minLines: 1,
+                maxLines: 4,
+                decoration: const InputDecoration(
+                  hintText: '发送消息…',
+                  filled: false,
+                  border: InputBorder.none,
+                  enabledBorder: InputBorder.none,
+                  focusedBorder: InputBorder.none,
+                  disabledBorder: InputBorder.none,
+                  contentPadding: EdgeInsets.symmetric(
+                    horizontal: 12,
+                    vertical: 12,
+                  ),
+                ),
+              ),
+            ),
+            const SizedBox(width: 4),
+            ValueListenableBuilder<TextEditingValue>(
+              valueListenable: _input,
+              builder: (context, value, _) => IconButton.filled(
+                key: const ValueKey('ai-send'),
+                onPressed: task.running
+                    ? task.stop
+                    : value.text.trim().isEmpty
+                    ? null
+                    : _send,
+                style: IconButton.styleFrom(minimumSize: const Size(48, 48)),
+                icon: Icon(
+                  task.running
+                      ? Icons.stop_rounded
+                      : Icons.arrow_upward_rounded,
+                  semanticLabel: task.running ? '停止' : '发送',
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
   }
 
   Widget _entry(AiTaskEntry entry) {
@@ -158,7 +215,7 @@ class _TerminalAiPanelState extends State<TerminalAiPanel> {
                         crossAxisAlignment: CrossAxisAlignment.start,
                         children: [
                           Text(
-                            'AI 任务',
+                            'AI 助手',
                             style: Theme.of(context).textTheme.titleLarge,
                           ),
                           Text(
@@ -234,16 +291,18 @@ class _TerminalAiPanelState extends State<TerminalAiPanel> {
                                             _entry(task.entries[index]),
                                       ),
                               ),
-                              const SizedBox(height: 8),
-                              Text(
-                                task.failure ?? task.status,
-                                style: Theme.of(context).textTheme.bodySmall
-                                    ?.copyWith(
-                                      color: task.failure == null
-                                          ? colors.onSurfaceVariant
-                                          : colors.error,
-                                    ),
-                              ),
+                              if (task.running || task.failure != null) ...[
+                                const SizedBox(height: 8),
+                                Text(
+                                  task.failure ?? task.status,
+                                  style: Theme.of(context).textTheme.bodySmall
+                                      ?.copyWith(
+                                        color: task.failure == null
+                                            ? colors.onSurfaceVariant
+                                            : colors.error,
+                                      ),
+                                ),
+                              ],
                               if (task.pending != null) ...[
                                 const SizedBox(height: 10),
                                 ConstrainedBox(
@@ -278,7 +337,7 @@ class _TerminalAiPanelState extends State<TerminalAiPanel> {
                                   children: [
                                     TextButton(
                                       onPressed: () => task.approve(false),
-                                      child: const Text('取消任务'),
+                                      child: const Text('取消'),
                                     ),
                                     FilledButton.tonal(
                                       onPressed: () => task.approve(true),
@@ -288,37 +347,7 @@ class _TerminalAiPanelState extends State<TerminalAiPanel> {
                                 ),
                               ] else ...[
                                 const SizedBox(height: 12),
-                                TextField(
-                                  key: const ValueKey('ai-task-input'),
-                                  controller: _input,
-                                  enabled: !task.running,
-                                  minLines: 1,
-                                  maxLines: 3,
-                                  decoration: const InputDecoration(
-                                    hintText: '描述要在这台服务器上完成的任务',
-                                  ),
-                                ),
-                                const SizedBox(height: 10),
-                                Align(
-                                  alignment: Alignment.centerRight,
-                                  child: task.running
-                                      ? FilledButton.tonalIcon(
-                                          onPressed: task.stop,
-                                          icon: const Icon(
-                                            Icons.stop_rounded,
-                                            size: 18,
-                                          ),
-                                          label: const Text('停止'),
-                                        )
-                                      : FilledButton.icon(
-                                          onPressed: _start,
-                                          icon: const Icon(
-                                            Icons.arrow_upward_rounded,
-                                            size: 18,
-                                          ),
-                                          label: const Text('开始任务'),
-                                        ),
-                                ),
+                                _composer(task),
                               ],
                             ],
                           ],

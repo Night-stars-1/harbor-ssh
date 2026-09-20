@@ -311,14 +311,15 @@ void main() {
         find.byKey(const ValueKey('ai-task-input')),
         '清理测试文件',
       );
-      await tester.ensureVisible(find.text('开始任务'));
-      await tester.tap(find.text('开始任务'));
+      await tester.pump();
+      await tester.ensureVisible(find.byKey(const ValueKey('ai-send')));
+      await tester.tap(find.byKey(const ValueKey('ai-send')));
       await tester.pumpAndSettle();
       expect(find.text('批准并执行'), findsOneWidget);
       expect(find.text('rm /tmp/test-file'), findsWidgets);
       expect(executor.calls, 0);
-      await tester.ensureVisible(find.text('取消任务'));
-      await tester.tap(find.text('取消任务'));
+      await tester.ensureVisible(find.text('取消'));
+      await tester.tap(find.text('取消'));
       await tester.pumpAndSettle();
       expect(task.running, isFalse);
       expect(executor.calls, 0);

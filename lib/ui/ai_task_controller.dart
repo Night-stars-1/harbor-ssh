@@ -36,7 +36,7 @@ class AiTaskController extends ChangeNotifier {
   final TerminalAiClient Function() clientFactory;
   final entries = <AiTaskEntry>[];
   bool running = false;
-  String status = '描述目标，AI 将执行命令并根据结果继续处理';
+  String status = '';
   String? failure;
   AiToolCall? pending;
   Completer<bool>? _approval;
