@@ -4,9 +4,11 @@ import 'dart:convert';
 import 'package:flutter/foundation.dart';
 
 import '../data/terminal_ai.dart';
+import '../data/ai_image.dart';
 
 class AiTaskEntry {
-  AiTaskEntry(this.text, {this.command = false});
+  AiTaskEntry(this.text, {this.command = false, this.images});
+  final List<AiImage>? images;
   final String text;
   final bool command;
   String output = '';
@@ -73,14 +75,15 @@ class AiTaskController extends ChangeNotifier {
     _notify();
   }
 
-  Future<void> start(String goal) async {
+  Future<void> start(String goal, {List<AiImage> images = const []}) async {
     if (running || _disposed) return;
     failure = null;
     try {
       settings().endpoint;
       if (!connected()) throw const AiFailure('请先连接 SSH');
-      if (goal.trim().isEmpty || goal.length > 16000) {
-        throw const AiFailure('请输入不超过 16000 字符的任务目标');
+      AiImage.validateBatch(images);
+      if ((goal.trim().isEmpty && images.isEmpty) || goal.length > 16000) {
+        throw const AiFailure('请输入消息或添加图片，文字不超过 16000 字符');
       }
     } on AiFailure catch (error) {
       failure = error.message;
@@ -92,11 +95,21 @@ class AiTaskController extends ChangeNotifier {
     final client = _client = clientFactory();
     final executor = _executor = executorFactory();
     entries.clear();
-    entries.add(AiTaskEntry(goal.trim()));
+    final attachments = List<AiImage>.unmodifiable(images);
+    entries.add(AiTaskEntry(goal.trim(), images: attachments));
     running = true;
     final messages = <Map<String, dynamic>>[
       {'role': 'system', 'content': aiSystemPrompt},
-      {'role': 'user', 'content': goal.trim()},
+      {
+        'role': 'user',
+        'content': attachments.isEmpty
+            ? goal.trim()
+            : [
+                for (final image in attachments) image.toContent(),
+                if (goal.trim().isNotEmpty)
+                  {'type': 'text', 'text': goal.trim()},
+              ],
+      },
     ];
     var commands = 0;
     try {

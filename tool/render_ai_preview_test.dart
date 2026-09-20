@@ -6,6 +6,8 @@ import 'package:flutter/rendering.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:harbor_ssh/data/terminal_ai.dart';
+import 'package:harbor_ssh/data/ai_image.dart';
+import 'package:harbor_ssh/data/ai_image_input.dart';
 import 'package:harbor_ssh/data/ssh_connection.dart';
 import 'package:harbor_ssh/ui/ai_task_controller.dart';
 import 'package:harbor_ssh/ui/terminal_ai_panel.dart';
@@ -34,6 +36,30 @@ void main() {
     tester.view.devicePixelRatio = 1;
     addTearDown(tester.view.resetDevicePixelRatio);
     addTearDown(tester.view.resetPhysicalSize);
+    final sample = await tester.runAsync(() async {
+      final recorder = ui.PictureRecorder();
+      final canvas = Canvas(recorder);
+      canvas.drawColor(const Color(0xff16131a), BlendMode.src);
+      final text = TextPainter(
+        text: const TextSpan(
+          text: 'dev@server:~\$ df -h\n\nFilesystem  Size  Used  Avail  Use%\n/dev/vda1    40G   18G    20G   48%',
+          style: TextStyle(
+            fontFamily: 'monospace',
+            fontSize: 16,
+            color: Color(0xff9ee8d2),
+          ),
+        ),
+        textDirection: TextDirection.ltr,
+      )..layout(maxWidth: 448);
+      text.paint(canvas, const Offset(16, 16));
+      text.dispose();
+      final picture = recorder.endRecording();
+      final image = await picture.toImage(480, 160);
+      final data = await image.toByteData(format: ui.ImageByteFormat.png);
+      image.dispose();
+      picture.dispose();
+      return AiImage.fromBytes('终端截图.png', data!.buffer.asUint8List());
+    });
     for (final brightness in Brightness.values) {
       for (final width in [840.0, 390.0]) {
         tester.view.physicalSize = Size(width, 844);
@@ -53,7 +79,7 @@ void main() {
           connected: () => true,
         );
         task.entries.addAll([
-          AiTaskEntry('检查磁盘空间，找出占用最大的目录'),
+          AiTaskEntry('检查磁盘空间，找出占用最大的目录', images: [sample!]),
           AiTaskEntry('df -h', command: true)
             ..reason = '查看文件系统使用情况'
             ..output = 'Filesystem   Size  Used  Avail  Use%\n/dev/vda1     40G   18G    20G   48%'
@@ -94,6 +120,7 @@ void main() {
                             task: task,
                             hostName: '开发服务器',
                             onClose: () {},
+                            imageInput: _Images(sample),
                           ),
                         ),
                 ),
@@ -101,6 +128,25 @@ void main() {
             ),
           );
           await tester.pumpAndSettle();
+          if (!settings) {
+            final add = tester.widget<IconButton>(
+              find.byKey(const ValueKey('ai-add-image')),
+            );
+            await tester.runAsync(
+              () async => await (add.onPressed as dynamic)(),
+            );
+            await tester.enterText(
+              find.byKey(const ValueKey('ai-task-input')),
+              '帮我看看这张截图',
+            );
+            await tester.pumpAndSettle();
+            await tester.runAsync(() async {
+              for (final element in find.byType(Image).evaluate()) {
+                await precacheImage((element.widget as Image).image, element);
+              }
+            });
+            await tester.pumpAndSettle();
+          }
           expect(tester.takeException(), isNull);
           await tester.runAsync(() async {
             final boundary =
@@ -134,4 +180,15 @@ class _Executor implements AiCommandExecutor {
   ) async => const AiCommandResult('', 0);
   @override
   void cancel() {}
+}
+
+class _Images implements AiImageInput {
+  _Images(this.image);
+  final AiImage image;
+  @override
+  Future<AiImage?> clipboard() async => image;
+  @override
+  Future<List<AiImageSource>> pick() async => [
+    AiImageSource(image.name, () => Stream.value(image.bytes)),
+  ];
 }

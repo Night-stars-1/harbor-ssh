@@ -257,9 +257,7 @@ Map<String, dynamic> _requestBody(
     } else {
       converted.add({
         'role': 'user',
-        'content': [
-          {'type': 'text', 'text': message['content']},
-        ],
+        'content': _anthropicUserContent(message['content']),
       });
     }
   }
@@ -277,6 +275,33 @@ Map<String, dynamic> _requestBody(
       },
     ],
     'tool_choice': {'type': 'auto'},
+  };
+}
+
+List<Map<String, dynamic>> _anthropicUserContent(dynamic content) {
+  if (content is String) {
+    return [
+      {'type': 'text', 'text': content},
+    ];
+  }
+  return [
+    for (final block in content as List)
+      if (block['type'] == 'image_url')
+        _anthropicImage(block['image_url']['url'] as String)
+      else
+        Map<String, dynamic>.from(block as Map),
+  ];
+}
+
+Map<String, dynamic> _anthropicImage(String url) {
+  final data = Uri.parse(url).data!;
+  return {
+    'type': 'image',
+    'source': {
+      'type': 'base64',
+      'media_type': data.mimeType,
+      'data': url.substring(url.indexOf(',') + 1),
+    },
   };
 }
 
@@ -445,6 +470,10 @@ class TerminalAiClient {
         final response = await request.close();
         if (response.statusCode != 200) {
           throw AiFailure(switch (response.statusCode) {
+            400 || 422
+                when messages.any((message) => message['content'] is List) =>
+              '图片请求被拒绝，请检查模型是否支持图片和工具调用，以及图片是否符合服务限制',
+            413 => '图片请求过大，请减少图片或压缩后重试',
             401 || 403 => 'AI 认证失败，请检查 API Key 和模型权限',
             404 => '找不到 AI 接口或模型，请检查地址和模型名称',
             429 => 'AI 请求过于频繁或额度不足，请稍后重试',
