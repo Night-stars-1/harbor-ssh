@@ -10,6 +10,8 @@ import '../domain/host.dart';
 import '../domain/command_history.dart';
 import '../domain/path_completion.dart';
 import 'host_repository.dart';
+import 'terminal_ai.dart';
+import 'ssh_ai_executor.dart';
 import 'remote_commands.dart';
 import 'sftp_files.dart';
 import '../domain/remote_file.dart';
@@ -19,6 +21,13 @@ enum ConnectionStatus { connecting, connected, closed, failed }
 class SshConnection extends ChangeNotifier {
   SshConnection({required this.id, required this.host});
   final String id;
+  AiCommandExecutor createAiExecutor() => SshAiExecutor((command) async {
+    final client = _client;
+    if (client == null || status != ConnectionStatus.connected || _closed) {
+      throw const AiFailure('SSH 已断开，请重新连接');
+    }
+    return client.execute(command);
+  });
   RemoteFileSystem get files => SftpFiles(_openSftp);
   final Host host;
   final Terminal terminal = Terminal(maxLines: 10000);

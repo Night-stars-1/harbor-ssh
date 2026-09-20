@@ -3,6 +3,7 @@ import 'dart:math' as math;
 import 'package:flutter/material.dart';
 
 import '../data/ssh_connection.dart';
+import '../data/terminal_ai.dart';
 import '../domain/host.dart';
 import 'terminal_pane.dart';
 import 'theme.dart';
@@ -21,6 +22,8 @@ class TerminalWorkspace extends StatefulWidget {
     required this.onConnect,
     required this.onClose,
     required this.onFiles,
+    this.aiSettings,
+    this.onAiSettings,
   });
 
   final List<SshConnection> sessions;
@@ -31,6 +34,8 @@ class TerminalWorkspace extends StatefulWidget {
   final ValueChanged<String> onSelect;
   final Future<void> Function(Host) onConnect;
   final ValueChanged<SshConnection> onClose, onFiles;
+  final AiSettings Function()? aiSettings;
+  final VoidCallback? onAiSettings;
 
   @override
   State<TerminalWorkspace> createState() => _TerminalWorkspaceState();
@@ -347,6 +352,8 @@ class _TerminalWorkspaceState extends State<TerminalWorkspace> {
               : TerminalPane(
                   key: _keys.putIfAbsent(session.id, GlobalKey.new),
                   session: session,
+                  aiSettings: widget.aiSettings,
+                  onAiSettings: widget.onAiSettings,
                   controller: !widget.desktop && _focused == side
                       ? widget.mobileController
                       : _controllers.putIfAbsent(

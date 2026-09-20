@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 
 import 'cloud_sync_settings.dart';
 import 'appearance_settings.dart';
+import 'ai_settings.dart';
 import 'local_file_settings.dart';
 import 'theme.dart';
 import 'settings_widgets.dart';
@@ -17,6 +18,8 @@ class SettingsNavigation extends ValueNotifier<int?> {
       ? '本地文件'
       : value == 1
       ? '云同步'
+      : value == 3
+      ? 'AI'
       : '外观';
 }
 
@@ -51,14 +54,20 @@ class _SettingsPageState extends State<SettingsPage> {
     super.dispose();
   }
 
-  static const _titles = ['本地文件', '云同步', '外观'];
-  static const _sectionOrder = [2, 0, 1];
+  static const _titles = ['本地文件', '云同步', '外观', 'AI'];
+  static const _sectionOrder = [2, 0, 3, 1];
   static const _icons = [
     Icons.folder_outlined,
     Icons.cloud_outlined,
     Icons.palette_outlined,
+    Icons.auto_awesome_outlined,
   ];
-  static const _descriptions = ['默认目录', 'WebDAV、GitHub Gist 与自动同步', '主题色与显示模式'];
+  static const _descriptions = [
+    '默认目录',
+    'WebDAV、GitHub Gist 与自动同步',
+    '主题色与显示模式',
+    '模型服务与终端任务',
+  ];
 
   void _select(int index) => navigation.value = index;
 
@@ -240,6 +249,10 @@ class _SettingsPageState extends State<SettingsPage> {
                                 child: AppearanceSettings(
                                   controller: controller,
                                 ),
+                              ),
+                              ExcludeFocus(
+                                excluding: !detail || _section != 3,
+                                child: AiSettingsPage(controller: controller),
                               ),
                               SettingsList(
                                 children: [_categories(rail: false)],

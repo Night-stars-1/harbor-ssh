@@ -1,12 +1,15 @@
 import 'package:flutter/foundation.dart';
 
 import '../data/webdav_sync.dart';
+import '../data/terminal_ai.dart';
 import '../domain/sync_snapshot.dart';
 import '../domain/appearance.dart';
 import 'workspace_model.dart';
 
 /// Both windows use the main workspace's sync service and storage lock.
 abstract class SyncSettingsController extends ChangeNotifier {
+  AiSettings get aiSettings;
+  Future<void> saveAiSettings(AiSettings settings);
   AppearancePreferences get appearance;
   Future<void> saveAppearance(AppearancePreferences value);
   CloudSyncConfig? get settings;
@@ -28,6 +31,11 @@ class LocalSyncSettingsController extends SyncSettingsController {
     model.cloudSync.addListener(notifyListeners);
   }
   final WorkspaceModel model;
+  @override
+  AiSettings get aiSettings => model.aiSettings;
+  @override
+  Future<void> saveAiSettings(AiSettings settings) =>
+      model.saveAiSettings(settings);
   @override
   AppearancePreferences get appearance => model.appearance.value;
   @override

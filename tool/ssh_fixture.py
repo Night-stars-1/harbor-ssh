@@ -152,6 +152,23 @@ class Server(paramiko.ServerInterface):
         self.shell_ready.set()
         return True
     def check_channel_exec_request(self, channel, command):
+        if command in (b"harbor-ai-fixture-success", b"harbor-ai-fixture-fail", b"harbor-ai-fixture-large", b"harbor-ai-fixture-wait"):
+            def ai_reply():
+                try:
+                    # Virtual AI results only; never run commands on the host.
+                    channel.sendall("AI 测试输出\n".encode())
+                    if command == b"harbor-ai-fixture-wait":
+                        return  # Remains open until the client cancels the channel.
+                    if command == b"harbor-ai-fixture-large":
+                        channel.sendall(b"x" * 40000)
+                    if command == b"harbor-ai-fixture-fail":
+                        channel.sendall_stderr(b"fixture error\n")
+                    channel.send_exit_status(7 if command == b"harbor-ai-fixture-fail" else 0)
+                    channel.close()
+                except (EOFError, OSError, paramiko.SSHException):
+                    pass
+            threading.Timer(0.02, ai_reply).start()
+            return True
         if not command.startswith(b"sh -c ") or b"__HARBOR_COMMANDS_BEGIN__" not in command:
             return False
         self.catalog_queries += 1

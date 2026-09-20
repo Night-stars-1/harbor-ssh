@@ -494,6 +494,16 @@ class _WorkspaceState extends State<Workspace> {
                           onReturn: _terminalController.requestFocus,
                         ),
                       if (terminalSession != null)
+                        IconButton(
+                          key: const ValueKey('terminal-ai-mobile'),
+                          onPressed: () =>
+                              _terminalController.selectOption('ai'),
+                          icon: const Icon(
+                            Icons.auto_awesome_outlined,
+                            semanticLabel: 'AI 任务',
+                          ),
+                        ),
+                      if (terminalSession != null)
                         TerminalOptionsButton(
                           session: model.activeSession!,
                           controller: _terminalController,
@@ -609,6 +619,23 @@ class _WorkspaceState extends State<Workspace> {
                                               model.activeSession == null,
                                           child: TerminalWorkspace(
                                             sessions: model.sessions,
+                                            aiSettings: () => model.aiSettings,
+                                            onAiSettings: () async {
+                                              if (widget.onOpenSettings !=
+                                                  null) {
+                                                try {
+                                                  await widget
+                                                      .onOpenSettings!();
+                                                } catch (_) {
+                                                  if (mounted) {
+                                                    _message('无法打开设置窗口，请重试');
+                                                  }
+                                                }
+                                              } else {
+                                                _settingsNavigation.value = 3;
+                                                model.showSettings();
+                                              }
+                                            },
                                             activeSession: model.activeSession,
                                             hosts: model.hosts,
                                             desktop: wide,

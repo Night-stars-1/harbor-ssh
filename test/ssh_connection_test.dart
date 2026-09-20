@@ -5,6 +5,7 @@ import 'dart:typed_data';
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:harbor_ssh/data/ssh_connection.dart';
+import 'package:harbor_ssh/data/terminal_ai.dart';
 import 'package:harbor_ssh/domain/host.dart';
 import 'package:harbor_ssh/domain/remote_file.dart';
 import 'package:harbor_ssh/data/file_copy.dart';
@@ -97,6 +98,49 @@ void main() {
           connection.status,
           ConnectionStatus.connected,
           reason: connection.error,
+        );
+      });
+      test('AI 独立执行通道返回输出与退出码，取消不关闭交互终端', () async {
+        final connection = SshConnection(id: 'ai-exec', host: host());
+        addTearDown(connection.dispose);
+        await connection.connect(
+          const Credentials(password: 'fixture-password'),
+          memoryRepository(),
+          (_, _) async => true,
+        );
+        expect(connection.status, ConnectionStatus.connected);
+        await eventually(
+          () => connection.terminal.buffer.getText().contains('测试 connected'),
+        );
+        final before = connection.terminal.buffer.getText();
+        final executor = connection.createAiExecutor();
+        final chunks = StringBuffer();
+        final result = await executor.execute(
+          'harbor-ai-fixture-success',
+          chunks.write,
+        );
+        expect(result.exitCode, 0);
+        expect(result.output, contains('AI 测试输出'));
+        expect(chunks.toString(), result.output);
+        final failed = await executor.execute('harbor-ai-fixture-fail', (_) {});
+        expect(failed.exitCode, 7);
+        expect(failed.output, contains('fixture error'));
+        final large = await executor.execute('harbor-ai-fixture-large', (_) {});
+        expect(large.truncated, isTrue);
+        expect(large.output.length, 16000);
+        final started = Completer<void>();
+        final pending = executor.execute('harbor-ai-fixture-wait', (_) {
+          if (!started.isCompleted) started.complete();
+        });
+        final stopped = expectLater(pending, throwsA(isA<AiFailure>()));
+        await started.future.timeout(const Duration(seconds: 5));
+        executor.cancel();
+        await stopped;
+        expect(connection.status, ConnectionStatus.connected);
+        expect(connection.terminal.buffer.getText(), before);
+        connection.send('after-ai\r');
+        await eventually(
+          () => connection.terminal.buffer.getText().contains('ECHO=after-ai'),
         );
       });
       test('SFTP 读取远端目录与目录软链接，不污染交互终端', () async {

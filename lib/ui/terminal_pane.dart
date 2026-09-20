@@ -5,6 +5,9 @@ import 'package:xterm/xterm.dart';
 
 import '../data/ssh_connection.dart';
 import '../data/web_link.dart';
+import '../data/terminal_ai.dart';
+import 'ai_task_controller.dart';
+import 'terminal_ai_panel.dart';
 import 'terminal_links.dart';
 import 'terminal_completion.dart';
 import 'terminal_theme.dart';
@@ -25,6 +28,8 @@ class TerminalPane extends StatefulWidget {
     this.autofocus = true,
     this.onFocused,
     this.maxErrorHeight = 180,
+    this.aiSettings,
+    this.onAiSettings,
   });
   final SshConnection session;
   final VoidCallback onReconnect;
@@ -38,11 +43,41 @@ class TerminalPane extends StatefulWidget {
   final bool autofocus;
   final VoidCallback? onFocused;
   final double maxErrorHeight;
+  final AiSettings Function()? aiSettings;
+  final VoidCallback? onAiSettings;
   @override
   State<TerminalPane> createState() => _TerminalPaneState();
 }
 
 class _TerminalPaneState extends State<TerminalPane> {
+  AiTaskController? _ai;
+  bool _aiOpen = false;
+
+  Future<void> _openAi() async {
+    if (_aiOpen || widget.aiSettings == null) return;
+    _completion?.dismiss();
+    _aiOpen = true;
+    final task = _ai ??= AiTaskController(
+      settings: () => widget.aiSettings!(),
+      executorFactory: () => widget.session.createAiExecutor(),
+      connected: () => widget.session.status == ConnectionStatus.connected,
+    );
+    try {
+      await showDialog<void>(
+        context: context,
+        builder: (_) => TerminalAiPanel(
+          task: task,
+          hostName: widget.session.host.name,
+          onSettings: widget.onAiSettings,
+        ),
+      );
+    } finally {
+      task.stop();
+      _aiOpen = false;
+      if (mounted) _focus.requestFocus();
+    }
+  }
+
   final _controller = TerminalController();
   final _focus = FocusNode();
   final _terminalKey = GlobalKey<TerminalViewState>();
@@ -149,6 +184,8 @@ class _TerminalPaneState extends State<TerminalPane> {
   }
 
   void _listenForLinkHover() {
+    widget.session.removeListener(_connectionChanged);
+    widget.session.addListener(_connectionChanged);
     _bindCompletion();
     HardwareKeyboard.instance.removeHandler(_handleHoverKey);
     HardwareKeyboard.instance.addHandler(_handleHoverKey);
@@ -156,6 +193,12 @@ class _TerminalPaneState extends State<TerminalPane> {
     _scrollController.addListener(_scheduleHoverRefresh);
     widget.session.terminal.removeListener(_scheduleHoverRefresh);
     widget.session.terminal.addListener(_scheduleHoverRefresh);
+  }
+
+  void _connectionChanged() {
+    if (widget.session.status != ConnectionStatus.connected) {
+      _ai?.stop(message: 'SSH 已断开，AI 任务已停止');
+    }
   }
 
   @override
@@ -179,6 +222,10 @@ class _TerminalPaneState extends State<TerminalPane> {
     }
     widget.controller?._state = this;
     if (oldWidget.session != widget.session) {
+      oldWidget.session.removeListener(_connectionChanged);
+      widget.session.addListener(_connectionChanged);
+      _ai?.dispose();
+      _ai = null;
       _completion?.dispose();
       _completion = null;
       _bindCompletion();
@@ -208,6 +255,8 @@ class _TerminalPaneState extends State<TerminalPane> {
 
   @override
   void dispose() {
+    widget.session.removeListener(_connectionChanged);
+    _ai?.dispose();
     _focus.removeListener(_completionChanged);
     _scrollController.removeListener(_queueCompletionGeometry);
     _completion?.dispose();
@@ -245,6 +294,7 @@ class _TerminalPaneState extends State<TerminalPane> {
       setState(() => _fontSize = (_fontSize - 1).clamp(10, 24));
     }
     if (value == 'copy') _copy();
+    if (value == 'ai') _openAi();
     if (value == 'paste') _paste();
     if (value == 'disconnect') widget.session.close();
     if (value == 'close') widget.onClose?.call();
@@ -395,6 +445,16 @@ class _TerminalPaneState extends State<TerminalPane> {
                         ),
                   ),
                   ...widget.headerActions,
+                  if (widget.aiSettings != null)
+                    IconButton(
+                      key: const ValueKey('terminal-ai'),
+                      onPressed: _openAi,
+                      icon: const Icon(
+                        Icons.auto_awesome_outlined,
+                        size: 20,
+                        semanticLabel: 'AI 任务',
+                      ),
+                    ),
                   FileBrowserButton(
                     session: session,
                     onOpen: widget.onFiles,

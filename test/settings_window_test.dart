@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:harbor_ssh/data/webdav_sync.dart';
+import 'package:harbor_ssh/data/terminal_ai.dart';
 import 'package:harbor_ssh/domain/sync_snapshot.dart';
 import 'package:harbor_ssh/ui/app.dart';
 import 'package:harbor_ssh/ui/settings_window_bridge.dart';
@@ -59,6 +60,14 @@ void main() {
     });
     await remote.initialize();
     expect(remote.settings, isNull);
+    const ai = AiSettings(
+      baseUrl: 'https://ai.example.com/v1',
+      apiKey: 'test-key',
+      model: 'model',
+    );
+    await remote.saveAiSettings(ai);
+    expect(model.aiSettings.toJson(), ai.toJson());
+    expect(remote.aiSettings.toJson(), ai.toJson());
     const settings = WebDavSettings(
       url: 'https://dav.example.com/HarborSSH/',
       username: 'user',

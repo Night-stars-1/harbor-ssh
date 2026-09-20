@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:flutter/services.dart';
 
 import '../data/webdav_sync.dart';
+import '../data/terminal_ai.dart';
 import '../domain/sync_snapshot.dart';
 import '../domain/appearance.dart';
 import 'sync_settings_controller.dart';
@@ -28,6 +29,7 @@ class SettingsWindowHost {
     'lastSync': controller.lastSync?.toIso8601String(),
     'appearance': controller.appearance.toJson(),
     'defaultLocalPath': controller.defaultLocalPath,
+    'aiSettings': controller.aiSettings.toJson(),
   };
 
   void _changed() {
@@ -51,6 +53,10 @@ class SettingsWindowHost {
         case 'saveAppearance':
           await controller.saveAppearance(
             AppearancePreferences.fromJson(call.arguments as Map),
+          );
+        case 'saveAiSettings':
+          await controller.saveAiSettings(
+            AiSettings.fromJson(call.arguments as Map),
           );
         case 'saveLocalPath':
           await controller.saveDefaultLocalPath(call.arguments as String);
@@ -87,6 +93,8 @@ class SettingsWindowHost {
       throw PlatformException(code: 'conflict', details: error.names);
     } on SyncFailure catch (error) {
       throw PlatformException(code: 'sync', message: error.message);
+    } on AiFailure catch (error) {
+      throw PlatformException(code: 'ai', message: error.message);
     } catch (_) {
       throw PlatformException(code: 'settings', message: '操作未完成，请检查设置后重试');
     }
@@ -102,6 +110,12 @@ class SettingsWindowHost {
 class RemoteSyncSettingsController extends SyncSettingsController {
   Map<Object?, Object?> _state = {};
   bool _disposed = false;
+  @override
+  AiSettings get aiSettings =>
+      AiSettings.fromJson(_state['aiSettings'] as Map? ?? {});
+  @override
+  Future<void> saveAiSettings(AiSettings settings) =>
+      _request('saveAiSettings', settings.toJson());
   @override
   AppearancePreferences get appearance =>
       AppearancePreferences.fromJson(_state['appearance'] as Map? ?? {});

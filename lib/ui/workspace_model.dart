@@ -5,6 +5,7 @@ import 'dart:io';
 import 'package:flutter/foundation.dart';
 
 import '../data/host_repository.dart';
+import '../data/terminal_ai.dart';
 import '../data/local_files.dart';
 import '../data/ssh_connection.dart';
 import '../data/sync_storage.dart';
@@ -17,6 +18,33 @@ import 'file_workspace_model.dart';
 class WorkspaceModel extends ChangeNotifier {
   WorkspaceModel(this.repository);
   final HostRepository repository;
+  AiSettings aiSettings = const AiSettings();
+  static const _aiKey = 'harbor.ai.v1';
+  Future<void> _aiWrite = Future.value();
+
+  Future<void> saveAiSettings(AiSettings settings) {
+    settings.endpoint;
+    final operation = _aiWrite.then((_) async {
+      await repository.secrets.write(_aiKey, jsonEncode(settings.toJson()));
+      if (_disposed) return;
+      aiSettings = settings;
+      _notify();
+    });
+    _aiWrite = operation.catchError((Object _) {});
+    return operation;
+  }
+
+  Future<void> _loadAiSettings() async {
+    try {
+      final value = await repository.secrets.read(_aiKey);
+      if (value != null && !_disposed) {
+        aiSettings = AiSettings.fromJson(jsonDecode(value) as Map);
+      }
+    } catch (_) {
+      // A missing or unreadable AI configuration must not block SSH startup.
+    }
+  }
+
   final appearance = ValueNotifier(const AppearancePreferences());
   static const _appearanceKey = 'harbor.appearance.v1';
   Future<void> _appearanceWrite = Future.value();
@@ -121,6 +149,7 @@ class WorkspaceModel extends ChangeNotifier {
     loadError = null;
     _notify();
     await _loadAppearance();
+    await _loadAiSettings();
     try {
       await SyncStorage(repository).recover();
       _hosts = await repository.loadHosts();
