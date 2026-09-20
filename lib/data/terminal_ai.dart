@@ -32,6 +32,18 @@ const aiProviderPresets = [
     AiProtocol.anthropic,
   ),
   AiProviderPreset(
+    'opencode',
+    'OpenCode',
+    'https://opencode.ai/zen/v1',
+    AiProtocol.openai,
+  ),
+  AiProviderPreset(
+    'commandcode',
+    'CommandCode',
+    'https://api.commandcode.ai/provider/v1',
+    AiProtocol.openai,
+  ),
+  AiProviderPreset(
     'deepseek',
     'DeepSeek',
     'https://api.deepseek.com/v1',

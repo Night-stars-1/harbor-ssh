@@ -21,7 +21,9 @@
 
 ## 终端 AI
 
-在「设置 → AI」选择服务商，预设包括 OpenAI、Anthropic、DeepSeek、通义千问、Moonshot、硅基流动及 Ollama，会自动填入 API 地址和接口类型。填写 API Key 与支持工具调用的模型名称后保存，也可选择「自定义」接入代理服务。切换厂商不会把原厂商的 Key 自动带到新厂商。
+在「设置 → AI」选择服务商，预设包括 OpenAI、Anthropic、OpenCode、CommandCode、DeepSeek、通义千问、Moonshot、硅基流动及 Ollama，会自动填入 API 地址和接口类型。填写 API Key 与支持工具调用的模型名称后保存，也可选择「自定义」接入代理服务。切换厂商不会把原厂商的 Key 自动带到新厂商。
+
+OpenCode 使用 [Zen API](https://opencode.ai/docs/zen/)（`https://opencode.ai/zen/v1`），CommandCode 使用 [Provider API](https://commandcode.ai/docs/provider)（`https://api.commandcode.ai/provider/v1`）。均可通过模型旁的「获取」读取模型列表，默认使用 OpenAI Chat Completions；使用 Claude 时将接口类型切换为「Anthropic 兼容」。模型须支持所选接口及工具调用：OpenCode 的 GPT 等仅提供 Responses 接口的模型目前不能使用，模型列表中出现不代表应用已支持该模型的接口。
 
 接口类型支持 **OpenAI 兼容（Chat Completions）** 和 **Anthropic 兼容（Messages）**，均支持自主任务所需的工具调用与执行结果回传。地址可填写服务根地址、含 `/v1` 的地址，或完整 `/chat/completions`、`/messages` 地址。本机 Ollama 默认使用 `http://localhost:11434/v1`，Key 可留空。配置保存在当前设备的系统安全存储，不参与云同步；已有配置继续使用 OpenAI 兼容格式。
 
