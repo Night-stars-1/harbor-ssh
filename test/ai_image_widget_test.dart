@@ -48,7 +48,8 @@ void main() {
       await _pick(tester);
       await tester.ensureVisible(find.byKey(const ValueKey('ai-send')));
       await tester.tap(find.byKey(const ValueKey('ai-send')));
-      await tester.pumpAndSettle();
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 300));
       expect(
         (client.messages!.last['content'] as List).single['type'],
         'image_url',
@@ -61,6 +62,7 @@ void main() {
             .onPressed,
         isNull,
       );
+      await tester.ensureVisible(find.byKey(const ValueKey('ai-send')));
       await tester.tap(find.byKey(const ValueKey('ai-send')));
       await tester.pumpAndSettle();
       expect(task.running, isFalse);

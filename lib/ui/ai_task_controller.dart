@@ -7,7 +7,14 @@ import '../data/terminal_ai.dart';
 import '../data/ai_image.dart';
 
 class AiTaskEntry {
-  AiTaskEntry(this.text, {this.command = false, this.images});
+  AiTaskEntry(
+    this.text, {
+    this.command = false,
+    this.images,
+    this.user,
+    this.notice,
+  });
+  final bool? user, notice;
   final List<AiImage>? images;
   final String text;
   final bool command;
@@ -15,6 +22,8 @@ class AiTaskEntry {
   String? reason;
   int? exitCode;
   bool finished = false;
+  bool? started;
+  String? interruption;
 }
 
 /// A conservative extra check, in addition to the model's explicit approval flag.
@@ -46,6 +55,48 @@ class AiTaskController extends ChangeNotifier {
   AiCommandExecutor? _executor;
   bool _disposed = false;
   int _revision = 0;
+  final _history = <Map<String, dynamic>>[];
+  final _unresolved = <String, AiTaskEntry?>{};
+  String? _contextModel;
+  DateTime? turnStartedAt;
+
+  void newConversation() {
+    if (running || _disposed) return;
+    _revision++;
+    _history.clear();
+    _unresolved.clear();
+    entries.clear();
+    failure = null;
+    status = '';
+    turnStartedAt = null;
+    _notify();
+  }
+
+  // Complete every tool-call pair before allowing another user message. A
+  // cancelled command can have side effects, so never invent a success result.
+  void _interruptTurn(String reason) {
+    for (final item in _unresolved.entries) {
+      final entry = item.value;
+      final started = entry?.started == true;
+      if (entry != null) {
+        entry.interruption = started ? '已中止 · 执行结果待确认' : '未执行';
+      }
+      _history.add({
+        'role': 'tool',
+        'tool_call_id': item.key,
+        'content': jsonEncode({
+          'status': started ? 'interrupted' : 'not_executed',
+          'output': entry?.output ?? '',
+          'exitCode': null,
+          'error': reason,
+          if (started) 'note': '已请求终止，但远程进程可能仍在运行；继续前先检查实际状态',
+        }),
+      });
+    }
+    _unresolved.clear();
+    _history.add({'role': 'assistant', 'content': '[应用状态] $reason'});
+    entries.add(AiTaskEntry(reason, notice: true));
+  }
 
   void _notify() {
     if (!_disposed) notifyListeners();
@@ -71,7 +122,8 @@ class AiTaskController extends ChangeNotifier {
     if (_approval?.isCompleted == false) _approval!.complete(false);
     pending = null;
     running = false;
-    status = message ?? '任务已停止；已请求终止正在运行的命令';
+    status = message ?? '已停止；如有正在运行的命令，已请求终止';
+    _interruptTurn(status);
     _notify();
   }
 
@@ -94,47 +146,60 @@ class AiTaskController extends ChangeNotifier {
     final revision = ++_revision;
     final client = _client = clientFactory();
     final executor = _executor = executorFactory();
-    entries.clear();
+    final contextModel =
+        '${config.endpoint}|${config.protocol}|${config.model}';
+    if (_contextModel != null && _contextModel != contextModel) {
+      // Provider-specific signed thinking cannot be replayed to another model.
+      for (final message in _history) {
+        message.remove('_anthropicContent');
+      }
+    }
+    _contextModel = contextModel;
+    if (_history.isEmpty) {
+      _history.add({'role': 'system', 'content': aiSystemPrompt});
+    }
     final attachments = List<AiImage>.unmodifiable(images);
-    entries.add(AiTaskEntry(goal.trim(), images: attachments));
+    entries.add(AiTaskEntry(goal.trim(), images: attachments, user: true));
     running = true;
-    final messages = <Map<String, dynamic>>[
-      {'role': 'system', 'content': aiSystemPrompt},
-      {
-        'role': 'user',
-        'content': attachments.isEmpty
-            ? goal.trim()
-            : [
-                for (final image in attachments) image.toContent(),
-                if (goal.trim().isNotEmpty)
-                  {'type': 'text', 'text': goal.trim()},
-              ],
-      },
-    ];
+    turnStartedAt = DateTime.now();
+    final messages = _history;
+    messages.add({
+      'role': 'user',
+      'content': attachments.isEmpty
+          ? goal.trim()
+          : [
+              for (final image in attachments) image.toContent(),
+              if (goal.trim().isNotEmpty) {'type': 'text', 'text': goal.trim()},
+            ],
+    });
     var commands = 0;
     try {
       while (_current(revision)) {
         if (!connected()) throw const AiFailure('SSH 已断开，任务已停止');
-        status = 'AI 正在分析';
+        status = commands == 0 ? '思考中' : '整理结果';
         _notify();
         final reply = await client.complete(config, messages);
         if (!_current(revision)) return;
-        messages.add(reply.message);
+        messages.add(Map<String, dynamic>.from(reply.message));
         if (reply.text.trim().isNotEmpty) {
           entries.add(AiTaskEntry(reply.text.trim()));
         }
         if (reply.calls.isEmpty) {
-          status = '任务已结束';
+          status = '已完成';
           return;
+        }
+        for (final call in reply.calls) {
+          _unresolved[call.id] = null;
         }
         for (final call in reply.calls) {
           if (!_current(revision)) return;
           if (++commands > 24) {
-            throw const AiFailure('已达到本次任务 24 条命令的上限，请查看结果后发起下一步任务');
+            throw const AiFailure('本轮已执行 24 条命令，可以继续发送消息');
           }
           final entry = AiTaskEntry(call.command, command: true)
             ..reason = call.reason;
           entries.add(entry);
+          _unresolved[call.id] = entry;
           if (aiCommandNeedsApproval(call)) {
             pending = call;
             status = '等待确认';
@@ -144,7 +209,8 @@ class AiTaskController extends ChangeNotifier {
           }
           if (!_current(revision)) return;
           if (!connected()) throw const AiFailure('SSH 已断开，未执行命令');
-          status = '正在执行第 $commands 条命令';
+          status = '执行命令';
+          entry.started = true;
           _notify();
           final result = await executor.execute(call.command, (output) {
             if (!_current(revision)) return;
@@ -161,13 +227,15 @@ class AiTaskController extends ChangeNotifier {
             'tool_call_id': call.id,
             'content': jsonEncode(result.toJson()),
           });
+          _unresolved.remove(call.id);
           _notify();
         }
       }
     } catch (error) {
       if (_current(revision)) {
-        failure = error is AiFailure ? error.message : 'AI 任务中断，请检查配置后重试';
-        status = '任务中断';
+        failure = error is AiFailure ? error.message : '回复中断，请检查配置后重试';
+        status = '回复中断';
+        _interruptTurn(failure!);
       }
     } finally {
       client.cancel();

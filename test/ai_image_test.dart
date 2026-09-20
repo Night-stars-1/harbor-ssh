@@ -163,6 +163,15 @@ void main() {
           expect(executor.calls, 1);
           expect(task.entries.first.images, hasLength(2));
           expect(task.entries.last.text, '图片已分析');
+          await task.start('接着解释上一张截图');
+          expect(task.failure, isNull);
+          expect(requests, hasLength(3));
+          final history = requests.last['messages'] as List;
+          expect(jsonEncode(history), contains('server output'));
+          expect(jsonEncode(history), contains('图片已分析'));
+          expect(jsonEncode(history.last), contains('接着解释上一张截图'));
+          expect(task.entries.where((e) => e.user == true), hasLength(2));
+          expect(task.entries.first.images, hasLength(2));
           task.dispose();
         },
       );

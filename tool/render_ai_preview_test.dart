@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:io';
 import 'dart:ui' as ui;
 
@@ -77,9 +78,10 @@ void main() {
           settings: () => model.aiSettings,
           executorFactory: _Executor.new,
           connected: () => true,
+          clientFactory: _WaitingClient.new,
         );
         task.entries.addAll([
-          AiTaskEntry('检查磁盘空间，找出占用最大的目录', images: [sample!]),
+          AiTaskEntry('检查磁盘空间，找出占用最大的目录', images: [sample!], user: true),
           AiTaskEntry('df -h', command: true)
             ..reason = '查看文件系统使用情况'
             ..output = 'Filesystem   Size  Used  Avail  Use%\n/dev/vda1     40G   18G    20G   48%'
@@ -161,6 +163,35 @@ void main() {
             ).writeAsBytesSync(bytes!.buffer.asUint8List());
             image.dispose();
           });
+          if (!settings) {
+            await tester.tap(find.byKey(const ValueKey('ai-remove-image-0')));
+            await tester.enterText(
+              find.byKey(const ValueKey('ai-task-input')),
+              '再看看哪些目录占用最多',
+            );
+            await tester.pump();
+            await tester.tap(find.byKey(const ValueKey('ai-send')));
+            await tester.pump();
+            final list = tester.widget<ListView>(
+              find.byKey(const ValueKey('ai-transcript')),
+            );
+            list.controller!.jumpTo(list.controller!.position.maxScrollExtent);
+            await tester.pump(const Duration(milliseconds: 650));
+            await tester.runAsync(() async {
+              final boundary =
+                  key.currentContext!.findRenderObject()!
+                      as RenderRepaintBoundary;
+              final image = await boundary.toImage();
+              final bytes = await image.toByteData(
+                format: ui.ImageByteFormat.png,
+              );
+              File(
+                'artifacts/ai-thinking-${width.toInt()}-${brightness.name}.png',
+              ).writeAsBytesSync(bytes!.buffer.asUint8List());
+              image.dispose();
+            });
+            task.stop();
+          }
           await tester.pumpWidget(const SizedBox.shrink());
         }
         task.dispose();
@@ -191,4 +222,19 @@ class _Images implements AiImageInput {
   Future<List<AiImageSource>> pick() async => [
     AiImageSource(image.name, () => Stream.value(image.bytes)),
   ];
+}
+
+class _WaitingClient extends TerminalAiClient {
+  final _reply = Completer<AiReply>();
+  @override
+  Future<AiReply> complete(
+    AiSettings settings,
+    List<Map<String, dynamic>> messages,
+  ) => _reply.future;
+  @override
+  void cancel() {
+    if (!_reply.isCompleted) {
+      _reply.complete(const AiReply({'role': 'assistant', 'content': ''}, []));
+    }
+  }
 }

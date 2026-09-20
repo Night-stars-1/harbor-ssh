@@ -81,6 +81,139 @@ class _Executor implements AiCommandExecutor {
 }
 
 void main() {
+  test('连续对话保留工具结果，新对话清空上下文且会话之间隔离', () async {
+    final client = _Client()
+      ..replies.addAll([_call('pwd'), _done, _done, _done]);
+    final task = AiTaskController(
+      settings: () => _settings,
+      executorFactory: _Executor.new,
+      connected: () => true,
+      clientFactory: () => client,
+    );
+    await task.start('检查目录');
+    await task.start('继续解释');
+    expect(client.requests.last.map((m) => m['role']), [
+      'system',
+      'user',
+      'assistant',
+      'tool',
+      'assistant',
+      'user',
+    ]);
+    expect(jsonEncode(client.requests.last), contains('server output'));
+    expect(task.entries.where((e) => e.user == true).map((e) => e.text), [
+      '检查目录',
+      '继续解释',
+    ]);
+    task.newConversation();
+    expect(task.entries, isEmpty);
+    await task.start('新的问题');
+    expect(client.requests.last, hasLength(2));
+    final other = AiTaskController(
+      settings: () => _settings,
+      executorFactory: _Executor.new,
+      connected: () => true,
+      clientFactory: () => client,
+    );
+    client.replies.add(_done);
+    await other.start('另一个服务器');
+    expect(client.requests.last, hasLength(2));
+    other.dispose();
+    task.dispose();
+  });
+
+  test('取消多工具审批后续聊，为所有未执行命令补齐结果', () async {
+    final first = _call('rm /tmp/a', id: 'a');
+    final second = _call('pwd', id: 'b');
+    final client = _Client()
+      ..replies.addAll([
+        AiReply(
+          {
+            'role': 'assistant',
+            'content': null,
+            'tool_calls': [
+              ...first.message['tool_calls'] as List,
+              ...second.message['tool_calls'] as List,
+            ],
+          },
+          [...first.calls, ...second.calls],
+        ),
+        _done,
+      ]);
+    final executor = _Executor();
+    final task = AiTaskController(
+      settings: () => _settings,
+      executorFactory: () => executor,
+      connected: () => true,
+      clientFactory: () => client,
+    );
+    final initial = task.start('清理');
+    await Future<void>.delayed(Duration.zero);
+    task.approve(false);
+    await initial;
+    await task.start('别删了，解释一下');
+    final results = client.requests.last
+        .where((m) => m['role'] == 'tool')
+        .toList();
+    expect(results.map((m) => m['tool_call_id']), ['a', 'b']);
+    for (final result in results) {
+      expect(jsonDecode(result['content'] as String)['status'], 'not_executed');
+    }
+    expect(executor.commands, isEmpty);
+    expect(task.entries.where((e) => e.command).single.interruption, '未执行');
+    task.dispose();
+  });
+
+  test('执行中停止后立即续聊，保留部分输出并忽略旧轮迟到结果', () async {
+    final client = _Client()..replies.add(_call('pwd'));
+    final executor = _Executor()..pending = Completer<AiCommandResult>();
+    final next = _Client()..replies.add(_done);
+    var clients = 0;
+    final task = AiTaskController(
+      settings: () => _settings,
+      executorFactory: () => executor,
+      connected: () => true,
+      clientFactory: () => clients++ == 0 ? client : next,
+    );
+    final initial = task.start('检查');
+    await Future<void>.delayed(Duration.zero);
+    task.stop();
+    await task.start('刚才运行到哪了');
+    final result = jsonDecode(
+      next.requests.single.singleWhere((m) => m['role'] == 'tool')['content']
+          as String,
+    );
+    expect(result['status'], 'interrupted');
+    expect(result['output'], 'server output');
+    expect(result['exitCode'], isNull);
+    executor.pending!.complete(const AiCommandResult('迟到结果', 0));
+    await initial;
+    expect(task.entries.where((e) => e.command).single.output, 'server output');
+    expect(task.entries.last.text, '检查完成');
+    task.dispose();
+  });
+
+  test('模型请求失败后可续聊，保留错误发生前的对话', () async {
+    final client = _Client()..pending = Completer<AiReply>();
+    final task = AiTaskController(
+      settings: () => _settings,
+      executorFactory: _Executor.new,
+      connected: () => true,
+      clientFactory: () => client,
+    );
+    final first = task.start('第一问');
+    client.pending!.completeError(const AiFailure('网络中断'));
+    await first;
+    client.pending = null;
+    client.replies.add(_done);
+    await task.start('重试刚才的问题');
+    expect(task.failure, isNull);
+    expect(jsonEncode(client.requests.last), contains('第一问'));
+    expect(jsonEncode(client.requests.last), contains('网络中断'));
+    expect(task.entries.where((e) => e.notice == true).single.text, '网络中断');
+    task.dispose();
+  });
+
   test('旧配置保留 OpenAI 格式，新协议与厂商可持久化，地址支持完整端点', () {
     final legacy = AiSettings.fromJson({
       'baseUrl': 'https://proxy.example/v1',

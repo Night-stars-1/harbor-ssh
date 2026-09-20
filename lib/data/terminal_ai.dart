@@ -202,7 +202,10 @@ Map<String, dynamic> _requestBody(
     return {
       'model': settings.model.trim(),
       'stream': false,
-      'messages': messages,
+      'messages': [
+        for (final message in messages)
+          Map<String, dynamic>.from(message)..remove('_anthropicContent'),
+      ],
       'tools': [
         {
           'type': 'function',

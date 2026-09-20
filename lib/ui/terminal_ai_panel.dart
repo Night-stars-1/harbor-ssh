@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
@@ -222,6 +223,11 @@ class _TerminalAiPanelState extends State<TerminalAiPanel> {
     if (widget.task.running) {
       _input.clear();
       setState(() => _images.clear());
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted && _scroll.hasClients) {
+          _scroll.jumpTo(_scroll.position.maxScrollExtent);
+        }
+      });
     }
   }
 
@@ -360,15 +366,41 @@ class _TerminalAiPanelState extends State<TerminalAiPanel> {
   Widget _entry(AiTaskEntry entry) {
     final theme = Theme.of(context);
     final colors = theme.colorScheme;
+    if (entry.notice == true) {
+      return Padding(
+        padding: const EdgeInsets.only(top: 4, bottom: 16),
+        child: Row(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Icon(
+              Icons.info_outline_rounded,
+              size: 16,
+              color: colors.onSurfaceVariant,
+            ),
+            const SizedBox(width: 8),
+            Expanded(
+              child: Text(
+                entry.text,
+                style: theme.textTheme.bodySmall?.copyWith(
+                  color: colors.onSurfaceVariant,
+                ),
+              ),
+            ),
+          ],
+        ),
+      );
+    }
     return Padding(
-      padding: const EdgeInsets.only(bottom: 12),
+      padding: EdgeInsets.only(bottom: 16, left: entry.user == true ? 20 : 0),
       child: Material(
         color: entry.command
-            ? colors.surfaceContainerHighest
-            : colors.surfaceContainerLow,
+            ? colors.surfaceContainerLow
+            : entry.user == true
+            ? colors.secondaryContainer
+            : Colors.transparent,
         shape: HarborShapes.superellipse(BorderRadius.circular(20)),
         child: Padding(
-          padding: const EdgeInsets.all(16),
+          padding: EdgeInsets.all(entry.command || entry.user == true ? 12 : 4),
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
@@ -419,12 +451,19 @@ class _TerminalAiPanelState extends State<TerminalAiPanel> {
                   ),
                 ),
               ],
-              if (entry.finished) ...[
+              if (entry.interruption != null || entry.finished) ...[
                 const SizedBox(height: 8),
                 Text(
-                  entry.exitCode == null ? '未收到退出码' : '退出码 ${entry.exitCode}',
+                  entry.interruption ??
+                      (entry.exitCode == null
+                          ? '未收到退出码'
+                          : '退出码 ${entry.exitCode}'),
                   style: theme.textTheme.labelSmall?.copyWith(
-                    color: entry.exitCode == 0 ? colors.primary : colors.error,
+                    color: entry.interruption != null
+                        ? colors.onSurfaceVariant
+                        : entry.exitCode == 0
+                        ? colors.primary
+                        : colors.error,
                   ),
                 ),
               ],
@@ -474,6 +513,8 @@ class _TerminalAiPanelState extends State<TerminalAiPanel> {
                           children: [
                             Text(
                               'AI 助手',
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
                               style: Theme.of(context).textTheme.titleLarge,
                             ),
                             Text(
@@ -486,6 +527,15 @@ class _TerminalAiPanelState extends State<TerminalAiPanel> {
                           ],
                         ),
                       ),
+                      if (task.entries.isNotEmpty)
+                        IconButton(
+                          key: const ValueKey('ai-new-conversation'),
+                          onPressed: task.running ? null : task.newConversation,
+                          icon: const Icon(
+                            Icons.edit_square,
+                            semanticLabel: '新对话',
+                          ),
+                        ),
                       IconButton(
                         onPressed: widget.onClose,
                         icon: const Icon(
@@ -545,16 +595,32 @@ class _TerminalAiPanelState extends State<TerminalAiPanel> {
                                           ),
                                         )
                                       : ListView.builder(
+                                          key: const ValueKey('ai-transcript'),
                                           controller: _scroll,
-                                          itemCount: task.entries.length,
+                                          itemCount:
+                                              task.entries.length +
+                                              (task.running ? 1 : 0),
                                           itemBuilder: (_, index) =>
-                                              _entry(task.entries[index]),
+                                              index < task.entries.length
+                                              ? _entry(task.entries[index])
+                                              : _AiActivity(
+                                                  key: const ValueKey(
+                                                    'ai-activity',
+                                                  ),
+                                                  label: task.status,
+                                                  waiting: task.pending != null,
+                                                  startedAt: task.turnStartedAt,
+                                                ),
                                         ),
                                 ),
-                                if (task.running || task.failure != null) ...[
+                                if (task.failure != null &&
+                                    (task.entries.isEmpty ||
+                                        task.entries.last.notice != true ||
+                                        task.entries.last.text !=
+                                            task.failure)) ...[
                                   const SizedBox(height: 8),
                                   Text(
-                                    task.failure ?? task.status,
+                                    task.failure!,
                                     style: Theme.of(context).textTheme.bodySmall
                                         ?.copyWith(
                                           color: task.failure == null
@@ -621,6 +687,132 @@ class _TerminalAiPanelState extends State<TerminalAiPanel> {
             ),
           );
         },
+      ),
+    );
+  }
+}
+
+class _AiActivity extends StatefulWidget {
+  const _AiActivity({
+    super.key,
+    required this.label,
+    required this.waiting,
+    this.startedAt,
+  });
+  final String label;
+  final bool waiting;
+  final DateTime? startedAt;
+
+  @override
+  State<_AiActivity> createState() => _AiActivityState();
+}
+
+class _AiActivityState extends State<_AiActivity>
+    with SingleTickerProviderStateMixin {
+  late final _pulse = AnimationController(
+    vsync: this,
+    duration: const Duration(milliseconds: 1000),
+  );
+  Timer? _timer;
+
+  @override
+  void initState() {
+    super.initState();
+    _timer = Timer.periodic(const Duration(seconds: 1), (_) {
+      if (mounted && !widget.waiting) setState(() {});
+    });
+  }
+
+  void _updateMotion() {
+    if (widget.waiting || MediaQuery.disableAnimationsOf(context)) {
+      _pulse.stop();
+      _pulse.value = 1;
+    } else if (!_pulse.isAnimating) {
+      _pulse.repeat(reverse: true);
+    }
+  }
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    _updateMotion();
+  }
+
+  @override
+  void didUpdateWidget(covariant _AiActivity oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    _updateMotion();
+  }
+
+  @override
+  void dispose() {
+    _timer?.cancel();
+    _pulse.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final colors = theme.colorScheme;
+    final seconds = widget.startedAt == null
+        ? 0
+        : DateTime.now()
+              .difference(widget.startedAt!)
+              .inSeconds
+              .clamp(0, 86400);
+    final elapsed = seconds < 60
+        ? '$seconds 秒'
+        : '${seconds ~/ 60} 分 ${seconds % 60} 秒';
+    return Semantics(
+      liveRegion: true,
+      label: widget.label,
+      child: ExcludeSemantics(
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 10),
+          child: Row(
+            children: [
+              SizedBox.square(
+                dimension: 18,
+                child: widget.waiting
+                    ? Icon(
+                        Icons.pause_circle_outline_rounded,
+                        size: 18,
+                        color: colors.primary,
+                      )
+                    : FadeTransition(
+                        opacity: Tween<double>(
+                          begin: .35,
+                          end: 1,
+                        ).animate(_pulse),
+                        child: Icon(
+                          Icons.auto_awesome_rounded,
+                          size: 16,
+                          color: colors.primary,
+                        ),
+                      ),
+              ),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Text(
+                  widget.label,
+                  style: theme.textTheme.bodySmall?.copyWith(
+                    color: colors.onSurfaceVariant,
+                  ),
+                ),
+              ),
+              if (!widget.waiting && widget.startedAt != null) ...[
+                const SizedBox(width: 8),
+                Text(
+                  elapsed,
+                  style: theme.textTheme.labelSmall?.copyWith(
+                    color: colors.onSurfaceVariant,
+                  ),
+                ),
+              ],
+            ],
+          ),
+        ),
       ),
     );
   }
