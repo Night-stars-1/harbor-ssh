@@ -21,7 +21,9 @@
 
 ## 终端 AI
 
-在「设置 → AI」填写支持工具调用的 OpenAI 兼容 API 地址、API Key 与模型名称。地址可填服务根地址、含 `/v1` 的地址或完整 `/chat/completions` 地址。本机 Ollama 可使用 `http://localhost:11434/v1`，Key 留空并选择支持工具调用的模型。配置保存在当前设备的系统安全存储，不参与云同步。
+在「设置 → AI」选择服务商，预设包括 OpenAI、Anthropic、DeepSeek、通义千问、Moonshot、硅基流动及 Ollama，会自动填入 API 地址和接口类型。填写 API Key 与支持工具调用的模型名称后保存，也可选择「自定义」接入代理服务。切换厂商不会把原厂商的 Key 自动带到新厂商。
+
+接口类型支持 **OpenAI 兼容（Chat Completions）** 和 **Anthropic 兼容（Messages）**，均支持自主任务所需的工具调用与执行结果回传。地址可填写服务根地址、含 `/v1` 的地址，或完整 `/chat/completions`、`/messages` 地址。本机 Ollama 默认使用 `http://localhost:11434/v1`，Key 可留空。配置保存在当前设备的系统安全存储，不参与云同步；已有配置继续使用 OpenAI 兼容格式。
 
 连接 SSH 后，点击终端顶部的 AI 图标，输入目标并点击「开始任务」。AI 会通过当前 SSH 连接的独立执行通道处理任务；面板显示命令、实时输出、退出码与总结，原有交互终端仍保留。任务目标、AI 执行的命令及其输出会发给所配置的模型服务；不会自动附带原终端的滚屏记录或 SSH 凭据。
 

@@ -13,6 +13,95 @@ import 'package:harbor_ssh/ui/workspace_model.dart';
 import 'support.dart';
 
 void main() {
+  for (final width in [320.0, 1280.0]) {
+    testWidgets('厂商预设与接口选择保存，切换厂商不混用密钥 $width', (tester) async {
+      tester.view.physicalSize = Size(width, 1000);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+      final model = WorkspaceModel(memoryRepository());
+      await model.initialize();
+      final controller = LocalSyncSettingsController(model);
+      await tester.pumpWidget(
+        MaterialApp(
+          theme: harborTheme(),
+          home: Scaffold(body: AiSettingsPage(controller: controller)),
+        ),
+      );
+      expect(find.textContaining('执行记录与命令输出会发送'), findsNothing);
+      Future<void> select(String field, String option) async {
+        final menu = find.byKey(ValueKey('ai-setting-$field'));
+        await tester.ensureVisible(menu);
+        await tester.tap(menu);
+        await tester.pumpAndSettle();
+        await tester.tap(find.text(option).last);
+        await tester.pumpAndSettle();
+      }
+
+      String value(String field) => tester
+          .widget<TextField>(find.byKey(ValueKey('ai-setting-$field')))
+          .controller!
+          .text;
+      await select('provider', 'Anthropic');
+      expect(value('url'), 'https://api.anthropic.com/v1');
+      expect(
+        tester
+            .widget<DropdownMenu<AiProtocol>>(
+              find.byKey(const ValueKey('ai-setting-protocol')),
+            )
+            .initialSelection,
+        AiProtocol.anthropic,
+      );
+      await tester.ensureVisible(find.byKey(const ValueKey('ai-setting-key')));
+      await tester.enterText(
+        find.byKey(const ValueKey('ai-setting-key')),
+        'anthropic-key',
+      );
+      await tester.ensureVisible(
+        find.byKey(const ValueKey('ai-setting-model')),
+      );
+      await tester.enterText(
+        find.byKey(const ValueKey('ai-setting-model')),
+        'claude-test',
+      );
+      await select('provider', 'OpenAI');
+      expect(value('url'), 'https://api.openai.com/v1');
+      expect(value('key'), isEmpty);
+      expect(value('model'), isEmpty);
+      await select('provider', 'Anthropic');
+      expect(value('key'), 'anthropic-key');
+      expect(value('model'), 'claude-test');
+      await tester.ensureVisible(find.text('保存'));
+      await tester.tap(find.text('保存'));
+      await tester.pumpAndSettle();
+      expect(model.aiSettings.protocol, AiProtocol.anthropic);
+      expect(model.aiSettings.provider, 'anthropic');
+      await tester.pumpWidget(
+        MaterialApp(
+          theme: harborTheme(),
+          home: Scaffold(
+            body: AiSettingsPage(key: UniqueKey(), controller: controller),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+      expect(value('url'), 'https://api.anthropic.com/v1');
+      expect(value('key'), 'anthropic-key');
+      await select('protocol', 'OpenAI 兼容');
+      await select('provider', '自定义');
+      // Custom keeps the current endpoint and protocol for proxies.
+      expect(value('url'), 'https://api.anthropic.com/v1');
+      await tester.ensureVisible(find.text('保存'));
+      await tester.tap(find.text('保存'));
+      await tester.pumpAndSettle();
+      expect(model.aiSettings.provider, 'custom');
+      expect(model.aiSettings.protocol, AiProtocol.openai);
+      expect(tester.takeException(), isNull);
+      await tester.pumpWidget(const SizedBox.shrink());
+      controller.dispose();
+      model.dispose();
+    });
+  }
   for (final width in [390.0, 1280.0]) {
     testWidgets('终端 AI 入口绑定当前会话 $width', (tester) async {
       tester.view.physicalSize = Size(width, 900);

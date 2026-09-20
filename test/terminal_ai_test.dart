@@ -81,6 +81,219 @@ class _Executor implements AiCommandExecutor {
 }
 
 void main() {
+  test('旧配置保留 OpenAI 格式，新协议与厂商可持久化，地址支持完整端点', () {
+    final legacy = AiSettings.fromJson({
+      'baseUrl': 'https://proxy.example/v1',
+      'apiKey': 'legacy-key',
+      'model': 'legacy-model',
+    });
+    expect(legacy.protocol, AiProtocol.openai);
+    expect(legacy.provider, 'custom');
+    expect(legacy.apiKey, 'legacy-key');
+    const liveLegacy = AiSettings(
+      baseUrl: 'https://proxy.example/v1',
+      model: 'm',
+      protocol: null,
+      provider: null,
+    );
+    expect(liveLegacy.toJson()['protocol'], 'openai');
+    expect(liveLegacy.toJson()['provider'], 'custom');
+    expect(liveLegacy.endpoint.path, '/v1/chat/completions');
+    const native = AiSettings(
+      baseUrl: 'https://api.anthropic.com/v1/messages/',
+      model: 'claude',
+      protocol: AiProtocol.anthropic,
+      provider: 'anthropic',
+    );
+    expect(AiSettings.fromJson(native.toJson()).toJson(), native.toJson());
+    expect(native.endpoint.toString(), 'https://api.anthropic.com/v1/messages');
+    expect(
+      const AiSettings(
+        baseUrl: 'https://proxy.example/prefix/v1/chat/completions',
+        model: 'claude',
+        protocol: AiProtocol.anthropic,
+      ).endpoint.path,
+      '/prefix/v1/messages',
+    );
+    for (final preset in aiProviderPresets.where(
+      (value) => value.id != 'custom',
+    )) {
+      final config = AiSettings(
+        baseUrl: preset.baseUrl,
+        protocol: preset.protocol,
+        model: 'model',
+      );
+      expect(
+        config.endpoint.path,
+        endsWith(
+          preset.protocol == AiProtocol.anthropic
+              ? '/messages'
+              : '/chat/completions',
+        ),
+      );
+    }
+  });
+
+  test('Anthropic 完整工具循环：专用鉴权、系统提示、多个结果及原始内容回传', () async {
+    final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+    addTearDown(() => server.close(force: true));
+    final requests = <Map>[];
+    final content = [
+      {
+        'type': 'thinking',
+        'thinking': 'Inspect the environment.',
+        'signature': 'fixture-signature',
+      },
+      {'type': 'text', 'text': '先检查目录和系统。'},
+      for (final (id, command) in [('tool-1', 'pwd'), ('tool-2', 'uname -s')])
+        {
+          'type': 'tool_use',
+          'id': id,
+          'name': 'run_command',
+          'input': {
+            'command': command,
+            'reason': '检查环境',
+            'requires_approval': false,
+          },
+        },
+    ];
+    server.listen((request) async {
+      expect(request.uri.path, '/v1/messages');
+      expect(request.headers.value('x-api-key'), 'anthropic-test-key');
+      expect(request.headers.value('anthropic-version'), '2023-06-01');
+      expect(request.headers.value(HttpHeaders.authorizationHeader), isNull);
+      final body = jsonDecode(await utf8.decoder.bind(request).join()) as Map;
+      requests.add(body);
+      expect(body['max_tokens'], 4096);
+      expect(body['system'], aiSystemPrompt);
+      expect(
+        body['tools'][0]['input_schema']['required'],
+        contains('requires_approval'),
+      );
+      expect(
+        (body['messages'] as List).any(
+          (m) => m['role'] == 'tool' || m['role'] == 'system',
+        ),
+        isFalse,
+      );
+      if (requests.length == 2) {
+        final messages = body['messages'] as List;
+        expect(messages, hasLength(3));
+        expect(messages[1]['content'], content);
+        expect(messages[2]['role'], 'user');
+        final results = messages[2]['content'] as List;
+        expect(results, hasLength(2));
+        expect(results.map((r) => r['tool_use_id']), ['tool-1', 'tool-2']);
+        for (final result in results) {
+          expect(result['type'], 'tool_result');
+          expect(
+            jsonDecode(result['content'] as String)['output'],
+            'server output',
+          );
+        }
+      }
+      request.response.headers.contentType = ContentType.json;
+      request.response.write(
+        jsonEncode({
+          'type': 'message',
+          'role': 'assistant',
+          'stop_reason': requests.length == 1 ? 'tool_use' : 'end_turn',
+          'content': requests.length == 1
+              ? content
+              : [
+                  {'type': 'text', 'text': '环境检查完成。'},
+                ],
+        }),
+      );
+      await request.response.close();
+    });
+    final executor = _Executor();
+    final task = AiTaskController(
+      settings: () => AiSettings(
+        baseUrl: 'http://127.0.0.1:${server.port}/v1',
+        apiKey: 'anthropic-test-key',
+        model: 'test-claude',
+        protocol: AiProtocol.anthropic,
+      ),
+      executorFactory: () => executor,
+      connected: () => true,
+    );
+    await task.start('检查当前环境');
+    expect(task.failure, isNull);
+    expect(requests, hasLength(2));
+    expect(executor.commands, ['pwd', 'uname -s']);
+    expect(task.entries.last.text, '环境检查完成。');
+    task.dispose();
+  });
+
+  test('Anthropic 截断响应、未知工具和服务错误均不执行命令', () async {
+    final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+    addTearDown(() => server.close(force: true));
+    var requestNumber = 0;
+    server.listen((request) async {
+      await request.drain<void>();
+      requestNumber++;
+      request.response.headers.contentType = ContentType.json;
+      if (requestNumber == 3) {
+        request.response.statusCode = 401;
+        request.response.write('secret-error-details');
+      } else {
+        request.response.write(
+          jsonEncode({
+            'type': 'message',
+            'role': 'assistant',
+            'stop_reason': requestNumber == 1 ? 'max_tokens' : 'tool_use',
+            'content': [
+              {
+                'type': 'tool_use',
+                'id': '1',
+                'name': requestNumber == 1 ? 'run_command' : 'unknown',
+                'input': {
+                  'command': 'pwd',
+                  'reason': '检查',
+                  'requires_approval': false,
+                },
+              },
+            ],
+          }),
+        );
+      }
+      await request.response.close();
+    });
+    final settings = AiSettings(
+      baseUrl: 'http://127.0.0.1:${server.port}/v1',
+      model: 'm',
+      protocol: AiProtocol.anthropic,
+    );
+    final client = TerminalAiClient();
+    await expectLater(
+      client.complete(settings, []),
+      throwsA(
+        isA<AiFailure>().having((e) => e.message, 'message', contains('截断')),
+      ),
+    );
+    await expectLater(
+      client.complete(settings, []),
+      throwsA(
+        isA<AiFailure>().having(
+          (e) => e.message,
+          'message',
+          contains('无效的执行请求'),
+        ),
+      ),
+    );
+    await expectLater(
+      client.complete(settings, []),
+      throwsA(
+        isA<AiFailure>().having(
+          (e) => e.message,
+          'message',
+          allOf(contains('认证失败'), isNot(contains('secret'))),
+        ),
+      ),
+    );
+    client.cancel();
+  });
   test('API 地址规范化，允许本机 HTTP，拒绝带凭据和远程明文地址', () {
     expect(_settings.endpoint.path, '/v1/chat/completions');
     expect(

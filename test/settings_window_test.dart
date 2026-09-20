@@ -64,6 +64,8 @@ void main() {
       baseUrl: 'https://ai.example.com/v1',
       apiKey: 'test-key',
       model: 'model',
+      protocol: AiProtocol.anthropic,
+      provider: 'anthropic',
     );
     await remote.saveAiSettings(ai);
     expect(model.aiSettings.toJson(), ai.toJson());
