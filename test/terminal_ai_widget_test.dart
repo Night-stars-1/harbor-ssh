@@ -38,10 +38,17 @@ void main() {
         await tester.pumpAndSettle();
       }
 
-      String value(String field) => tester
-          .widget<TextField>(find.byKey(ValueKey('ai-setting-$field')))
-          .controller!
-          .text;
+      String value(String field) => field == 'model'
+          ? tester
+                .widget<DropdownMenu<String>>(
+                  find.byKey(const ValueKey('ai-setting-model')),
+                )
+                .controller!
+                .text
+          : tester
+                .widget<TextField>(find.byKey(ValueKey('ai-setting-$field')))
+                .controller!
+                .text;
       await select('provider', 'Anthropic');
       expect(value('url'), 'https://api.anthropic.com/v1');
       expect(

@@ -6,8 +6,13 @@ import 'settings_widgets.dart';
 import 'sync_settings_controller.dart';
 
 class AiSettingsPage extends StatefulWidget {
-  const AiSettingsPage({super.key, required this.controller});
+  const AiSettingsPage({
+    super.key,
+    required this.controller,
+    this.modelClientFactory,
+  });
   final SyncSettingsController controller;
+  final TerminalAiClient Function()? modelClientFactory;
   @override
   State<AiSettingsPage> createState() => _AiSettingsPageState();
 }
@@ -27,6 +32,57 @@ class _AiSettingsPageState extends State<AiSettingsPage> {
   late AiProtocol _protocol =
       widget.controller.aiSettings.protocol ?? AiProtocol.openai;
   final _drafts = <String, AiSettings>{};
+  List<String> _models = [];
+  String? _modelsQueryAtFetch;
+  bool _fetchingModels = false;
+  int _modelsRevision = 0;
+  TerminalAiClient? _modelsClient;
+  final _modelsMenu = MenuController();
+
+  void _invalidateModels() {
+    _modelsMenu.close();
+    _modelsRevision++;
+    _modelsClient?.cancel();
+    _modelsClient = null;
+    setState(() {
+      _models = [];
+      _fetchingModels = false;
+    });
+  }
+
+  Future<void> _fetchModels() async {
+    final revision = ++_modelsRevision;
+    _modelsClient?.cancel();
+    final client = _modelsClient =
+        (widget.modelClientFactory ?? TerminalAiClient.new)();
+    setState(() => _fetchingModels = true);
+    try {
+      final models = await client.listModels(_settings);
+      if (!mounted || revision != _modelsRevision) return;
+      setState(() {
+        _models = models;
+        _modelsQueryAtFetch = _model.text;
+      });
+      showSettingsNotice(context, '已获取 ${models.length} 个模型');
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted && revision == _modelsRevision) _modelsMenu.open();
+      });
+    } catch (error) {
+      if (mounted && revision == _modelsRevision) {
+        showSettingsNotice(
+          context,
+          error is AiFailure ? error.message : '获取模型失败，请重试或手动填写',
+          error: true,
+        );
+      }
+    } finally {
+      client.cancel();
+      if (mounted && revision == _modelsRevision) {
+        _modelsClient = null;
+        setState(() => _fetchingModels = false);
+      }
+    }
+  }
 
   AiSettings get _settings => AiSettings(
     baseUrl: _url.text.trim(),
@@ -38,6 +94,7 @@ class _AiSettingsPageState extends State<AiSettingsPage> {
 
   void _selectProvider(String provider) {
     if (provider == _provider) return;
+    _invalidateModels();
     final current = _settings;
     _drafts[_provider] = current;
     final preset = aiProviderPresets.firstWhere(
@@ -60,6 +117,8 @@ class _AiSettingsPageState extends State<AiSettingsPage> {
 
   @override
   void dispose() {
+    _modelsRevision++;
+    _modelsClient?.cancel();
     _url.dispose();
     _key.dispose();
     _model.dispose();
@@ -96,6 +155,9 @@ class _AiSettingsPageState extends State<AiSettingsPage> {
     obscureText: secret && !_visible,
     autocorrect: false,
     enableSuggestions: false,
+    onChanged: name == 'url' || name == 'key'
+        ? (_) => _invalidateModels()
+        : null,
     decoration: InputDecoration(
       hintText: hint,
       fillColor: Theme.of(context).colorScheme.surfaceContainerHighest,
@@ -115,10 +177,11 @@ class _AiSettingsPageState extends State<AiSettingsPage> {
 
   Widget _dropdown<T>(
     String name,
-    T value,
+    T? value,
     Map<T, String> options,
-    ValueChanged<T> onChanged,
-  ) {
+    ValueChanged<T> onChanged, {
+    TextEditingController? controller,
+  }) {
     final theme = Theme.of(context);
     final colors = theme.colorScheme;
     return LayoutBuilder(
@@ -126,10 +189,26 @@ class _AiSettingsPageState extends State<AiSettingsPage> {
         key: ValueKey('ai-setting-$name'),
         width: constraints.maxWidth,
         initialSelection: value,
+        controller: controller,
+        menuController: controller == null ? null : _modelsMenu,
+        hintText: controller == null ? null : '输入或选择模型',
         enabled: !_saving,
-        selectOnly: true,
+        selectOnly: controller == null,
         requestFocusOnTap: true,
         enableSearch: false,
+        enableFilter: controller != null,
+        filterCallback: controller == null
+            ? null
+            : (entries, query) =>
+                  options.containsKey(query) || query == _modelsQueryAtFetch
+                  ? entries
+                  : entries
+                        .where(
+                          (entry) => entry.label.toLowerCase().contains(
+                            query.toLowerCase(),
+                          ),
+                        )
+                        .toList(),
         textStyle: theme.textTheme.bodyLarge,
         inputDecorationTheme: theme.inputDecorationTheme,
         trailingIcon: const Icon(Icons.expand_more_rounded),
@@ -150,7 +229,7 @@ class _AiSettingsPageState extends State<AiSettingsPage> {
             DropdownMenuEntry(
               value: entry.key,
               label: entry.value,
-              trailingIcon: entry.key == value
+              trailingIcon: entry.key == (controller?.text ?? value)
                   ? const Icon(Icons.check_rounded, size: 20)
                   : null,
               style: MenuItemButton.styleFrom(
@@ -162,10 +241,10 @@ class _AiSettingsPageState extends State<AiSettingsPage> {
                 shape: RoundedRectangleBorder(
                   borderRadius: BorderRadius.circular(12),
                 ),
-                backgroundColor: entry.key == value
+                backgroundColor: entry.key == (controller?.text ?? value)
                     ? colors.secondaryContainer
                     : null,
-                foregroundColor: entry.key == value
+                foregroundColor: entry.key == (controller?.text ?? value)
                     ? colors.onSecondaryContainer
                     : colors.onSurface,
                 textStyle: theme.textTheme.bodyLarge,
@@ -193,10 +272,18 @@ class _AiSettingsPageState extends State<AiSettingsPage> {
           ),
           SettingsRow(
             title: '接口类型',
-            control: _dropdown('protocol', _protocol, {
-              AiProtocol.openai: 'OpenAI 兼容',
-              AiProtocol.anthropic: 'Anthropic 兼容',
-            }, (value) => setState(() => _protocol = value)),
+            control: _dropdown(
+              'protocol',
+              _protocol,
+              {
+                AiProtocol.openai: 'OpenAI 兼容',
+                AiProtocol.anthropic: 'Anthropic 兼容',
+              },
+              (value) {
+                _invalidateModels();
+                setState(() => _protocol = value);
+              },
+            ),
           ),
           SettingsRow(
             title: 'API 地址',
@@ -209,7 +296,31 @@ class _AiSettingsPageState extends State<AiSettingsPage> {
           ),
           SettingsRow(
             title: '模型',
-            control: _field('model', _model, '服务商提供的模型名称'),
+            control: Row(
+              children: [
+                Expanded(
+                  child: _dropdown<String>(
+                    'model',
+                    null,
+                    {for (final model in _models) model: model},
+                    (value) => setState(() => _model.text = value),
+                    controller: _model,
+                  ),
+                ),
+                const SizedBox(width: 8),
+                FilledButton.tonal(
+                  key: const ValueKey('ai-fetch-models'),
+                  onPressed: _saving || _fetchingModels ? null : _fetchModels,
+                  child: _fetchingModels
+                      ? const SizedBox(
+                          width: 20,
+                          height: 20,
+                          child: CircularProgressIndicator(strokeWidth: 2),
+                        )
+                      : const Text('获取'),
+                ),
+              ],
+            ),
           ),
         ],
       ),

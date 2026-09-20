@@ -97,7 +97,13 @@ class AiSettings {
         : 'custom',
   );
 
-  Uri get endpoint {
+  Uri get endpoint => _endpoint(
+    protocol == AiProtocol.anthropic ? 'messages' : 'chat/completions',
+    requireModel: true,
+  );
+  Uri get modelsEndpoint => _endpoint('models');
+
+  Uri _endpoint(String operation, {bool requireModel = false}) {
     final uri = Uri.tryParse(baseUrl.trim());
     if (uri == null ||
         !['https', 'http'].contains(uri.scheme) ||
@@ -111,16 +117,13 @@ class AiSettings {
         !['localhost', '127.0.0.1', '::1'].contains(uri.host)) {
       throw const AiFailure('远程 AI 服务请使用 HTTPS 地址');
     }
-    if (model.trim().isEmpty) throw const AiFailure('请输入模型名称');
+    if (requireModel && model.trim().isEmpty) throw const AiFailure('请输入模型名称');
     if (RegExp(r'[\x00-\x20\x7f]').hasMatch(apiKey)) {
       throw const AiFailure('API Key 不能包含空格或换行');
     }
     final path = uri.path
         .replaceFirst(RegExp(r'/+$'), '')
-        .replaceFirst(RegExp(r'/(chat/completions|messages)$'), '');
-    final operation = protocol == AiProtocol.anthropic
-        ? 'messages'
-        : 'chat/completions';
+        .replaceFirst(RegExp(r'/(chat/completions|messages|models)$'), '');
     return uri.replace(path: '${path.isEmpty ? '/v1' : path}/$operation');
   }
 }
@@ -314,6 +317,103 @@ class TerminalAiClient {
     _client?.close(force: true);
   }
 
+  void _authenticate(HttpClientRequest request, AiSettings settings) {
+    if (settings.protocol == AiProtocol.anthropic) {
+      request.headers.set('anthropic-version', '2023-06-01');
+    }
+    if (settings.apiKey.isNotEmpty) {
+      request.headers.set(
+        settings.protocol == AiProtocol.anthropic
+            ? 'x-api-key'
+            : HttpHeaders.authorizationHeader,
+        settings.protocol == AiProtocol.anthropic
+            ? settings.apiKey
+            : 'Bearer ${settings.apiKey}',
+      );
+    }
+  }
+
+  Future<List<String>> listModels(AiSettings settings) async {
+    if (_cancelled) throw const AiFailure('已取消获取模型');
+    final endpoint = settings.modelsEndpoint;
+    final client = HttpClient()
+      ..connectionTimeout = const Duration(seconds: 12);
+    _client = client;
+    try {
+      return await (() async {
+        final models = <String>{};
+        final cursors = <String>{};
+        String? after;
+        for (var page = 0; page < 20; page++) {
+          if (_cancelled) throw const AiFailure('已取消获取模型');
+          final uri = settings.protocol == AiProtocol.anthropic
+              ? endpoint.replace(
+                  queryParameters: {'limit': '100', 'after_id': ?after},
+                )
+              : endpoint;
+          final request = await client.getUrl(uri);
+          request.followRedirects = false;
+          request.headers.set(HttpHeaders.acceptHeader, 'application/json');
+          _authenticate(request, settings);
+          final response = await request.close();
+          if (response.statusCode != 200) {
+            throw AiFailure(switch (response.statusCode) {
+              401 || 403 => '获取模型失败，请检查 API Key 和访问权限',
+              404 || 405 => '服务不支持获取模型，请手动填写模型名称',
+              429 => '获取模型过于频繁，请稍后重试',
+              _ => '获取模型失败（${response.statusCode}）',
+            });
+          }
+          final bytes = <int>[];
+          await for (final chunk in response) {
+            if (bytes.length + chunk.length > 1048576) {
+              throw const AiFailure('模型列表过大，请手动填写模型名称');
+            }
+            bytes.addAll(chunk);
+          }
+          final data = jsonDecode(utf8.decode(bytes)) as Map;
+          for (final item in data['data'] as List) {
+            final id = item['id'];
+            if (id is String &&
+                id.trim().isNotEmpty &&
+                id.length <= 512 &&
+                !RegExp(r'[\x00-\x1f\x7f]').hasMatch(id)) {
+              models.add(id);
+            }
+          }
+          if (_cancelled) throw const AiFailure('已取消获取模型');
+          if (models.length > 10000) throw const AiFailure('模型列表过大，请手动填写模型名称');
+          if (data['has_more'] != true) {
+            if (models.isEmpty) throw const AiFailure('服务未返回可用模型，请手动填写模型名称');
+            return models.toList()..sort();
+          }
+          final cursor = data['last_id'];
+          if (settings.protocol != AiProtocol.anthropic ||
+              cursor is! String ||
+              cursor.isEmpty ||
+              !cursors.add(cursor)) {
+            throw const AiFailure('模型列表分页无效，请手动填写模型名称');
+          }
+          after = cursor;
+        }
+        throw const AiFailure('模型列表分页过多，请手动填写模型名称');
+      })().timeout(const Duration(seconds: 30));
+    } on AiFailure {
+      rethrow;
+    } on TimeoutException {
+      throw const AiFailure('获取模型超时，请检查网络后重试');
+    } on FormatException {
+      throw const AiFailure('模型列表格式不正确，请手动填写模型名称');
+    } on TypeError {
+      throw const AiFailure('模型列表格式不正确，请手动填写模型名称');
+    } catch (_) {
+      throw AiFailure(_cancelled ? '已取消获取模型' : '无法获取模型，请检查地址和网络');
+    } finally {
+      client.close(force: true);
+      _client = null;
+    }
+  }
+
   Future<AiReply> complete(
     AiSettings settings,
     List<Map<String, dynamic>> messages,
@@ -328,19 +428,7 @@ class TerminalAiClient {
         final request = await client.postUrl(uri);
         request.followRedirects = false;
         request.headers.contentType = ContentType.json;
-        if (settings.protocol == AiProtocol.anthropic) {
-          request.headers.set('anthropic-version', '2023-06-01');
-        }
-        if (settings.apiKey.isNotEmpty) {
-          request.headers.set(
-            settings.protocol == AiProtocol.anthropic
-                ? 'x-api-key'
-                : HttpHeaders.authorizationHeader,
-            settings.protocol == AiProtocol.anthropic
-                ? settings.apiKey
-                : 'Bearer ${settings.apiKey}',
-          );
-        }
+        _authenticate(request, settings);
         request.write(jsonEncode(_requestBody(settings, messages)));
         final response = await request.close();
         if (response.statusCode != 200) {
