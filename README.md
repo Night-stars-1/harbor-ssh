@@ -32,7 +32,9 @@
 
 Gist 沿用下述自动同步、三方合并与冲突选择。提交前会再次检查版本，发现变化就停止写入；GitHub Gist API 没有保证原子条件写入，因此极短时间内的同时提交仍可能相互覆盖，历史版本可在 GitHub Gist 查看。
 
-#### 注册网页登录应用（开发者仅需配置一次）
+#### 网页登录应用配置
+
+本项目已配置 Harbor SSH 的公开 OAuth Client ID，正常启动和构建即可使用网页登录。下面的步骤用于自行发行或更换 OAuth App。
 
 1. 打开 [GitHub OAuth App 注册页](https://github.com/settings/applications/new)。Application name 填 `Harbor SSH`，Homepage URL 填你的项目仓库或项目主页地址。
 2. Authorization callback URL 可填 `http://127.0.0.1/`。本项目使用 Device Flow，不会访问此回调地址，不需要部署回调服务器。
@@ -45,7 +47,7 @@ flutter build windows --release --dart-define=GITHUB_OAUTH_CLIENT_ID=你的Clien
 flutter build apk --release --dart-define=GITHUB_OAUTH_CLIENT_ID=你的ClientID
 ```
 
-Client ID 是公开的应用标识，可随安装包分发，最终用户无需注册 OAuth App。GitHub Actions 构建从仓库的 Settings → Secrets and variables → Actions → Variables 中读取同名变量 `GITHUB_OAUTH_CLIENT_ID`。没有配置时仍可构建和使用 WebDAV，但点击 Gist 网页登录会提示尚未配置。更改此编译配置后需要重新启动/构建，不能仅热更新。
+Client ID 是公开的应用标识，可随安装包分发，最终用户无需注册 OAuth App。GitHub Actions 构建从仓库的 Settings → Secrets and variables → Actions → Variables 中读取变量 `HARBOR_GITHUB_CLIENT_ID`，未设置时使用项目默认值（GitHub 不允许仓库变量以 `GITHUB_` 开头）。通过 `--dart-define` 覆盖此编译配置后需要重新启动/构建，不能仅热更新。
 
 授权只请求 `gist` 权限，遵循 GitHub 的轮询间隔与限流退避，设备验证码只保留在内存中。此实现不请求 `offline_access`；如果为 OAuth App 启用了访问令牌过期，令牌失效后需要重新网页登录。旧版已保存的 Token 仍可继续同步，并可通过「重新登录」替换为网页授权。
 

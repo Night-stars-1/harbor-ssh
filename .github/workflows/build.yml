@@ -56,8 +56,13 @@ jobs:
       - name: Build with GitHub OAuth client ID
         shell: bash
         env:
-          GITHUB_OAUTH_CLIENT_ID: ${{ vars.GITHUB_OAUTH_CLIENT_ID }}
-        run: flutter build ${{ matrix.target }} --release --dart-define="GITHUB_OAUTH_CLIENT_ID=$GITHUB_OAUTH_CLIENT_ID"
+          GITHUB_OAUTH_CLIENT_ID: ${{ vars.HARBOR_GITHUB_CLIENT_ID }}
+        run: |
+          oauth_args=()
+          if [[ -n "$GITHUB_OAUTH_CLIENT_ID" ]]; then
+            oauth_args+=(--dart-define="GITHUB_OAUTH_CLIENT_ID=$GITHUB_OAUTH_CLIENT_ID")
+          fi
+          flutter build ${{ matrix.target }} --release "${oauth_args[@]}"
       - uses: actions/upload-artifact@v4
         with:
           name: harbor-ssh-${{ matrix.target }}

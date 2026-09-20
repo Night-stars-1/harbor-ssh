@@ -4,7 +4,11 @@ import 'dart:io';
 
 import 'sync_config.dart';
 
-const githubOAuthClientId = String.fromEnvironment('GITHUB_OAUTH_CLIENT_ID');
+// OAuth Client IDs are public application identifiers, not account secrets.
+const githubOAuthClientId = String.fromEnvironment(
+  'GITHUB_OAUTH_CLIENT_ID',
+  defaultValue: 'Ov23liFjzXHcMmwHYDM6',
+);
 
 class GitHubAccount {
   const GitHubAccount({required this.token, required this.login});
