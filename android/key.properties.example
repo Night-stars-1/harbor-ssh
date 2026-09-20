@@ -1,0 +1,5 @@
+# Copy to key.properties. Do not commit credentials or the keystore.
+storePassword=replace-me
+keyPassword=replace-me
+keyAlias=harbor
+storeFile=C:/path/to/harbor-release.jks

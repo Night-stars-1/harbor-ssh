@@ -1,0 +1,64 @@
+name: Build Harbor SSH
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.47.4'
+          channel: stable
+          cache: true
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: flutter pub get
+      - run: flutter analyze
+      - run: python -m pip install -r tool/requirements-test.txt
+      - run: flutter test
+        env:
+          HARBOR_SSH_INTEGRATION: '1'
+  build:
+    needs: verify
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            target: windows
+            output: build/windows/x64/runner/Release/
+          - os: macos-latest
+            target: macos
+            output: build/macos/Build/Products/Release/*.app
+          - os: ubuntu-latest
+            target: apk
+            output: build/app/outputs/flutter-apk/*.apk
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        if: matrix.target == 'apk'
+        with:
+          distribution: temurin
+          java-version: '21'
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.47.4'
+          channel: stable
+          cache: true
+      - run: flutter pub get
+      - name: Build with GitHub OAuth client ID
+        shell: bash
+        env:
+          GITHUB_OAUTH_CLIENT_ID: ${{ vars.GITHUB_OAUTH_CLIENT_ID }}
+        run: flutter build ${{ matrix.target }} --release --dart-define="GITHUB_OAUTH_CLIENT_ID=$GITHUB_OAUTH_CLIENT_ID"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: harbor-ssh-${{ matrix.target }}
+          path: ${{ matrix.output }}
