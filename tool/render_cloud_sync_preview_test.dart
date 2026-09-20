@@ -126,6 +126,7 @@ void main() {
           ),
         );
         model.showSettings();
+        model.cloudSync.lastSync = DateTime(2026, 9, 20, 22, 52);
         final key = GlobalKey();
         await tester.pumpWidget(
           RepaintBoundary(
@@ -174,6 +175,19 @@ void main() {
           final data = await picture.toByteData(format: ui.ImageByteFormat.png);
           File(
             'artifacts/cloud-sync-${size.width.toInt()}-${brightness.name}.png',
+          ).writeAsBytesSync(data!.buffer.asUint8List());
+          picture.dispose();
+        });
+        await tester.ensureVisible(find.text('上次同步'));
+        await tester.pumpAndSettle();
+        expect(tester.takeException(), isNull);
+        await tester.runAsync(() async {
+          final boundary =
+              key.currentContext!.findRenderObject()! as RenderRepaintBoundary;
+          final picture = await boundary.toImage();
+          final data = await picture.toByteData(format: ui.ImageByteFormat.png);
+          File(
+            'artifacts/sync-status-${size.width.toInt()}-${brightness.name}.png',
           ).writeAsBytesSync(data!.buffer.asUint8List());
           picture.dispose();
         });

@@ -373,18 +373,35 @@ class _CloudSyncSettingsState extends State<CloudSyncSettings> {
                       : (value) => setState(() => _automatic = value),
                 ),
               ),
+              if (last != null)
+                Padding(
+                  padding: const EdgeInsets.all(16),
+                  child: Row(
+                    children: [
+                      Icon(
+                        Icons.history_rounded,
+                        size: 20,
+                        color: colors.onSurfaceVariant,
+                      ),
+                      const SizedBox(width: 12),
+                      Expanded(
+                        child: Text('上次同步', style: theme.textTheme.titleSmall),
+                      ),
+                      const SizedBox(width: 16),
+                      Expanded(
+                        child: Text(
+                          '${last.year}/${two(last.month)}/${two(last.day)}  ${two(last.hour)}:${two(last.minute)}',
+                          textAlign: TextAlign.end,
+                          style: theme.textTheme.bodyMedium?.copyWith(
+                            color: colors.onSurfaceVariant,
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
             ],
           ),
-          if (last != null)
-            Padding(
-              padding: const EdgeInsets.fromLTRB(16, 8, 16, 0),
-              child: Text(
-                '上次同步  ${last.year}-${two(last.month)}-${two(last.day)}  ${two(last.hour)}:${two(last.minute)}',
-                style: theme.textTheme.bodySmall?.copyWith(
-                  color: colors.onSurfaceVariant,
-                ),
-              ),
-            ),
           const SizedBox(height: 20),
           Wrap(
             alignment: WrapAlignment.end,
