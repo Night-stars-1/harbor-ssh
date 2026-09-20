@@ -53,29 +53,25 @@ class _TerminalPaneState extends State<TerminalPane> {
   AiTaskController? _ai;
   bool _aiOpen = false;
 
-  Future<void> _openAi() async {
-    if (_aiOpen || widget.aiSettings == null) return;
+  void _openAi() {
+    if (widget.aiSettings == null) return;
+    if (_aiOpen) {
+      _closeAi();
+      return;
+    }
     _completion?.dismiss();
-    _aiOpen = true;
-    final task = _ai ??= AiTaskController(
+    _ai ??= AiTaskController(
       settings: () => widget.aiSettings!(),
       executorFactory: () => widget.session.createAiExecutor(),
       connected: () => widget.session.status == ConnectionStatus.connected,
     );
-    try {
-      await showDialog<void>(
-        context: context,
-        builder: (_) => TerminalAiPanel(
-          task: task,
-          hostName: widget.session.host.name,
-          onSettings: widget.onAiSettings,
-        ),
-      );
-    } finally {
-      task.stop();
-      _aiOpen = false;
-      if (mounted) _focus.requestFocus();
-    }
+    setState(() => _aiOpen = true);
+  }
+
+  void _closeAi() {
+    _ai?.stop();
+    setState(() => _aiOpen = false);
+    _focus.requestFocus();
   }
 
   final _controller = TerminalController();
@@ -226,6 +222,7 @@ class _TerminalPaneState extends State<TerminalPane> {
       widget.session.addListener(_connectionChanged);
       _ai?.dispose();
       _ai = null;
+      _aiOpen = false;
       _completion?.dispose();
       _completion = null;
       _bindCompletion();
@@ -404,7 +401,19 @@ class _TerminalPaneState extends State<TerminalPane> {
   }
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context) => TerminalAiLayout(
+    terminal: _buildTerminal(context),
+    panel: _aiOpen && _ai != null
+        ? TerminalAiPanel(
+            task: _ai!,
+            hostName: widget.session.host.name,
+            onClose: _closeAi,
+            onSettings: widget.onAiSettings,
+          )
+        : null,
+  );
+
+  Widget _buildTerminal(BuildContext context) {
     final session = widget.session;
     final connected = session.status == ConnectionStatus.connected;
     final colors = Theme.of(context).colorScheme;
@@ -448,6 +457,7 @@ class _TerminalPaneState extends State<TerminalPane> {
                   if (widget.aiSettings != null)
                     IconButton(
                       key: const ValueKey('terminal-ai'),
+                      isSelected: _aiOpen,
                       onPressed: _openAi,
                       icon: const Icon(
                         Icons.auto_awesome_outlined,

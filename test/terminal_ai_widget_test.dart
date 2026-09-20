@@ -1,11 +1,13 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:xterm/xterm.dart';
 import 'package:harbor_ssh/data/terminal_ai.dart';
 import 'package:harbor_ssh/data/ssh_connection.dart';
 import 'package:harbor_ssh/ui/app.dart';
 import 'package:harbor_ssh/ui/ai_settings.dart';
 import 'package:harbor_ssh/ui/ai_task_controller.dart';
 import 'package:harbor_ssh/ui/terminal_ai_panel.dart';
+import 'package:harbor_ssh/ui/terminal_pane.dart';
 import 'package:harbor_ssh/ui/sync_settings_controller.dart';
 import 'package:harbor_ssh/ui/theme.dart';
 import 'package:harbor_ssh/ui/workspace_model.dart';
@@ -127,6 +129,8 @@ void main() {
         ),
       );
       await tester.pumpAndSettle();
+      final terminalState = tester.state(find.byType(TerminalView));
+      final barriers = find.byType(ModalBarrier).evaluate().length;
       await tester.tap(
         find.byKey(
           ValueKey(width < 900 ? 'terminal-ai-mobile' : 'terminal-ai'),
@@ -134,6 +138,27 @@ void main() {
       );
       await tester.pumpAndSettle();
       expect(find.byType(TerminalAiPanel), findsOneWidget);
+      expect(find.byType(Dialog), findsNothing);
+      expect(find.byType(ModalBarrier).evaluate().length, barriers);
+      expect(
+        find.descendant(
+          of: find.byType(TerminalPane),
+          matching: find.byType(TerminalAiPanel),
+        ),
+        findsOneWidget,
+      );
+      expect(tester.state(find.byType(TerminalView)), same(terminalState));
+      final terminalRect = tester.getRect(find.byType(TerminalView));
+      final aiRect = tester.getRect(find.byType(TerminalAiPanel));
+      if (width < 900) {
+        expect(aiRect.top, greaterThanOrEqualTo(terminalRect.bottom));
+      } else {
+        expect(aiRect.left, greaterThanOrEqualTo(terminalRect.right));
+      }
+      final terminal = tester.widget<TerminalView>(find.byType(TerminalView));
+      await tester.tap(find.byType(TerminalView));
+      await tester.pump(const Duration(milliseconds: 350));
+      expect(terminal.focusNode!.hasFocus, isTrue);
       expect(find.text('先在设置 → AI 配置模型服务'), findsOneWidget);
       await tester.tap(
         find.descendant(
@@ -142,6 +167,8 @@ void main() {
         ),
       );
       await tester.pumpAndSettle();
+      expect(find.byType(TerminalAiPanel), findsNothing);
+      expect(tester.state(find.byType(TerminalView)), same(terminalState));
       expect(session.status, ConnectionStatus.connected);
       expect(session.terminal.buffer.getText(), contains('tester@server:~\$ '));
       expect(tester.takeException(), isNull);
@@ -150,6 +177,54 @@ void main() {
       session.dispose();
     });
   }
+  testWidgets('AI 随 SSH 面板缩放，保留输入和终端状态', (tester) async {
+    tester.view.devicePixelRatio = 1;
+    tester.view.physicalSize = const Size(1000, 700);
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    final session = SshConnection(id: 'resize', host: testHost)
+      ..status = ConnectionStatus.connected;
+    final controller = TerminalPaneController();
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: harborTheme(),
+        home: Scaffold(
+          body: TerminalPane(
+            session: session,
+            controller: controller,
+            onReconnect: () {},
+            aiSettings: () => const AiSettings(
+              baseUrl: 'https://ai.example.com/v1',
+              model: 'test',
+            ),
+          ),
+        ),
+      ),
+    );
+    final terminalState = tester.state(find.byType(TerminalView));
+    controller.selectOption('ai');
+    await tester.pumpAndSettle();
+    final input = find.byKey(const ValueKey('ai-task-input'));
+    await tester.enterText(input, '检查磁盘');
+    for (final size in [
+      const Size(390, 700),
+      const Size(240, 160),
+      const Size(1000, 700),
+    ]) {
+      tester.view.physicalSize = size;
+      await tester.pumpAndSettle();
+      expect(tester.takeException(), isNull);
+      expect(tester.widget<TextField>(input).controller!.text, '检查磁盘');
+      expect(tester.state(find.byType(TerminalView)), same(terminalState));
+    }
+    controller.selectOption('ai');
+    await tester.pumpAndSettle();
+    expect(find.byType(TerminalAiPanel), findsNothing);
+    expect(session.status, ConnectionStatus.connected);
+    await tester.pumpWidget(const SizedBox.shrink());
+    session.dispose();
+  });
+
   for (final width in [320.0, 1280.0]) {
     testWidgets('AI 设置保存及密钥隐藏 $width', (tester) async {
       tester.view.physicalSize = Size(width, 900);
@@ -196,9 +271,15 @@ void main() {
     });
   }
 
-  for (final (width, scale) in [(320.0, 1.0), (1280.0, 1.0), (320.0, 2.0)]) {
-    testWidgets('AI 任务面板确认与取消 $width × $scale', (tester) async {
-      tester.view.physicalSize = Size(width, 900);
+  for (final (width, height, scale) in [
+    (320.0, 900.0, 1.0),
+    (1280.0, 900.0, 1.0),
+    (320.0, 900.0, 2.0),
+    (390.0, 240.0, 1.0),
+    (320.0, 240.0, 2.0),
+  ]) {
+    testWidgets('AI 任务面板确认与取消 $width × $height × $scale', (tester) async {
+      tester.view.physicalSize = Size(width, height);
       tester.view.devicePixelRatio = 1;
       addTearDown(tester.view.resetPhysicalSize);
       addTearDown(tester.view.resetDevicePixelRatio);
@@ -225,15 +306,18 @@ void main() {
           ),
         ),
       );
+      await tester.ensureVisible(find.byKey(const ValueKey('ai-task-input')));
       await tester.enterText(
         find.byKey(const ValueKey('ai-task-input')),
         '清理测试文件',
       );
+      await tester.ensureVisible(find.text('开始任务'));
       await tester.tap(find.text('开始任务'));
       await tester.pumpAndSettle();
       expect(find.text('批准并执行'), findsOneWidget);
       expect(find.text('rm /tmp/test-file'), findsWidgets);
       expect(executor.calls, 0);
+      await tester.ensureVisible(find.text('取消任务'));
       await tester.tap(find.text('取消任务'));
       await tester.pumpAndSettle();
       expect(task.running, isFalse);

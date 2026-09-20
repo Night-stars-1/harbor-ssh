@@ -6,8 +6,10 @@ import 'package:flutter/rendering.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:harbor_ssh/data/terminal_ai.dart';
+import 'package:harbor_ssh/data/ssh_connection.dart';
 import 'package:harbor_ssh/ui/ai_task_controller.dart';
 import 'package:harbor_ssh/ui/terminal_ai_panel.dart';
+import 'package:harbor_ssh/ui/terminal_pane.dart';
 import 'package:harbor_ssh/ui/settings_page.dart';
 import 'package:harbor_ssh/ui/workspace_model.dart';
 import 'package:harbor_ssh/ui/theme.dart';
@@ -60,6 +62,13 @@ void main() {
           AiTaskEntry('磁盘已使用 48%，当前空间充足。'),
         ]);
         task.status = '任务已结束';
+        final session = SshConnection(id: 'preview', host: testHost)
+          ..status = ConnectionStatus.connected;
+        session.terminal.write(
+          'Welcome to Ubuntu 24.04 LTS\r\n\r\n'
+          'Last login: Mon Sep 21 09:30:12 2026\r\n'
+          '\x1b[32mdev@server\x1b[0m:\x1b[34m~\x1b[0m\$ ',
+        );
         for (final settings in [true, false]) {
           final key = GlobalKey();
           await tester.pumpWidget(
@@ -76,7 +85,17 @@ void main() {
                           desktop: true,
                           standalone: true,
                         )
-                      : TerminalAiPanel(task: task, hostName: '开发服务器'),
+                      : TerminalAiLayout(
+                          terminal: TerminalPane(
+                            session: session,
+                            onReconnect: () {},
+                          ),
+                          panel: TerminalAiPanel(
+                            task: task,
+                            hostName: '开发服务器',
+                            onClose: () {},
+                          ),
+                        ),
                 ),
               ),
             ),
@@ -99,6 +118,7 @@ void main() {
           await tester.pumpWidget(const SizedBox.shrink());
         }
         task.dispose();
+        session.dispose();
         navigation.dispose();
         model.dispose();
       }
