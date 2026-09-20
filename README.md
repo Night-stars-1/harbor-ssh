@@ -24,7 +24,7 @@
 
 ### GitHub Gist
 
-选择「GitHub Gist」→「网页登录」，应用会打开系统浏览器中的 GitHub 设备授权页面。复制设置里显示的验证码，在网页输入并授权后，应用自动保存登录凭据并显示 GitHub 用户名；不需要手动创建或粘贴 Token。等待期间可取消，验证码过期或拒绝授权后可重试。「退出登录」清除本机 GitHub 凭据并关闭 Gist 自动同步，不删除云端 Gist；要撤销 GitHub 上的授权，可在 GitHub 的 Settings → Applications → Authorized OAuth Apps 中操作。
+选择「GitHub Gist」→「网页登录」，应用先自动复制验证码，再打开系统浏览器中的 GitHub 设备授权页面。在网页粘贴并授权后，应用自动保存登录凭据并显示 GitHub 用户名；不需要手动创建或粘贴 Token。验证码旁的复制图标可再次复制，剪贴板不可用时仍可手动输入。等待期间可取消，验证码过期或拒绝授权后可重试。「退出登录」清除本机 GitHub 凭据并关闭 Gist 自动同步，不删除云端 Gist；要撤销 GitHub 上的授权，可在 GitHub 的 Settings → Applications → Authorized OAuth Apps 中操作。
 
 设置至少 12 个字符的同步加密密码。点击「保存并同步」时，应用自动查找当前 GitHub 账号下包含 `harbor-ssh-sync.v1.json` 的存档；没有存档则创建 Secret Gist 并记住位置，无需填写或记忆 Gist ID。「测试连接」只检查登录和存档读取访问，不创建或修改云端文件，写入权限在同步时验证。
 

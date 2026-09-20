@@ -1,6 +1,7 @@
 import 'dart:async';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:harbor_ssh/data/github_device_auth.dart';
 import 'package:harbor_ssh/data/sync_config.dart';
@@ -13,8 +14,8 @@ import 'package:harbor_ssh/ui/workspace_model.dart';
 import 'support.dart';
 
 void main() {
-  for (final width in [320.0, 1280.0]) {
-    testWidgets('网页登录 $width：打开官方网页、显示验证码并保存账号，退出后清除凭据', (tester) async {
+  for (final (width, scale) in [(320.0, 1.0), (1280.0, 1.0), (320.0, 2.0)]) {
+    testWidgets('网页登录 $width × $scale：先自动复制再打开网页，保存账号并可退出', (tester) async {
       tester.view.physicalSize = Size(width, 900);
       tester.view.devicePixelRatio = 1;
       addTearDown(tester.view.resetPhysicalSize);
@@ -27,9 +28,26 @@ void main() {
       final auth = _FakeAuth();
       final opened = <Uri>[];
       final busy = <bool>[];
+      final copies = <String>[];
+      final messenger =
+          TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
+      messenger.setMockMethodCallHandler(SystemChannels.platform, (call) async {
+        if (call.method == 'Clipboard.setData') {
+          copies.add((call.arguments as Map)['text'] as String);
+        }
+        return null;
+      });
+      addTearDown(
+        () => messenger.setMockMethodCallHandler(SystemChannels.platform, null),
+      );
       await tester.pumpWidget(
         MaterialApp(
           theme: harborTheme(),
+          builder: (context, child) => MediaQuery(
+            data: MediaQuery.of(context)
+                .copyWith(textScaler: TextScaler.linear(scale)),
+            child: child!,
+          ),
           home: Scaffold(
             body: SettingsList(
               children: [
@@ -42,6 +60,7 @@ void main() {
                       onBusyChanged: busy.add,
                       authFactory: () => auth,
                       openBrowser: (uri) async {
+                        expect(copies, ['ABCD-EFGH']);
                         opened.add(uri);
                         return true;
                       },
@@ -57,8 +76,14 @@ void main() {
       await tester.pumpAndSettle();
       expect(opened.single.toString(), 'https://github.com/login/device');
       expect(find.text('ABCD-EFGH'), findsOneWidget);
-      expect(find.text('等待授权…'), findsOneWidget);
+      expect(find.text('在 GitHub 完成登录'), findsOneWidget);
+      expect(find.text('验证码已复制，在网页中粘贴并授权'), findsOneWidget);
+      expect(copies, ['ABCD-EFGH']);
       expect(find.byType(TextField), findsNothing);
+      await tester.tap(find.byKey(const ValueKey('github-copy-code')));
+      await tester.pumpAndSettle();
+      expect(copies, ['ABCD-EFGH', 'ABCD-EFGH']);
+      expect(tester.takeException(), isNull);
       auth.result.complete(
         const GitHubAccount(token: 'oauth-token', login: 'harbor-user'),
       );
@@ -76,7 +101,115 @@ void main() {
     });
   }
 
+  testWidgets('自动复制失败仍打开授权页，并可重新复制', (tester) async {
+    final model = WorkspaceModel(memoryRepository());
+    await model.initialize();
+    final controller = LocalSyncSettingsController(model);
+    addTearDown(model.dispose);
+    addTearDown(controller.dispose);
+    final auth = _FakeAuth();
+    var failCopy = true, opened = 0;
+    final messenger =
+        TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
+    messenger.setMockMethodCallHandler(SystemChannels.platform, (call) async {
+      if (call.method == 'Clipboard.setData' && failCopy) {
+        throw PlatformException(code: 'clipboard-unavailable');
+      }
+      return null;
+    });
+    addTearDown(
+      () => messenger.setMockMethodCallHandler(SystemChannels.platform, null),
+    );
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: harborTheme(),
+        home: Scaffold(
+          body: GitHubSignIn(
+            controller: controller,
+            enabled: true,
+            onBusyChanged: (_) {},
+            authFactory: () => auth,
+            openBrowser: (_) async {
+              opened++;
+              return true;
+            },
+          ),
+        ),
+      ),
+    );
+    await tester.tap(find.text('网页登录'));
+    await tester.pumpAndSettle();
+    expect(opened, 1);
+    expect(find.text('无法复制，请手动输入验证码'), findsOneWidget);
+    expect(find.text('验证码已复制，在网页中粘贴并授权'), findsNothing);
+    failCopy = false;
+    await tester.tap(find.byKey(const ValueKey('github-copy-code')));
+    await tester.pumpAndSettle();
+    expect(find.text('验证码已复制，在网页中粘贴并授权'), findsOneWidget);
+    await tester.tap(find.text('取消'));
+    await tester.pumpAndSettle();
+    expect(model.cloudSync.settings, isNull);
+    expect(tester.takeException(), isNull);
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
+
+  testWidgets('等待剪贴板时取消，不再打开网页或保存登录', (tester) async {
+    final model = WorkspaceModel(memoryRepository());
+    await model.initialize();
+    final controller = LocalSyncSettingsController(model);
+    addTearDown(model.dispose);
+    addTearDown(controller.dispose);
+    final auth = _FakeAuth();
+    final copied = Completer<void>();
+    var opened = 0;
+    final messenger =
+        TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
+    messenger.setMockMethodCallHandler(SystemChannels.platform, (call) async {
+      if (call.method == 'Clipboard.setData') await copied.future;
+      return null;
+    });
+    addTearDown(
+      () => messenger.setMockMethodCallHandler(SystemChannels.platform, null),
+    );
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: harborTheme(),
+        home: Scaffold(
+          body: GitHubSignIn(
+            controller: controller,
+            enabled: true,
+            onBusyChanged: (_) {},
+            authFactory: () => auth,
+            openBrowser: (_) async {
+              opened++;
+              return true;
+            },
+          ),
+        ),
+      ),
+    );
+    await tester.tap(find.text('网页登录'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('取消'));
+    copied.complete();
+    await tester.pumpAndSettle();
+    expect(opened, 0);
+    expect(model.cloudSync.settings, isNull);
+    expect(find.text('验证码已复制'), findsNothing);
+    expect(tester.takeException(), isNull);
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
+
   testWidgets('浏览器打开失败仍可手动授权；取消、拒绝和离开页面保留原账号', (tester) async {
+    final messenger =
+        TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
+    messenger.setMockMethodCallHandler(
+      SystemChannels.platform,
+      (_) async => null,
+    );
+    addTearDown(
+      () => messenger.setMockMethodCallHandler(SystemChannels.platform, null),
+    );
     final model = WorkspaceModel(memoryRepository());
     await model.initialize();
     await model.saveGitHubAccount('existing-token', 'existing-user');
@@ -125,6 +258,9 @@ void main() {
 }
 
 class _FakeAuth extends GitHubDeviceAuth {
+  _FakeAuth() {
+    result.future.ignore();
+  }
   final result = Completer<GitHubAccount>();
   bool cancelled = false;
   @override

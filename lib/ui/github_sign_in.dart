@@ -6,6 +6,7 @@ import '../data/github_device_auth.dart';
 import '../data/sync_config.dart';
 import 'settings_widgets.dart';
 import 'sync_settings_controller.dart';
+import 'theme.dart';
 
 class GitHubSignIn extends StatefulWidget {
   const GitHubSignIn({
@@ -29,6 +30,8 @@ class _GitHubSignInState extends State<GitHubSignIn> {
   GitHubDeviceAuth? _auth;
   GitHubDeviceCode? _code;
   bool _signingOut = false;
+  bool _codeCopied = false;
+  bool _cancelRequested = false;
 
   @override
   void dispose() {
@@ -58,18 +61,47 @@ class _GitHubSignInState extends State<GitHubSignIn> {
     }
   }
 
+  Future<void> _copyCode(
+    GitHubDeviceCode code, {
+    bool automatic = false,
+  }) async {
+    try {
+      await Clipboard.setData(ClipboardData(text: code.userCode));
+      if (mounted && !_cancelRequested && identical(_code, code)) {
+        setState(() => _codeCopied = true);
+        if (!automatic) showSettingsNotice(context, '验证码已复制');
+      }
+    } catch (_) {
+      if (mounted && !_cancelRequested && identical(_code, code)) {
+        setState(() => _codeCopied = false);
+        showSettingsNotice(context, '无法复制，请手动输入验证码', error: true);
+      }
+    }
+  }
+
+  void _cancelSignIn() {
+    _cancelRequested = true;
+    _auth?.cancel();
+  }
+
   Future<void> _signIn() async {
     if (_auth != null || !widget.enabled || _signingOut) return;
     final auth = (widget.authFactory ?? GitHubDeviceAuth.new)();
-    setState(() => _auth = auth);
+    setState(() {
+      _auth = auth;
+      _cancelRequested = false;
+      _codeCopied = false;
+    });
     widget.onBusyChanged(true);
     try {
       final code = await auth.start();
-      if (!mounted) return;
+      if (!mounted || _cancelRequested) return;
       setState(() => _code = code);
+      await _copyCode(code, automatic: true);
+      if (!mounted || _cancelRequested) return;
       await _openPage(code);
       final account = await auth.waitForAuthorization(code);
-      if (!mounted) return;
+      if (!mounted || _cancelRequested) return;
       await widget.controller.saveGitHubAccount(account.token, account.login);
       if (mounted) showSettingsNotice(context, '已登录 GitHub：${account.login}');
     } on GitHubAuthCancelled {
@@ -126,6 +158,7 @@ class _GitHubSignInState extends State<GitHubSignIn> {
       final login = config?.githubLogin ?? '';
       final code = _code;
       final busy = _auth != null || _signingOut || !widget.enabled;
+      if (code != null) return _authorizationPanel(context, code);
       return Column(
         children: [
           SettingsRow(
@@ -156,64 +189,13 @@ class _GitHubSignInState extends State<GitHubSignIn> {
               ],
             ),
           ),
-          if (code != null)
-            SettingsRow(
-              title: '验证码',
-              description: '在 GitHub 网页输入验证码并确认授权',
-              control: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  SelectableText(
-                    code.userCode,
-                    style: Theme.of(context).textTheme.headlineSmall
-                        ?.copyWith(letterSpacing: 2),
-                  ),
-                  const SizedBox(height: 8),
-                  Wrap(
-                    spacing: 8,
-                    runSpacing: 4,
-                    children: [
-                      TextButton(
-                        onPressed: () async {
-                          try {
-                            await Clipboard.setData(
-                              ClipboardData(text: code.userCode),
-                            );
-                            if (context.mounted) {
-                              showSettingsNotice(context, '验证码已复制');
-                            }
-                          } catch (_) {
-                            if (context.mounted) {
-                              showSettingsNotice(
-                                context,
-                                '无法复制，请手动输入验证码',
-                                error: true,
-                              );
-                            }
-                          }
-                        },
-                        child: const Text('复制验证码'),
-                      ),
-                      TextButton(
-                        onPressed: () => _openPage(code),
-                        child: const Text('打开网页'),
-                      ),
-                      TextButton(
-                        onPressed: () => _auth?.cancel(),
-                        child: const Text('取消'),
-                      ),
-                    ],
-                  ),
-                ],
-              ),
-            )
-          else if (_auth != null)
+          if (_auth != null)
             Align(
               alignment: Alignment.centerRight,
               child: Padding(
                 padding: const EdgeInsets.only(right: 16, bottom: 8),
                 child: TextButton(
-                  onPressed: () => _auth?.cancel(),
+                  onPressed: _cancelSignIn,
                   child: const Text('取消'),
                 ),
               ),
@@ -222,4 +204,97 @@ class _GitHubSignInState extends State<GitHubSignIn> {
       );
     },
   );
+
+  Widget _authorizationPanel(BuildContext context, GitHubDeviceCode code) {
+    final theme = Theme.of(context);
+    final colors = theme.colorScheme;
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(16, 8, 16, 16),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Row(
+            children: [
+              Expanded(
+                child: Text(
+                  '在 GitHub 完成登录',
+                  style: theme.textTheme.titleMedium,
+                ),
+              ),
+              TextButton(onPressed: _cancelSignIn, child: const Text('取消')),
+            ],
+          ),
+          Text(
+            _codeCopied ? '验证码已复制，在网页中粘贴并授权' : '在网页中输入验证码并授权',
+            style: theme.textTheme.bodySmall?.copyWith(
+              color: colors.onSurfaceVariant,
+            ),
+          ),
+          const SizedBox(height: 12),
+          LayoutBuilder(
+            builder: (context, constraints) {
+              final codeField = Material(
+                color: colors.secondaryContainer,
+                shape: HarborShapes.superellipse(
+                  const BorderRadius.all(Radius.circular(16)),
+                ),
+                child: Padding(
+                  padding: const EdgeInsets.fromLTRB(16, 8, 8, 8),
+                  child: Row(
+                    children: [
+                      Expanded(
+                        child: SelectableText(
+                          code.userCode,
+                          style: theme.textTheme.titleLarge?.copyWith(
+                            letterSpacing: 2,
+                            fontWeight: FontWeight.w700,
+                            color: colors.onSecondaryContainer,
+                          ),
+                        ),
+                      ),
+                      IconButton(
+                        key: const ValueKey('github-copy-code'),
+                        onPressed: () => _copyCode(code),
+                        icon: const Icon(
+                          Icons.content_copy_rounded,
+                          size: 20,
+                          semanticLabel: '复制验证码',
+                        ),
+                        color: colors.onSecondaryContainer,
+                      ),
+                    ],
+                  ),
+                ),
+              );
+              final openButton = FilledButton.tonalIcon(
+                onPressed: () => _openPage(code),
+                icon: const Icon(Icons.open_in_new_rounded, size: 18),
+                label: const Text('打开 GitHub'),
+              );
+              final wide =
+                  constraints.maxWidth >= 480 &&
+                  MediaQuery.textScalerOf(context).scale(16) <= 20;
+              if (wide) {
+                return Row(
+                  children: [
+                    Expanded(child: codeField),
+                    const SizedBox(width: 12),
+                    openButton,
+                  ],
+                );
+              }
+              return Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  codeField,
+                  const SizedBox(height: 12),
+                  Align(alignment: Alignment.centerRight, child: openButton),
+                ],
+              );
+            },
+          ),
+        ],
+      ),
+    );
+  }
 }
