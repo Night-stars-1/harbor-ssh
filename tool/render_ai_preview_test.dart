@@ -87,7 +87,7 @@ void main() {
             ..output = 'Filesystem   Size  Used  Avail  Use%\n/dev/vda1     40G   18G    20G   48%'
             ..exitCode = 0
             ..finished = true,
-          AiTaskEntry('磁盘已使用 48%，当前空间充足。'),
+          AiTaskEntry('磁盘已使用 48%，当前空间充足。', model: 'claude-sonnet-4-5'),
         ]);
         task.status = '任务已结束';
         final session = SshConnection(id: 'preview', host: testHost)

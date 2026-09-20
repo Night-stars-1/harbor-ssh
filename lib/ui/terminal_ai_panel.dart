@@ -35,6 +35,7 @@ class _TerminalAiPanelState extends State<TerminalAiPanel> {
   final _scroll = ScrollController();
   bool _scrollQueued = false;
   final _images = <AiImage>[];
+  final _expandedTools = Expando<bool>();
   bool _loadingImages = false;
   bool _dragging = false;
   AiImageInput get _imageInput =>
@@ -390,86 +391,167 @@ class _TerminalAiPanelState extends State<TerminalAiPanel> {
         ),
       );
     }
+    if (entry.command) return _toolEntry(entry);
     return Padding(
       padding: EdgeInsets.only(bottom: 16, left: entry.user == true ? 20 : 0),
       child: Material(
-        color: entry.command
-            ? colors.surfaceContainerLow
-            : entry.user == true
+        key: ObjectKey(entry),
+        color: entry.user == true
             ? colors.secondaryContainer
-            : Colors.transparent,
+            : colors.surfaceContainerHigh,
         shape: HarborShapes.superellipse(BorderRadius.circular(20)),
         child: Padding(
-          padding: EdgeInsets.all(entry.command || entry.user == true ? 12 : 4),
+          padding: const EdgeInsets.all(14),
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
-              if (entry.images?.isNotEmpty == true) ...[
-                _thumbnails(entry.images!),
-                if (entry.text.isNotEmpty) const SizedBox(height: 10),
-              ],
-              if (entry.command) ...[
+              if (entry.user != true) ...[
                 Row(
                   children: [
                     Icon(
-                      Icons.terminal_rounded,
-                      size: 18,
+                      Icons.auto_awesome_rounded,
+                      size: 16,
                       color: colors.primary,
                     ),
                     const SizedBox(width: 8),
                     Expanded(
                       child: Text(
-                        entry.reason ?? '执行命令',
-                        style: theme.textTheme.labelLarge,
+                        entry.model ?? 'AI',
+                        style: theme.textTheme.labelMedium?.copyWith(
+                          color: colors.primary,
+                        ),
                       ),
                     ),
                   ],
                 ),
                 const SizedBox(height: 10),
               ],
+              if (entry.images?.isNotEmpty == true) ...[
+                _thumbnails(entry.images!),
+                if (entry.text.isNotEmpty) const SizedBox(height: 10),
+              ],
               if (entry.text.isNotEmpty)
-                SelectableText(
-                  entry.text,
-                  style: entry.command
-                      ? theme.textTheme.bodyMedium?.copyWith(
-                          fontFamily: 'monospace',
-                        )
-                      : theme.textTheme.bodyMedium,
+                SelectableText(entry.text, style: theme.textTheme.bodyMedium),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _toolEntry(AiTaskEntry entry) {
+    final theme = Theme.of(context);
+    final colors = theme.colorScheme;
+    final failed =
+        entry.finished && entry.exitCode != null && entry.exitCode != 0;
+    final label = entry.interruption != null
+        ? (entry.started == true ? '已中止' : '未执行')
+        : entry.finished
+        ? (entry.exitCode == null ? '无退出码' : '退出码 ${entry.exitCode}')
+        : entry.started == true
+        ? '执行中'
+        : '待确认';
+    final shape = HarborShapes.superellipse(BorderRadius.circular(20));
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 12),
+      child: ExpansionTile(
+        key: ObjectKey(entry),
+        initiallyExpanded: _expandedTools[entry] ?? false,
+        onExpansionChanged: (expanded) => _expandedTools[entry] = expanded,
+        shape: shape,
+        collapsedShape: shape,
+        backgroundColor: colors.surfaceContainerLow,
+        collapsedBackgroundColor: colors.surfaceContainerLow,
+        iconColor: colors.onSurfaceVariant,
+        collapsedIconColor: colors.onSurfaceVariant,
+        tilePadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+        childrenPadding: const EdgeInsets.fromLTRB(14, 0, 14, 14),
+        title: Text.rich(
+          TextSpan(
+            children: [
+              WidgetSpan(
+                alignment: PlaceholderAlignment.middle,
+                child: Padding(
+                  padding: const EdgeInsets.only(right: 8),
+                  child: Icon(
+                    Icons.terminal_rounded,
+                    size: 18,
+                    color: colors.primary,
+                  ),
                 ),
-              if (entry.output.isNotEmpty) ...[
-                const SizedBox(height: 12),
-                ConstrainedBox(
-                  constraints: const BoxConstraints(maxHeight: 240),
-                  child: SingleChildScrollView(
-                    child: SelectableText(
-                      entry.output,
-                      style: theme.textTheme.bodySmall?.copyWith(
-                        fontFamily: 'monospace',
-                        color: colors.onSurfaceVariant,
+              ),
+              TextSpan(text: entry.reason ?? '执行命令'),
+              WidgetSpan(
+                alignment: PlaceholderAlignment.middle,
+                child: Padding(
+                  padding: const EdgeInsets.only(left: 8),
+                  child: Container(
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 8,
+                      vertical: 3,
+                    ),
+                    decoration: ShapeDecoration(
+                      shape: const StadiumBorder(),
+                      color: failed
+                          ? colors.errorContainer
+                          : colors.secondaryContainer,
+                    ),
+                    child: Text(
+                      label,
+                      style: theme.textTheme.labelSmall?.copyWith(
+                        color: failed
+                            ? colors.onErrorContainer
+                            : colors.onSecondaryContainer,
                       ),
                     ),
                   ),
                 ),
-              ],
-              if (entry.interruption != null || entry.finished) ...[
-                const SizedBox(height: 8),
-                Text(
-                  entry.interruption ??
-                      (entry.exitCode == null
-                          ? '未收到退出码'
-                          : '退出码 ${entry.exitCode}'),
-                  style: theme.textTheme.labelSmall?.copyWith(
-                    color: entry.interruption != null
-                        ? colors.onSurfaceVariant
-                        : entry.exitCode == 0
-                        ? colors.primary
-                        : colors.error,
-                  ),
-                ),
-              ],
+              ),
             ],
           ),
+          style: theme.textTheme.labelLarge,
         ),
+        children: [
+          Align(
+            alignment: Alignment.centerLeft,
+            child: SelectableText(
+              entry.text,
+              style: theme.textTheme.bodyMedium?.copyWith(
+                fontFamily: 'monospace',
+              ),
+            ),
+          ),
+          if (entry.output.isNotEmpty) ...[
+            const SizedBox(height: 12),
+            ConstrainedBox(
+              constraints: const BoxConstraints(maxHeight: 240),
+              child: SingleChildScrollView(
+                child: Align(
+                  alignment: Alignment.centerLeft,
+                  child: SelectableText(
+                    entry.output,
+                    style: theme.textTheme.bodySmall?.copyWith(
+                      fontFamily: 'monospace',
+                      color: colors.onSurfaceVariant,
+                    ),
+                  ),
+                ),
+              ),
+            ),
+          ],
+          if (entry.interruption != null) ...[
+            const SizedBox(height: 8),
+            Align(
+              alignment: Alignment.centerLeft,
+              child: Text(
+                entry.interruption!,
+                style: theme.textTheme.bodySmall?.copyWith(
+                  color: colors.onSurfaceVariant,
+                ),
+              ),
+            ),
+          ],
+        ],
       ),
     );
   }
@@ -818,7 +900,7 @@ class _AiActivityState extends State<_AiActivity>
   }
 }
 
-/// Keeps the terminal mounted when AI opens or the pane changes orientation.
+/// Keeps terminal and composer state across desktop split and compact AI views.
 class TerminalAiLayout extends StatelessWidget {
   const TerminalAiLayout({super.key, required this.terminal, this.panel});
 
@@ -829,39 +911,48 @@ class TerminalAiLayout extends StatelessWidget {
   Widget build(BuildContext context) => LayoutBuilder(
     builder: (context, constraints) {
       final horizontal = constraints.maxWidth >= 800;
-      final height = !horizontal && panel != null
-          ? math.max(440.0, constraints.maxHeight)
-          : constraints.maxHeight;
-      final extent = horizontal ? constraints.maxWidth : height;
-      final panelExtent = horizontal
-          ? (extent * .4).clamp(320.0, 440.0)
-          : extent * .56;
-      return SingleChildScrollView(
-        primary: false,
-        child: SizedBox(
-          height: height,
-          child: Flex(
-            direction: horizontal ? Axis.horizontal : Axis.vertical,
-            crossAxisAlignment: CrossAxisAlignment.stretch,
-            children: [
-              Expanded(child: terminal),
-              if (panel != null) ...[
-                SizedBox(
-                  width: horizontal ? 1 : null,
-                  height: horizontal ? null : 1,
-                  child: ColoredBox(
-                    color: Theme.of(context).colorScheme.outlineVariant,
-                  ),
-                ),
-                SizedBox(
-                  width: horizontal ? panelExtent : null,
-                  height: horizontal ? null : panelExtent,
-                  child: panel,
-                ),
-              ],
-            ],
+      final hidden = !horizontal && panel != null;
+      final panelWidth = horizontal
+          ? (constraints.maxWidth * .4).clamp(320.0, 440.0)
+          : constraints.maxWidth;
+      final terminalWidth = horizontal && panel != null
+          ? constraints.maxWidth - panelWidth - 1
+          : constraints.maxWidth;
+      return Stack(
+        fit: StackFit.expand,
+        children: [
+          Positioned(
+            left: 0,
+            top: 0,
+            bottom: 0,
+            width: terminalWidth,
+            child: Offstage(
+              offstage: hidden,
+              child: TickerMode(
+                enabled: !hidden,
+                child: ExcludeFocus(excluding: hidden, child: terminal),
+              ),
+            ),
           ),
-        ),
+          if (panel != null) ...[
+            Positioned(
+              left: terminalWidth,
+              top: 0,
+              bottom: 0,
+              width: horizontal ? 1 : 0,
+              child: ColoredBox(
+                color: Theme.of(context).colorScheme.outlineVariant,
+              ),
+            ),
+            Positioned(
+              right: 0,
+              top: 0,
+              bottom: 0,
+              width: panelWidth,
+              child: panel!,
+            ),
+          ],
+        ],
       );
     },
   );

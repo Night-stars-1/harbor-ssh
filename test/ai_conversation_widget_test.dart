@@ -8,6 +8,77 @@ import 'package:harbor_ssh/ui/terminal_ai_panel.dart';
 import 'package:harbor_ssh/ui/theme.dart';
 
 void main() {
+  for (final (width, scale) in [(390.0, 1.0), (240.0, 2.0)]) {
+    testWidgets('工具默认折叠、标题退出码 tag、回复背景与模型 $width', (tester) async {
+      tester.view.physicalSize = Size(width, 1100);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+      final task = AiTaskController(
+        settings: () => const AiSettings(
+          baseUrl: 'https://example.com/v1',
+          model: 'current-model',
+        ),
+        executorFactory: _Executor.new,
+        connected: () => true,
+      );
+      final command = AiTaskEntry('uname -a', command: true)
+        ..reason = '检查操作系统与当前用户'
+        ..output = 'Linux server 6.8.0'
+        ..exitCode = 0
+        ..finished = true;
+      task.entries.addAll([
+        command,
+        AiTaskEntry('服务器运行正常', model: 'original-model'),
+      ]);
+      Widget view() => MaterialApp(
+        theme: harborTheme(),
+        builder: (context, child) => MediaQuery(
+          data: MediaQuery.of(context)
+              .copyWith(textScaler: TextScaler.linear(scale)),
+          child: child!,
+        ),
+        home: Scaffold(
+          body: TerminalAiPanel(task: task, hostName: 'server'),
+        ),
+      );
+      await tester.pumpWidget(view());
+      await tester.pumpAndSettle();
+      expect(find.text('uname -a'), findsNothing);
+      expect(find.text('Linux server 6.8.0'), findsNothing);
+      expect(find.text('退出码 0'), findsOneWidget);
+      expect(find.text('original-model'), findsOneWidget);
+      expect(find.text('current-model'), findsNothing);
+      final replyMaterial = find
+          .ancestor(of: find.text('服务器运行正常'), matching: find.byType(Material))
+          .first;
+      expect(
+        tester.widget<Material>(replyMaterial).color,
+        harborTheme().colorScheme.surfaceContainerHigh,
+      );
+      await tester.tap(find.byType(ExpansionTile));
+      await tester.pumpAndSettle();
+      expect(find.text('uname -a'), findsOneWidget);
+      expect(find.text('Linux server 6.8.0'), findsOneWidget);
+      // Incoming output keeps the user's chosen expansion state.
+      command.output = 'Linux server 6.8.0\nnew output';
+      await tester.pumpWidget(view());
+      await tester.pumpAndSettle();
+      expect(find.textContaining('new output'), findsOneWidget);
+      await tester.tap(find.text('退出码 0'));
+      await tester.pumpAndSettle();
+      expect(find.text('uname -a'), findsNothing);
+      expect(find.textContaining('new output'), findsNothing);
+      command.exitCode = 2;
+      await tester.pumpWidget(view());
+      await tester.pumpAndSettle();
+      expect(find.text('退出码 2'), findsOneWidget);
+      expect(find.textContaining('new output'), findsNothing);
+      expect(tester.takeException(), isNull);
+      await tester.pumpWidget(const SizedBox.shrink());
+      task.dispose();
+    });
+  }
   for (final (width, scale, reducedMotion) in [
     (390.0, 1.0, false),
     (240.0, 2.0, true),

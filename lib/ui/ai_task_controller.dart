@@ -13,7 +13,9 @@ class AiTaskEntry {
     this.images,
     this.user,
     this.notice,
+    this.model,
   });
+  final String? model;
   final bool? user, notice;
   final List<AiImage>? images;
   final String text;
@@ -182,7 +184,9 @@ class AiTaskController extends ChangeNotifier {
         if (!_current(revision)) return;
         messages.add(Map<String, dynamic>.from(reply.message));
         if (reply.text.trim().isNotEmpty) {
-          entries.add(AiTaskEntry(reply.text.trim()));
+          entries.add(
+            AiTaskEntry(reply.text.trim(), model: config.model.trim()),
+          );
         }
         if (reply.calls.isEmpty) {
           status = '已完成';
@@ -196,8 +200,11 @@ class AiTaskController extends ChangeNotifier {
           if (++commands > 24) {
             throw const AiFailure('本轮已执行 24 条命令，可以继续发送消息');
           }
-          final entry = AiTaskEntry(call.command, command: true)
-            ..reason = call.reason;
+          final entry = AiTaskEntry(
+            call.command,
+            command: true,
+            model: config.model.trim(),
+          )..reason = call.reason;
           entries.add(entry);
           _unresolved[call.id] = entry;
           if (aiCommandNeedsApproval(call)) {

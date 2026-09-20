@@ -147,18 +147,24 @@ void main() {
         ),
         findsOneWidget,
       );
-      expect(tester.state(find.byType(TerminalView)), same(terminalState));
-      final terminalRect = tester.getRect(find.byType(TerminalView));
+      final mountedTerminal = find.byType(TerminalView, skipOffstage: false);
+      expect(tester.state(mountedTerminal), same(terminalState));
+      final terminalRect = tester.getRect(mountedTerminal);
       final aiRect = tester.getRect(find.byType(TerminalAiPanel));
       if (width < 900) {
-        expect(aiRect.top, greaterThanOrEqualTo(terminalRect.bottom));
+        expect(find.byType(TerminalView), findsNothing);
+        expect(aiRect, tester.getRect(find.byType(TerminalPane)));
+        expect(
+          tester.widget<TerminalView>(mountedTerminal).focusNode!.hasFocus,
+          isFalse,
+        );
       } else {
         expect(aiRect.left, greaterThanOrEqualTo(terminalRect.right));
+        final terminal = tester.widget<TerminalView>(mountedTerminal);
+        await tester.tap(find.byType(TerminalView));
+        await tester.pump(const Duration(milliseconds: 350));
+        expect(terminal.focusNode!.hasFocus, isTrue);
       }
-      final terminal = tester.widget<TerminalView>(find.byType(TerminalView));
-      await tester.tap(find.byType(TerminalView));
-      await tester.pump(const Duration(milliseconds: 350));
-      expect(terminal.focusNode!.hasFocus, isTrue);
       expect(find.text('先在设置 → AI 配置模型服务'), findsOneWidget);
       await tester.tap(
         find.descendant(
@@ -169,6 +175,15 @@ void main() {
       await tester.pumpAndSettle();
       expect(find.byType(TerminalAiPanel), findsNothing);
       expect(tester.state(find.byType(TerminalView)), same(terminalState));
+      await tester.tap(find.byType(TerminalView));
+      await tester.pump(const Duration(milliseconds: 350));
+      expect(
+        tester
+            .widget<TerminalView>(find.byType(TerminalView))
+            .focusNode!
+            .hasFocus,
+        isTrue,
+      );
       expect(session.status, ConnectionStatus.connected);
       expect(session.terminal.buffer.getText(), contains('tester@server:~\$ '));
       expect(tester.takeException(), isNull);
@@ -215,7 +230,14 @@ void main() {
       await tester.pumpAndSettle();
       expect(tester.takeException(), isNull);
       expect(tester.widget<TextField>(input).controller!.text, '检查磁盘');
-      expect(tester.state(find.byType(TerminalView)), same(terminalState));
+      expect(
+        tester.state(find.byType(TerminalView, skipOffstage: false)),
+        same(terminalState),
+      );
+      if (size.width < 800) {
+        expect(find.byType(TerminalView), findsNothing);
+        expect(tester.getSize(find.byType(TerminalAiPanel)), size);
+      }
     }
     controller.selectOption('ai');
     await tester.pumpAndSettle();

@@ -81,6 +81,29 @@ class _Executor implements AiCommandExecutor {
 }
 
 void main() {
+  test('每条回复记录当轮模型，切换模型不改写旧消息标签', () async {
+    var settings = _settings;
+    final client = _Client()..replies.addAll([_done, _done]);
+    final task = AiTaskController(
+      settings: () => settings,
+      executorFactory: _Executor.new,
+      connected: () => true,
+      clientFactory: () => client,
+    );
+    await task.start('第一问');
+    settings = const AiSettings(
+      baseUrl: 'https://ai.example.com/v1',
+      model: 'second-model',
+    );
+    await task.start('第二问');
+    expect(
+      task.entries
+          .where((entry) => entry.user != true)
+          .map((entry) => entry.model),
+      ['test-model', 'second-model'],
+    );
+    task.dispose();
+  });
   test('连续对话保留工具结果，新对话清空上下文且会话之间隔离', () async {
     final client = _Client()
       ..replies.addAll([_call('pwd'), _done, _done, _done]);
