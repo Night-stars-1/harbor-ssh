@@ -73,6 +73,7 @@ void main() {
       }
 
       await tester.pumpWidget(page(0));
+      await select('WebDAV');
       await tester.enterText(field('目录地址'), 'https://dav.example.com/');
       await select('GitHub Gist');
       expect(field('目录地址'), findsNothing);
@@ -124,6 +125,10 @@ void main() {
       expect(find.byKey(const ValueKey('cloud-sync-button')), findsNothing);
       expect(find.byType(FloatingActionButton), findsNothing);
       await tester.tap(find.text('云同步').first);
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const ValueKey('sync-provider')));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('WebDAV').last);
       await tester.pumpAndSettle();
       for (final action in ['测试连接', '保存', '保存并同步']) {
         await tester.ensureVisible(find.text(action));

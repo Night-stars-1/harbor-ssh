@@ -6,6 +6,7 @@ import 'package:xterm/src/core/buffer/cell_offset.dart';
 
 import 'package:xterm/src/core/input/keys.dart';
 import 'package:xterm/src/terminal.dart';
+import 'package:xterm/src/ui/cell_decoration.dart';
 import 'package:xterm/src/ui/controller.dart';
 import 'package:xterm/src/ui/cursor_type.dart';
 import 'package:xterm/src/ui/custom_text_edit.dart';
@@ -15,6 +16,7 @@ import 'package:xterm/src/ui/keyboard_listener.dart';
 import 'package:xterm/src/ui/keyboard_visibility.dart';
 import 'package:xterm/src/ui/render.dart';
 import 'package:xterm/src/ui/scroll_handler.dart';
+
 import 'package:xterm/src/ui/shortcut/actions.dart';
 import 'package:xterm/src/ui/shortcut/shortcuts.dart';
 import 'package:xterm/src/ui/terminal_text_style.dart';
@@ -49,7 +51,10 @@ class TerminalView extends StatefulWidget {
     this.readOnly = false,
     this.hardwareKeyboardOnly = false,
     this.simulateScroll = true,
+    this.onPrepareCellDecoration,
+    this.cellDecoration,
   });
+
 
   /// The underlying terminal that this widget renders.
   final Terminal terminal;
@@ -141,6 +146,13 @@ class TerminalView extends StatefulWidget {
   /// keys to the application. This is standard behavior for most terminal
   /// emulators. True by default.
   final bool simulateScroll;
+
+  /// Called once per paint with the visible line range before cells are drawn.
+  final void Function(int firstLine, int lastLine)? onPrepareCellDecoration;
+
+  /// Optional per-cell appearance override used while painting.
+  final TerminalCellDecoration? Function(int x, int y)? cellDecoration;
+
 
   @override
   State<TerminalView> createState() => TerminalViewState();
@@ -237,7 +249,10 @@ class TerminalViewState extends State<TerminalView> {
           alwaysShowCursor: widget.alwaysShowCursor,
           onEditableRect: _onEditableRect,
           composingText: _composingText,
+          prepareCellDecoration: widget.onPrepareCellDecoration,
+          cellDecoration: widget.cellDecoration,
         );
+
       },
     );
 
@@ -467,6 +482,8 @@ class _TerminalView extends LeafRenderObjectWidget {
     required this.alwaysShowCursor,
     this.onEditableRect,
     this.composingText,
+    this.prepareCellDecoration,
+    this.cellDecoration,
   });
 
   final Terminal terminal;
@@ -495,6 +512,10 @@ class _TerminalView extends LeafRenderObjectWidget {
 
   final String? composingText;
 
+  final void Function(int firstLine, int lastLine)? prepareCellDecoration;
+
+  final TerminalCellDecoration? Function(int x, int y)? cellDecoration;
+
   @override
   RenderTerminal createRenderObject(BuildContext context) {
     return RenderTerminal(
@@ -511,6 +532,8 @@ class _TerminalView extends LeafRenderObjectWidget {
       alwaysShowCursor: alwaysShowCursor,
       onEditableRect: onEditableRect,
       composingText: composingText,
+      prepareCellDecoration: prepareCellDecoration,
+      cellDecoration: cellDecoration,
     );
   }
 
@@ -529,6 +552,8 @@ class _TerminalView extends LeafRenderObjectWidget {
       ..cursorType = cursorType
       ..alwaysShowCursor = alwaysShowCursor
       ..onEditableRect = onEditableRect
-      ..composingText = composingText;
+      ..composingText = composingText
+      ..prepareCellDecoration = prepareCellDecoration
+      ..cellDecoration = cellDecoration;
   }
 }

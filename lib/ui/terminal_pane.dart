@@ -77,8 +77,9 @@ class _TerminalPaneState extends State<TerminalPane> {
   final _controller = TerminalController();
   final _focus = FocusNode();
   final _terminalKey = GlobalKey<TerminalViewState>();
-  final _linkPaintKey = GlobalKey();
   final _scrollController = ScrollController();
+  final _linkStyle = TerminalLinkStyle(const Color(0xff9ecaff));
+
   double _fontSize = 14;
   PointerDownEvent? _linkDown;
   Uri? _pressedLink;
@@ -283,6 +284,33 @@ class _TerminalPaneState extends State<TerminalPane> {
     return null;
   }
 
+  void _prepareLinkDecoration(int first, int last) {
+    CellOffset? hover;
+    final render = _terminalKey.currentState?.renderTerminal;
+    if (_hoverPosition != null &&
+        HardwareKeyboard.instance.isControlPressed &&
+        render != null) {
+      final local = render.globalToLocal(_hoverPosition!);
+      if ((Offset.zero & render.size).contains(local)) {
+        hover = render.getCellOffset(local);
+      }
+    }
+    _linkStyle.prepare(
+      widget.session.terminal.buffer,
+      first,
+      last,
+      hover: hover,
+    );
+  }
+
+  TerminalCellDecoration? _linkDecoration(int x, int y) {
+    if (_controller.selection?.contains(CellOffset(x, y)) == true) {
+      return null;
+    }
+    return _linkStyle.decoration(x, y);
+  }
+
+
   void _selectOption(String value) {
     if (value == 'larger') {
       setState(() => _fontSize = (_fontSize + 1).clamp(10, 24));
@@ -417,11 +445,15 @@ class _TerminalPaneState extends State<TerminalPane> {
     final session = widget.session;
     final connected = session.status == ConnectionStatus.connected;
     final colors = Theme.of(context).colorScheme;
+    _linkStyle.color = colors.brightness == Brightness.dark
+        ? const Color(0xff9ecaff)
+        : const Color(0xff005bb5);
     final linkHoverPosition = HardwareKeyboard.instance.isControlPressed
         ? _hoverPosition
         : null;
     final hoveringLink =
         linkHoverPosition != null && _linkAt(linkHoverPosition) != null;
+
     return Column(
       children: [
         if (widget.showHeader)
@@ -570,94 +602,77 @@ class _TerminalPaneState extends State<TerminalPane> {
                           _pressedLink = null;
                         },
                         child: _terminalScrollbar(
-                          CustomPaint(
-                            key: _linkPaintKey,
-                            foregroundPainter: TerminalLinkPainter(
-                              terminalKey: _terminalKey,
-                              paintKey: _linkPaintKey,
-                              terminal: session.terminal,
-                              controller: _controller,
-                              hoverPosition: linkHoverPosition,
-                              color: colors.brightness == Brightness.dark
-                                  ? const Color(0xff9ecaff)
-                                  : const Color(0xff005bb5),
-                              repaint: Listenable.merge([
-                                TerminalRepaint(session.terminal),
-                                _scrollController,
-                                _controller,
-                              ]),
+                          TerminalView(
+                            session.terminal,
+                            key: _terminalKey,
+                            scrollController: _scrollController,
+                            mouseCursor: hoveringLink
+                                ? SystemMouseCursors.click
+                                : SystemMouseCursors.text,
+                            controller: _controller,
+                            focusNode: _focus,
+                            autofocus: widget.autofocus,
+                            onSecondaryTapUp: (_, _) => _copyOrPaste(),
+                            readOnly: !connected,
+                            shortcuts: const {},
+                            deleteDetection: true,
+                            theme: harborTerminalTheme(colors),
+                            padding: const EdgeInsets.all(16),
+                            onPrepareCellDecoration: _prepareLinkDecoration,
+                            cellDecoration: _linkDecoration,
+                            textStyle: TerminalStyle(
+                              fontSize: _fontSize,
+                              fontFamily: 'monospace',
+                              fontFamilyFallback: const [
+                                'Consolas',
+                                'Menlo',
+                                'Noto Sans Mono',
+                                'Courier New',
+                              ],
                             ),
-                            child: TerminalView(
-                              session.terminal,
-                              key: _terminalKey,
-                              scrollController: _scrollController,
-                              mouseCursor: hoveringLink
-                                  ? SystemMouseCursors.click
-                                  : SystemMouseCursors.text,
-                              controller: _controller,
-                              focusNode: _focus,
-                              autofocus: widget.autofocus,
-                              onSecondaryTapUp: (_, _) => _copyOrPaste(),
-                              readOnly: !connected,
-                              shortcuts: const {},
-                              deleteDetection: true,
-                              theme: harborTerminalTheme(colors),
-                              padding: const EdgeInsets.all(16),
-                              textStyle: TerminalStyle(
-                                fontSize: _fontSize,
-                                fontFamily: 'monospace',
-                                fontFamilyFallback: const [
-                                  'Consolas',
-                                  'Menlo',
-                                  'Noto Sans Mono',
-                                  'Courier New',
-                                ],
-                              ),
-                              onKeyEvent: (_, event) {
-                                final completionResult = _completion?.handleKey(
-                                  event,
+                            onKeyEvent: (_, event) {
+                              final completionResult = _completion?.handleKey(
+                                event,
+                              );
+                              if (completionResult == KeyEventResult.handled) {
+                                return KeyEventResult.handled;
+                              }
+                              final keys = HardwareKeyboard.instance;
+                              // Ctrl-click belongs to the local link action, including
+                              // when a remote program has enabled mouse reporting.
+                              if (_controller.suspendedPointerInputs !=
+                                  keys.isControlPressed) {
+                                _controller.setSuspendPointerInput(
+                                  keys.isControlPressed,
                                 );
-                                if (completionResult ==
-                                    KeyEventResult.handled) {
+                              }
+                              if (event is KeyDownEvent &&
+                                  (event.logicalKey ==
+                                          LogicalKeyboardKey.contextMenu ||
+                                      (event.logicalKey ==
+                                              LogicalKeyboardKey.f10 &&
+                                          keys.isShiftPressed))) {
+                                _copyOrPaste();
+                                return KeyEventResult.handled;
+                              }
+                              if (event is KeyDownEvent &&
+                                  (keys.isControlPressed ||
+                                      keys.isMetaPressed)) {
+                                if (event.logicalKey ==
+                                    LogicalKeyboardKey.keyV) {
+                                  _paste();
                                   return KeyEventResult.handled;
                                 }
-                                final keys = HardwareKeyboard.instance;
-                                // Ctrl-click belongs to the local link action, including
-                                // when a remote program has enabled mouse reporting.
-                                if (_controller.suspendedPointerInputs !=
-                                    keys.isControlPressed) {
-                                  _controller.setSuspendPointerInput(
-                                    keys.isControlPressed,
-                                  );
-                                }
-                                if (event is KeyDownEvent &&
-                                    (event.logicalKey ==
-                                            LogicalKeyboardKey.contextMenu ||
-                                        (event.logicalKey ==
-                                                LogicalKeyboardKey.f10 &&
-                                            keys.isShiftPressed))) {
-                                  _copyOrPaste();
-                                  return KeyEventResult.handled;
-                                }
-                                if (event is KeyDownEvent &&
-                                    (keys.isControlPressed ||
+                                if (event.logicalKey ==
+                                        LogicalKeyboardKey.keyC &&
+                                    (keys.isShiftPressed ||
                                         keys.isMetaPressed)) {
-                                  if (event.logicalKey ==
-                                      LogicalKeyboardKey.keyV) {
-                                    _paste();
-                                    return KeyEventResult.handled;
-                                  }
-                                  if (event.logicalKey ==
-                                          LogicalKeyboardKey.keyC &&
-                                      (keys.isShiftPressed ||
-                                          keys.isMetaPressed)) {
-                                    _copy();
-                                    return KeyEventResult.handled;
-                                  }
+                                  _copy();
+                                  return KeyEventResult.handled;
                                 }
-                                return KeyEventResult.ignored;
-                              },
-                            ),
+                              }
+                              return KeyEventResult.ignored;
+                            },
                           ),
                         ),
                       ),
@@ -729,6 +744,8 @@ class _TerminalPaneState extends State<TerminalPane> {
     );
   }
 }
+
+
 
 /// Shares terminal actions with the mobile app bar without moving terminal state.
 class TerminalPaneController {

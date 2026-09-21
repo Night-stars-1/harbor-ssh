@@ -43,6 +43,21 @@ void main() {
     expect(terminalLinks(terminal.buffer, 0, 9), isEmpty);
   });
 
+  test('链接装饰替换格子颜色，悬停才加下划线，不改缓冲区', () {
+    final terminal = Terminal()..resize(80, 10);
+    terminal.write('Docs: https://help.ubuntu.com\r\n');
+    final original = terminal.buffer.lines[0].data.toList();
+    final style = TerminalLinkStyle(const Color(0xff9ecaff));
+    style.prepare(terminal.buffer, 0, 9);
+    expect(style.decoration(0, 0), isNull);
+    expect(style.decoration(6, 0)?.foreground, const Color(0xff9ecaff));
+    expect(style.decoration(6, 0)?.underline, isFalse);
+    style.prepare(terminal.buffer, 0, 9, hover: const CellOffset(10, 0));
+    expect(style.decoration(10, 0)?.underline, isTrue);
+    expect(style.decoration(0, 0), isNull);
+    expect(terminal.buffer.lines[0].data, original);
+  });
+
   test('打开链接不接受非 HTTP(S) 协议', () async {
     await expectLater(
       openWebLink(Uri.parse('file:///tmp/test')),
@@ -70,11 +85,10 @@ void main() {
       render.getOffset(const CellOffset(10, 0)) + const Offset(2, 2),
     );
     final plainPosition = render.localToGlobal(const Offset(2, 2));
-    TerminalLinkPainter painter() => tester
-        .widgetList<CustomPaint>(find.byType(CustomPaint))
-        .map((widget) => widget.foregroundPainter)
-        .whereType<TerminalLinkPainter>()
-        .single;
+    expect(
+      tester.widget<TerminalView>(find.byType(TerminalView)).cellDecoration,
+      isNotNull,
+    );
     final mouse = TestGesture(
       dispatcher: tester.sendEventToBinding,
       kind: PointerDeviceKind.mouse,
@@ -83,7 +97,6 @@ void main() {
     await mouse.addPointer(location: plainPosition);
     await mouse.moveTo(linkPosition);
     await tester.pumpAndSettle();
-    expect(painter().hoverPosition, isNull);
     expect(
       RendererBinding.instance.mouseTracker.debugDeviceActiveCursor(7),
       SystemMouseCursors.text,
@@ -91,7 +104,6 @@ void main() {
 
     await tester.sendKeyDownEvent(LogicalKeyboardKey.controlLeft);
     await tester.pumpAndSettle();
-    expect(painter().hoverPosition, linkPosition);
     expect(
       RendererBinding.instance.mouseTracker.debugDeviceActiveCursor(7),
       SystemMouseCursors.click,
@@ -99,7 +111,6 @@ void main() {
 
     await tester.sendKeyUpEvent(LogicalKeyboardKey.controlLeft);
     await tester.pumpAndSettle();
-    expect(painter().hoverPosition, isNull);
     expect(
       RendererBinding.instance.mouseTracker.debugDeviceActiveCursor(7),
       SystemMouseCursors.text,
@@ -120,7 +131,7 @@ void main() {
     );
     await mouse.removePointer();
     await tester.pumpAndSettle();
-    expect(painter().hoverPosition, isNull);
+
     await tester.sendKeyUpEvent(LogicalKeyboardKey.controlRight);
     await tester.pumpWidget(const SizedBox.shrink());
     expect(tester.takeException(), isNull);
@@ -156,8 +167,10 @@ void main() {
           Offset(render.cellSize.width / 2, render.cellSize.height / 2),
     );
     final link = terminalLinks(session.terminal.buffer, 0, 0).single;
+    expect(link.cells.first.x, 6);
     final cell = link.cells[10];
     final original = session.terminal.buffer.lines[0].data.toList();
+
     await tester.tapAt(at(cell), kind: PointerDeviceKind.mouse);
     await tester.pumpAndSettle();
     expect(opened, isEmpty);

@@ -1,9 +1,11 @@
 import 'dart:ui';
 import 'package:flutter/painting.dart';
 
+import 'package:xterm/src/ui/cell_decoration.dart';
 import 'package:xterm/src/ui/palette_builder.dart';
 import 'package:xterm/src/ui/paragraph_cache.dart';
 import 'package:xterm/xterm.dart';
+
 
 /// Encapsulates the logic for painting various terminal elements.
 class TerminalPainter {
@@ -142,8 +144,10 @@ class TerminalPainter {
   void paintLine(
     Canvas canvas,
     Offset offset,
-    BufferLine line,
-  ) {
+    BufferLine line, {
+    int row = 0,
+    TerminalCellDecoration? Function(int x, int y)? decoration,
+  }) {
     final cellData = CellData.empty();
     final cellWidth = _cellSize.width;
 
@@ -152,6 +156,17 @@ class TerminalPainter {
 
       final charWidth = cellData.content >> CellContent.widthShift;
       final cellOffset = offset.translate(i * cellWidth, 0);
+      final style = decoration?.call(i, row);
+      if (style != null) {
+        if (style.foreground != null) {
+          cellData.foreground =
+              CellColor.rgb | (style.foreground!.toARGB32() & 0xffffff);
+          cellData.flags &= ~(CellFlags.inverse | CellFlags.faint);
+        }
+        if (style.underline) {
+          cellData.flags |= CellFlags.underline;
+        }
+      }
 
       paintCell(canvas, cellOffset, cellData);
 
@@ -160,6 +175,7 @@ class TerminalPainter {
       }
     }
   }
+
 
   @pragma('vm:prefer-inline')
   void paintCell(Canvas canvas, Offset offset, CellData cellData) {

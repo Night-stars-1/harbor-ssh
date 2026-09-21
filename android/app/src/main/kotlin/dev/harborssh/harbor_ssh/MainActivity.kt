@@ -1,14 +1,19 @@
 package dev.harborssh.harbor_ssh
 
-import io.flutter.embedding.android.FlutterActivity
-import io.flutter.embedding.engine.FlutterEngine
-import io.flutter.plugin.common.MethodChannel
 import android.app.Activity
 import android.content.Intent
 import android.net.Uri
+import android.os.Build
 import android.provider.DocumentsContract
+import android.view.View
+import android.view.ViewGroup
+import io.flutter.embedding.android.FlutterActivity
+import io.flutter.embedding.android.FlutterView
+import io.flutter.embedding.engine.FlutterEngine
+import io.flutter.plugin.common.MethodChannel
 import java.io.OutputStream
 import java.util.concurrent.Executors
+
 
 class MainActivity : FlutterActivity() {
     private val transfers = Executors.newSingleThreadExecutor()
@@ -16,6 +21,30 @@ class MainActivity : FlutterActivity() {
     private var output: OutputStream? = null
     @Volatile private var outputUri: Uri? = null
     private val createDocumentRequest = 4831
+
+    override fun onPostResume() {
+        super.onPostResume()
+        skipImeInsetAnimation(window.decorView)
+    }
+
+    private fun skipImeInsetAnimation(root: View) {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) return
+        val flutterView = findFlutterView(root) ?: return
+        flutterView.setWindowInsetsAnimationCallback(null)
+        flutterView.setOnApplyWindowInsetsListener { view, insets ->
+            view.onApplyWindowInsets(insets)
+        }
+    }
+
+    private fun findFlutterView(view: View): FlutterView? {
+        if (view is FlutterView) return view
+        if (view is ViewGroup) {
+            for (index in 0 until view.childCount) {
+                findFlutterView(view.getChildAt(index))?.let { return it }
+            }
+        }
+        return null
+    }
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)

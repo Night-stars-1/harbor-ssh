@@ -10,9 +10,11 @@ import 'package:xterm/src/core/buffer/segment.dart';
 import 'package:xterm/src/core/mouse/button.dart';
 import 'package:xterm/src/core/mouse/button_state.dart';
 import 'package:xterm/src/terminal.dart';
+import 'package:xterm/src/ui/cell_decoration.dart';
 import 'package:xterm/src/ui/controller.dart';
 import 'package:xterm/src/ui/cursor_type.dart';
 import 'package:xterm/src/ui/painter.dart';
+
 import 'package:xterm/src/ui/selection_mode.dart';
 import 'package:xterm/src/ui/terminal_size.dart';
 import 'package:xterm/src/ui/terminal_text_style.dart';
@@ -35,6 +37,8 @@ class RenderTerminal extends RenderBox with RelayoutWhenSystemFontsChangeMixin {
     required bool alwaysShowCursor,
     EditableRectCallback? onEditableRect,
     String? composingText,
+    void Function(int firstLine, int lastLine)? prepareCellDecoration,
+    TerminalCellDecoration? Function(int x, int y)? cellDecoration,
   })  : _terminal = terminal,
         _controller = controller,
         _offset = offset,
@@ -45,11 +49,14 @@ class RenderTerminal extends RenderBox with RelayoutWhenSystemFontsChangeMixin {
         _alwaysShowCursor = alwaysShowCursor,
         _onEditableRect = onEditableRect,
         _composingText = composingText,
+        _prepareCellDecoration = prepareCellDecoration,
+        _cellDecoration = cellDecoration,
         _painter = TerminalPainter(
           theme: theme,
           textStyle: textStyle,
           textScaler: textScaler,
         );
+
 
   Terminal _terminal;
   set terminal(Terminal terminal) {
@@ -151,6 +158,21 @@ class RenderTerminal extends RenderBox with RelayoutWhenSystemFontsChangeMixin {
     resetCursorBlink();
     markNeedsPaint();
   }
+
+  void Function(int firstLine, int lastLine)? _prepareCellDecoration;
+  set prepareCellDecoration(
+    void Function(int firstLine, int lastLine)? value,
+  ) {
+    _prepareCellDecoration = value;
+    markNeedsPaint();
+  }
+
+  TerminalCellDecoration? Function(int x, int y)? _cellDecoration;
+  set cellDecoration(TerminalCellDecoration? Function(int x, int y)? value) {
+    _cellDecoration = value;
+    markNeedsPaint();
+  }
+
 
   TerminalSize? _viewportSize;
 
@@ -454,13 +476,17 @@ class RenderTerminal extends RenderBox with RelayoutWhenSystemFontsChangeMixin {
     final effectFirstLine = firstLine.clamp(0, lines.length - 1);
     final effectLastLine = lastLine.clamp(0, lines.length - 1);
 
+    _prepareCellDecoration?.call(effectFirstLine, effectLastLine);
     for (var i = effectFirstLine; i <= effectLastLine; i++) {
       _painter.paintLine(
         canvas,
         offset.translate(0, (i * charHeight + _lineOffset).truncateToDouble()),
         lines[i],
+        row: i,
+        decoration: _cellDecoration,
       );
     }
+
 
     if (_terminal.buffer.absoluteCursorY >= effectFirstLine &&
         _terminal.buffer.absoluteCursorY <= effectLastLine) {

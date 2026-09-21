@@ -1,3 +1,4 @@
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 
 import '../data/webdav_sync.dart';
@@ -5,6 +6,10 @@ import '../domain/sync_snapshot.dart';
 import 'sync_settings_controller.dart';
 import 'settings_widgets.dart';
 import 'github_sign_in.dart';
+
+bool get preferGitHubSync =>
+    defaultTargetPlatform == TargetPlatform.android ||
+    defaultTargetPlatform == TargetPlatform.iOS;
 
 class CloudSyncSettings extends StatefulWidget {
   const CloudSyncSettings({super.key, required this.controller});
@@ -20,7 +25,9 @@ class _CloudSyncSettingsState extends State<CloudSyncSettings> {
   final _encryption = TextEditingController();
   bool _authenticating = false;
   bool _hadGitHubAccount = false;
-  SyncProvider _provider = SyncProvider.webdav;
+  late SyncProvider _provider =
+      widget.controller.settings?.provider ??
+      (preferGitHubSync ? SyncProvider.gist : SyncProvider.webdav);
   String _knownGitHubLogin = '';
   final _visibleSecrets = <TextEditingController>{};
   bool _automatic = false;
@@ -34,7 +41,6 @@ class _CloudSyncSettingsState extends State<CloudSyncSettings> {
     widget.controller.addListener(_onSyncChanged);
     final config = widget.controller.settings;
     if (config != null) {
-      _provider = config.provider;
       _knownGitHubLogin = config.githubLogin;
       _url.text = config.url;
       _username.text = config.username;
@@ -259,7 +265,9 @@ class _CloudSyncSettingsState extends State<CloudSyncSettings> {
                       ),
                     ),
                     dropdownMenuEntries: [
-                      for (final provider in SyncProvider.values)
+                      for (final provider in preferGitHubSync
+                          ? const [SyncProvider.gist, SyncProvider.webdav]
+                          : SyncProvider.values)
                         DropdownMenuEntry(
                           value: provider,
                           label: provider == SyncProvider.webdav
