@@ -18,7 +18,7 @@ class AiTaskEntry {
   final String? model;
   final bool? user, notice;
   final List<AiImage>? images;
-  final String text;
+  String text;
   final bool command;
   String output = '';
   String? reason;
@@ -35,6 +35,8 @@ bool aiCommandNeedsApproval(AiToolCall call) =>
       r'(^|[\s;&|/])(sudo|su|rm|rmdir|mv|dd|mkfs\S*|wipefs|shred|truncate|chmod|chown|reboot|shutdown|poweroff|kill|killall|pkill|tee)(\s|$)|(^|[^>])>(?!>)|\b(apt|apt-get|yum|dnf|pip|npm)\s|\bsystemctl\s+(stop|restart|reload|disable|enable|mask)|\bgit\s+(push|reset|clean|checkout|restore|rebase)|\b(docker|kubectl)\s+(rm|rmi|stop|kill|restart|delete|apply|replace|rollout)|\bservice\s+\S+\s+(stop|restart|reload)',
       caseSensitive: false,
     ).hasMatch(call.command);
+
+enum AiApprovalMode { manual, auto, readOnly }
 
 class AiTaskController extends ChangeNotifier {
   AiTaskController({
@@ -60,7 +62,76 @@ class AiTaskController extends ChangeNotifier {
   final _history = <Map<String, dynamic>>[];
   final _unresolved = <String, AiTaskEntry?>{};
   String? _contextModel;
+  String? _modelOverride;
   DateTime? turnStartedAt;
+  AiApprovalMode approvalMode = AiApprovalMode.manual;
+
+  bool get autoApprove => approvalMode == AiApprovalMode.auto;
+
+  String _shellQuote(String value) => "'${value.replaceAll("'", "'\\''")}'";
+
+  String? _commandForTool(AiToolCall call) {
+    if (call.name == 'run_command') return call.command;
+    final path = (call.arguments['path'] as String?)?.trim() ?? '';
+    final reason = call.arguments['reason'];
+    if (reason is! String || reason.trim().isEmpty) return null;
+    switch (call.name) {
+      case 'list_directory':
+        return 'ls -la -- ${_shellQuote(path.isEmpty ? '.' : path)}';
+      case 'read_file':
+        if (path.isEmpty) return null;
+        return 'cat -- ${_shellQuote(path)}';
+      case 'search_text':
+        final query = (call.arguments['query'] as String?)?.trim() ?? '';
+        if (query.isEmpty) return null;
+        return 'grep -RIn -- ${_shellQuote(query)} ${_shellQuote(path.isEmpty ? '.' : path)}';
+      case 'system_info':
+        return 'uname -a; id; pwd';
+      default:
+        return null;
+    }
+  }
+
+  String get activeModel => _effectiveSettings().model;
+
+  AiSettings _effectiveSettings() {
+    final base = settings();
+    final model = _modelOverride?.trim();
+    if (model == null || model.isEmpty || model == base.model) return base;
+    return base.withModel(model);
+  }
+
+  void setModel(String? model) {
+    if (running || _disposed) return;
+    final next = model?.trim();
+    _modelOverride = next == null || next.isEmpty ? null : next;
+    _notify();
+  }
+
+  void setAutoApprove(bool enabled) {
+    setApprovalMode(enabled ? AiApprovalMode.auto : AiApprovalMode.manual);
+  }
+
+  void setApprovalMode(AiApprovalMode mode) {
+    if (_disposed) return;
+    approvalMode = mode;
+    if (mode == AiApprovalMode.auto && pending != null) approve(true);
+    if (mode == AiApprovalMode.readOnly && pending != null) {
+      stop(message: '已切换为只读模式，待确认命令未执行');
+      return;
+    }
+    _notify();
+  }
+
+  Future<List<String>> listModels() async {
+    if (_disposed) return const [];
+    final client = clientFactory();
+    try {
+      return await client.listModels(_effectiveSettings());
+    } finally {
+      client.cancel();
+    }
+  }
 
   void newConversation() {
     if (running || _disposed) return;
@@ -132,8 +203,9 @@ class AiTaskController extends ChangeNotifier {
   Future<void> start(String goal, {List<AiImage> images = const []}) async {
     if (running || _disposed) return;
     failure = null;
+    final config = _effectiveSettings();
     try {
-      settings().endpoint;
+      config.endpoint;
       if (!connected()) throw const AiFailure('请先连接 SSH');
       AiImage.validateBatch(images);
       if ((goal.trim().isEmpty && images.isEmpty) || goal.length > 16000) {
@@ -144,7 +216,6 @@ class AiTaskController extends ChangeNotifier {
       _notify();
       return;
     }
-    final config = settings();
     final revision = ++_revision;
     final client = _client = clientFactory();
     final executor = _executor = executorFactory();
@@ -180,13 +251,33 @@ class AiTaskController extends ChangeNotifier {
         if (!connected()) throw const AiFailure('SSH 已断开，任务已停止');
         status = commands == 0 ? '思考中' : '整理结果';
         _notify();
-        final reply = await client.complete(config, messages);
+        AiTaskEntry? streamedReply;
+        final reply = await client.stream(
+          config,
+          messages,
+          toolMode: approvalMode == AiApprovalMode.readOnly
+              ? AiToolMode.readOnly
+              : AiToolMode.command,
+          onText: (delta) {
+            if (!_current(revision)) return;
+            streamedReply ??= AiTaskEntry('', model: config.model.trim());
+            if (!entries.contains(streamedReply)) {
+              entries.add(streamedReply!);
+            }
+            streamedReply!.text += delta;
+            _notify();
+          },
+        );
         if (!_current(revision)) return;
         messages.add(Map<String, dynamic>.from(reply.message));
         if (reply.text.trim().isNotEmpty) {
-          entries.add(
-            AiTaskEntry(reply.text.trim(), model: config.model.trim()),
-          );
+          if (streamedReply != null) {
+            streamedReply!.text = reply.text.trim();
+          } else {
+            entries.add(
+              AiTaskEntry(reply.text.trim(), model: config.model.trim()),
+            );
+          }
         }
         if (reply.calls.isEmpty) {
           status = '已完成';
@@ -200,14 +291,37 @@ class AiTaskController extends ChangeNotifier {
           if (++commands > 24) {
             throw const AiFailure('本轮已执行 24 条命令，可以继续发送消息');
           }
+          final command = _commandForTool(call);
           final entry = AiTaskEntry(
-            call.command,
+            command ?? call.command,
             command: true,
             model: config.model.trim(),
           )..reason = call.reason;
           entries.add(entry);
           _unresolved[call.id] = entry;
-          if (aiCommandNeedsApproval(call)) {
+          if (command == null ||
+              (approvalMode == AiApprovalMode.readOnly &&
+                  call.name == 'run_command')) {
+            entry.interruption = approvalMode == AiApprovalMode.readOnly
+                ? '只读模型未提供 run_command 工具'
+                : '工具参数无效，未执行';
+            entry.finished = true;
+            messages.add({
+              'role': 'tool',
+              'tool_call_id': call.id,
+              'content': jsonEncode({
+                'status': 'tool_not_allowed',
+                'output': '',
+                'exitCode': null,
+                'error': entry.interruption,
+              }),
+            });
+            _unresolved.remove(call.id);
+            _notify();
+            continue;
+          }
+          if (aiCommandNeedsApproval(call) &&
+              approvalMode == AiApprovalMode.manual) {
             pending = call;
             status = '等待确认';
             final approval = _approval = Completer<bool>();
@@ -219,7 +333,7 @@ class AiTaskController extends ChangeNotifier {
           status = '执行命令';
           entry.started = true;
           _notify();
-          final result = await executor.execute(call.command, (output) {
+          final result = await executor.execute(command, (output) {
             if (!_current(revision)) return;
             entry.output += output;
             _notify();

@@ -1,6 +1,8 @@
 import 'dart:async';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
+import 'package:flutter_markdown_plus/flutter_markdown_plus.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:harbor_ssh/data/terminal_ai.dart';
 import 'package:harbor_ssh/ui/ai_task_controller.dart';
@@ -8,8 +10,90 @@ import 'package:harbor_ssh/ui/terminal_ai_panel.dart';
 import 'package:harbor_ssh/ui/theme.dart';
 
 void main() {
+  testWidgets('Enter 发送、Shift+Enter 换行，输入法候选与连按不误发', (tester) async {
+    final client = _Client();
+    final task = AiTaskController(
+      settings: () =>
+          const AiSettings(baseUrl: 'https://example.com/v1', model: 'test'),
+      executorFactory: _Executor.new,
+      connected: () => true,
+      clientFactory: () => client,
+    );
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: harborTheme(),
+        home: Scaffold(
+          body: TerminalAiPanel(task: task, hostName: 'server'),
+        ),
+      ),
+    );
+    final input = find.byKey(const ValueKey('ai-task-input'));
+    await tester.tap(input);
+    await tester.sendKeyEvent(LogicalKeyboardKey.enter);
+    expect(client.requests, isEmpty);
+    await tester.enterText(input, '第一行第二行');
+    final controller = tester.widget<TextField>(input).controller!;
+    controller.selection = const TextSelection.collapsed(offset: 3);
+    await tester.sendKeyDownEvent(LogicalKeyboardKey.shiftLeft);
+    await tester.sendKeyEvent(LogicalKeyboardKey.enter);
+    await tester.sendKeyUpEvent(LogicalKeyboardKey.shiftLeft);
+    expect(controller.text, '第一行\n第二行');
+    expect(client.requests, isEmpty);
+    tester.testTextInput.updateEditingValue(
+      const TextEditingValue(
+        text: '中文',
+        selection: TextSelection.collapsed(offset: 2),
+        composing: TextRange(start: 0, end: 2),
+      ),
+    );
+    await tester.sendKeyEvent(LogicalKeyboardKey.enter);
+    expect(client.requests, isEmpty);
+    expect(controller.text, '中文');
+    tester.testTextInput.updateEditingValue(
+      const TextEditingValue(
+        text: '中文',
+        selection: TextSelection.collapsed(offset: 2),
+      ),
+    );
+    await tester.sendKeyDownEvent(LogicalKeyboardKey.enter);
+    await tester.sendKeyRepeatEvent(LogicalKeyboardKey.enter);
+    await tester.sendKeyUpEvent(LogicalKeyboardKey.enter);
+    await tester.pump();
+    expect(client.requests, hasLength(1));
+    expect(client.requests.single.last['content'], '中文');
+    expect(task.running, isTrue);
+    client.reply.complete(
+      const AiReply({'role': 'assistant', 'content': '收到'}, []),
+    );
+    await tester.pumpAndSettle();
+    client.reply = Completer<AiReply>();
+    await tester.enterText(input, '小键盘');
+    await tester.sendKeyEvent(LogicalKeyboardKey.numpadEnter);
+    await tester.pump();
+    expect(client.requests, hasLength(2));
+    expect(client.requests.last.last['content'], '小键盘');
+    client.reply.complete(
+      const AiReply({'role': 'assistant', 'content': '收到'}, []),
+    );
+    await tester.pumpAndSettle();
+    client.reply = Completer<AiReply>();
+    await tester.enterText(input, '手机发送');
+    await tester.testTextInput.receiveAction(TextInputAction.send);
+    await tester.pump();
+    expect(client.requests, hasLength(3));
+    expect(client.requests.last.last['content'], '手机发送');
+    task.stop();
+    client.reply.complete(
+      const AiReply({'role': 'assistant', 'content': ''}, []),
+    );
+    await tester.pumpAndSettle();
+    expect(tester.takeException(), isNull);
+    await tester.pumpWidget(const SizedBox.shrink());
+    task.dispose();
+  });
+
   for (final (width, scale) in [(390.0, 1.0), (240.0, 2.0)]) {
-    testWidgets('工具默认折叠、标题退出码 tag、回复背景与模型 $width', (tester) async {
+    testWidgets('工具默认折叠、回复背景与模型 $width', (tester) async {
       tester.view.physicalSize = Size(width, 1100);
       tester.view.devicePixelRatio = 1;
       addTearDown(tester.view.resetPhysicalSize);
@@ -44,11 +128,16 @@ void main() {
       );
       await tester.pumpWidget(view());
       await tester.pumpAndSettle();
-      expect(find.text('uname -a'), findsNothing);
-      expect(find.text('Linux server 6.8.0'), findsNothing);
-      expect(find.text('退出码 0'), findsOneWidget);
+      // Tool calls stay inside the assistant card and expose compact one-line
+      // command/output previews before the disclosure is opened.
+      expect(find.text('uname -a'), findsOneWidget);
+      expect(find.text('Linux server 6.8.0'), findsOneWidget);
       expect(find.text('original-model'), findsOneWidget);
-      expect(find.text('current-model'), findsNothing);
+      expect(find.byType(MarkdownBody), findsOneWidget);
+      expect(
+        find.text('current-model'),
+        width < 360 ? findsNothing : findsOneWidget,
+      );
       final replyMaterial = find
           .ancestor(of: find.text('服务器运行正常'), matching: find.byType(Material))
           .first;
@@ -65,15 +154,12 @@ void main() {
       await tester.pumpWidget(view());
       await tester.pumpAndSettle();
       expect(find.textContaining('new output'), findsOneWidget);
-      await tester.tap(find.text('退出码 0'));
-      await tester.pumpAndSettle();
-      expect(find.text('uname -a'), findsNothing);
-      expect(find.textContaining('new output'), findsNothing);
+      expect(find.text('uname -a'), findsOneWidget);
+      expect(find.textContaining('new output'), findsOneWidget);
       command.exitCode = 2;
       await tester.pumpWidget(view());
       await tester.pumpAndSettle();
-      expect(find.text('退出码 2'), findsOneWidget);
-      expect(find.textContaining('new output'), findsNothing);
+      expect(find.textContaining('new output'), findsOneWidget);
       expect(tester.takeException(), isNull);
       await tester.pumpWidget(const SizedBox.shrink());
       task.dispose();

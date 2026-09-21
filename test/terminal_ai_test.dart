@@ -42,6 +42,7 @@ const _done = AiReply({'role': 'assistant', 'content': '检查完成'}, []);
 class _Client extends TerminalAiClient {
   final replies = <AiReply>[];
   final requests = <List<Map<String, dynamic>>>[];
+  final configs = <AiSettings>[];
   Completer<AiReply>? pending;
   bool cancelled = false;
   @override
@@ -49,6 +50,7 @@ class _Client extends TerminalAiClient {
     AiSettings settings,
     List<Map<String, dynamic>> messages,
   ) async {
+    configs.add(settings);
     requests.add(List.of(messages));
     return pending?.future ?? replies.removeAt(0);
   }
@@ -81,6 +83,58 @@ class _Executor implements AiCommandExecutor {
 }
 
 void main() {
+  test('会话可切换模型并自动批准需要确认的命令', () async {
+    final client = _Client()
+      ..replies.addAll([_call('pwd', approval: true), _done]);
+    final executor = _Executor();
+    final task = AiTaskController(
+      settings: () => _settings,
+      executorFactory: () => executor,
+      connected: () => true,
+      clientFactory: () => client,
+    );
+    task.setModel('alternate-model');
+    task.setAutoApprove(true);
+    expect(task.activeModel, 'alternate-model');
+    await task.start('检查目录');
+    expect(client.configs.first.model, 'alternate-model');
+    expect(executor.commands, ['pwd']);
+    expect(task.pending, isNull);
+    task.dispose();
+  });
+
+  test('只读模型仍由客户端执行工具命令，不额外拦截或等待审批', () async {
+    final client = _Client()
+      ..replies.addAll([
+        AiReply(
+          const {'role': 'assistant', 'content': null},
+          [
+            AiToolCall(
+              'read-1',
+              '',
+              '读取目录',
+              false,
+              name: 'list_directory',
+              arguments: {'path': '/tmp', 'reason': '查看临时目录'},
+            ),
+          ],
+        ),
+        _done,
+      ]);
+    final executor = _Executor();
+    final task = AiTaskController(
+      settings: () => _settings,
+      executorFactory: () => executor,
+      connected: () => true,
+      clientFactory: () => client,
+    );
+    task.setApprovalMode(AiApprovalMode.readOnly);
+    await task.start('清理临时文件');
+    expect(executor.commands, ["ls -la -- '/tmp'"]);
+    expect(task.pending, isNull);
+    task.dispose();
+  });
+
   test('每条回复记录当轮模型，切换模型不改写旧消息标签', () async {
     var settings = _settings;
     final client = _Client()..replies.addAll([_done, _done]);
@@ -289,6 +343,48 @@ void main() {
       );
     }
   });
+
+  test('默认模型与审批模型可解析到其他服务商', () {
+    const settings = AiSettings(
+      baseUrl: 'https://api.openai.com/v1',
+      apiKey: 'openai-key',
+      model: 'gpt-test',
+      provider: 'openai',
+      protocol: AiProtocol.openai,
+      approvalModel: 'claude-test',
+      approvalProvider: 'anthropic',
+      profiles: [
+        AiProviderProfile(
+          id: 'openai',
+          name: 'OpenAI',
+          baseUrl: 'https://api.openai.com/v1',
+          apiKey: 'openai-key',
+          defaultModel: 'gpt-test',
+          approvalModel: '',
+          protocol: AiProtocol.openai,
+        ),
+        AiProviderProfile(
+          id: 'anthropic',
+          name: 'Anthropic',
+          baseUrl: 'https://api.anthropic.com/v1',
+          apiKey: 'anthropic-key',
+          defaultModel: 'claude-test',
+          approvalModel: 'claude-test',
+          protocol: AiProtocol.anthropic,
+        ),
+      ],
+    );
+    expect(settings.settingsFor('openai').apiKey, 'openai-key');
+    expect(settings.settingsFor('openai').model, 'gpt-test');
+    final approval = settings.approvalSettings!;
+    expect(approval.baseUrl, 'https://api.anthropic.com/v1');
+    expect(approval.apiKey, 'anthropic-key');
+    expect(approval.model, 'claude-test');
+    expect(approval.protocol, AiProtocol.anthropic);
+    expect(approval.provider, 'anthropic');
+    expect(AiSettings.fromJson(settings.toJson()).toJson(), settings.toJson());
+  });
+
 
   test('Anthropic 完整工具循环：专用鉴权、系统提示、多个结果及原始内容回传', () async {
     final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
@@ -695,6 +791,47 @@ void main() {
       ),
     );
     await expectLater(client.complete(config, []), throwsA(isA<AiFailure>()));
+    client.cancel();
+  });
+
+  test('OpenAI SSE 文本增量在完整响应前持续回调', () async {
+    final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+    addTearDown(() => server.close(force: true));
+    server.listen((request) async {
+      final body = jsonDecode(await utf8.decoder.bind(request).join()) as Map;
+      expect(body['stream'], isTrue);
+      request.response.headers.contentType = ContentType(
+        'text',
+        'event-stream',
+        charset: 'utf-8',
+      );
+      for (final content in ['你好', '，这是', '流式回复']) {
+        request.response.write(
+          'data: ${jsonEncode({
+            'choices': [
+              {
+                'delta': {'content': content},
+              },
+            ],
+          })}\n\n',
+        );
+        await request.response.flush();
+        await Future<void>.delayed(const Duration(milliseconds: 5));
+      }
+      request.response.write('data: [DONE]\n\n');
+      await request.response.close();
+    });
+    final client = TerminalAiClient();
+    final chunks = <String>[];
+    final reply = await client.stream(
+      AiSettings(baseUrl: 'http://127.0.0.1:${server.port}/v1', model: 'mock'),
+      [
+        {'role': 'user', 'content': '你好'},
+      ],
+      onText: chunks.add,
+    );
+    expect(chunks, ['你好', '，这是', '流式回复']);
+    expect(reply.text, '你好，这是流式回复');
     client.cancel();
   });
 }

@@ -13,7 +13,7 @@ import 'support.dart';
 void main() {
   for (final width in [320.0, 1280.0]) {
     testWidgets('获取并选择模型，失败保留手填内容 $width', (tester) async {
-      tester.view.physicalSize = Size(width, 1000);
+      tester.view.physicalSize = Size(width, 1400);
       tester.view.devicePixelRatio = 1;
       addTearDown(tester.view.resetPhysicalSize);
       addTearDown(tester.view.resetDevicePixelRatio);
@@ -45,21 +45,24 @@ void main() {
         find.byKey(const ValueKey('ai-setting-key')),
         'test-key',
       );
-      final button = find.byKey(const ValueKey('ai-fetch-models'));
+      final button = find.byTooltip('获取').hitTestable().first;
       await tester.ensureVisible(button);
       await tester.tap(button);
       await tester.pumpAndSettle();
       expect(configs.single.model, isEmpty);
       expect(configs.single.apiKey, 'test-key');
-      await tester.tap(find.text('model-b').last);
+      await tester.tap(
+        find.widgetWithText(MenuItemButton, 'model-b').hitTestable(),
+      );
       await tester.pumpAndSettle();
       final field = find.byKey(const ValueKey('ai-setting-model'));
       expect(
         tester.widget<DropdownMenu<String>>(field).controller!.text,
         'model-b',
       );
-      await tester.ensureVisible(find.text('保存'));
-      await tester.tap(find.text('保存'));
+      final save = find.widgetWithText(FilledButton, '保存');
+      await tester.ensureVisible(save);
+      await tester.tap(save);
       await tester.pumpAndSettle();
       expect(model.aiSettings.model, 'model-b');
       await tester.enterText(field, 'custom-model');
@@ -95,7 +98,7 @@ void main() {
         ),
       ),
     );
-    final button = find.byKey(const ValueKey('ai-fetch-models'));
+    final button = find.byTooltip('获取').hitTestable().first;
     await tester.ensureVisible(button);
     await tester.tap(button);
     await tester.pump();
@@ -120,6 +123,65 @@ void main() {
     controller.dispose();
     model.dispose();
   });
+
+  testWidgets('获取模型使用默认模型所选服务商的凭证', (tester) async {
+    tester.view.physicalSize = const Size(1280, 1000);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    final model = WorkspaceModel(memoryRepository());
+    await model.initialize();
+    final controller = LocalSyncSettingsController(model);
+    final configs = <AiSettings>[];
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: harborTheme(),
+        home: Scaffold(
+          body: AiSettingsPage(
+            controller: controller,
+            modelClientFactory: () => _ModelsClient((settings) async {
+              configs.add(settings);
+              return ['other-model'];
+            }),
+          ),
+        ),
+      ),
+    );
+    Future<void> select(String field, String option) async {
+      final menu = find.byKey(ValueKey('ai-setting-$field'));
+      await tester.ensureVisible(menu);
+      await tester.tap(menu);
+      await tester.pumpAndSettle();
+      await tester.tap(
+        find.widgetWithText(MenuItemButton, option).hitTestable(),
+      );
+      await tester.pumpAndSettle();
+    }
+
+    await select('provider', 'Anthropic');
+    await tester.enterText(
+      find.byKey(const ValueKey('ai-setting-key')),
+      'anthropic-key',
+    );
+    await select('provider', 'OpenAI');
+    await tester.enterText(
+      find.byKey(const ValueKey('ai-setting-key')),
+      'openai-key',
+    );
+    await select('model-provider', 'Anthropic');
+    await tester.ensureVisible(find.byTooltip('获取').hitTestable().first);
+    await tester.tap(find.byTooltip('获取').hitTestable().first);
+    await tester.pumpAndSettle();
+    expect(configs, isNotEmpty);
+    expect(configs.last.baseUrl, 'https://api.anthropic.com/v1');
+    expect(configs.last.apiKey, 'anthropic-key');
+    expect(configs.last.protocol, AiProtocol.anthropic);
+    expect(tester.takeException(), isNull);
+    await tester.pumpWidget(const SizedBox.shrink());
+    controller.dispose();
+    model.dispose();
+  });
+
 }
 
 class _ModelsClient extends TerminalAiClient {

@@ -4,6 +4,8 @@ import 'dart:math' as math;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:desktop_drop/desktop_drop.dart';
+import 'package:flutter_markdown_plus/flutter_markdown_plus.dart';
+import 'package:url_launcher/url_launcher.dart';
 
 import '../data/ai_image.dart';
 import '../data/ai_image_input.dart';
@@ -38,6 +40,12 @@ class _TerminalAiPanelState extends State<TerminalAiPanel> {
   final _expandedTools = Expando<bool>();
   bool _loadingImages = false;
   bool _dragging = false;
+  List<String> _models = const [];
+  String? _modelsKey;
+  String? _modelsError;
+  bool _loadingModels = false;
+  final _modelMenu = MenuController();
+  final _approvalMenu = MenuController();
   AiImageInput get _imageInput =>
       widget.imageInput ?? const NativeAiImageInput();
 
@@ -219,7 +227,11 @@ class _TerminalAiPanelState extends State<TerminalAiPanel> {
 
   void _send() {
     final text = _input.text.trim();
-    if (_loadingImages || (text.isEmpty && _images.isEmpty)) return;
+    if (widget.task.running ||
+        _loadingImages ||
+        (text.isEmpty && _images.isEmpty)) {
+      return;
+    }
     widget.task.start(text, images: List.of(_images));
     if (widget.task.running) {
       _input.clear();
@@ -230,6 +242,391 @@ class _TerminalAiPanelState extends State<TerminalAiPanel> {
         }
       });
     }
+  }
+
+  KeyEventResult _composerKey(FocusNode node, KeyEvent event) {
+    if (event.logicalKey != LogicalKeyboardKey.enter &&
+        event.logicalKey != LogicalKeyboardKey.numpadEnter) {
+      return KeyEventResult.ignored;
+    }
+    final keyboard = HardwareKeyboard.instance;
+    if (keyboard.isControlPressed ||
+        keyboard.isAltPressed ||
+        keyboard.isMetaPressed) {
+      return KeyEventResult.ignored;
+    }
+    // Let the IME confirm its candidate before interpreting Enter as send.
+    if (_input.value.composing.isValid && !_input.value.composing.isCollapsed) {
+      return KeyEventResult.skipRemainingHandlers;
+    }
+    if (event is KeyDownEvent && !widget.task.running) {
+      if (keyboard.isShiftPressed) {
+        _insertText('\n');
+      } else {
+        _send();
+      }
+    }
+    return KeyEventResult.handled;
+  }
+
+  String _modelsCacheKey(AiTaskController task) {
+    final settings = task.settings();
+    return '${settings.baseUrl}|${settings.protocol}|${settings.provider}';
+  }
+
+  Future<void> _loadModels(AiTaskController task, {bool force = false}) async {
+    if (task.running || _loadingModels) return;
+    final key = _modelsCacheKey(task);
+    if (!force && _modelsKey == key && _models.isNotEmpty) return;
+    setState(() {
+      _loadingModels = true;
+      _modelsError = null;
+      _modelsKey = key;
+    });
+    try {
+      final models = await task.listModels();
+      if (!mounted) return;
+      setState(() => _models = models);
+    } catch (error) {
+      if (!mounted) return;
+      setState(() {
+        _models = const [];
+        _modelsError = error is AiFailure ? error.message : '获取模型失败，请重试';
+      });
+    } finally {
+      if (mounted) setState(() => _loadingModels = false);
+    }
+  }
+
+  Future<void> _openModelMenu(AiTaskController task) async {
+    if (task.running) return;
+    await _loadModels(task);
+    if (mounted) _modelMenu.open();
+  }
+
+  MenuStyle _floatingMenuStyle() {
+    final colors = Theme.of(context).colorScheme;
+    return MenuStyle(
+      backgroundColor: WidgetStatePropertyAll(colors.surfaceContainer),
+      surfaceTintColor: const WidgetStatePropertyAll(Colors.transparent),
+      elevation: const WidgetStatePropertyAll(2),
+      padding: const WidgetStatePropertyAll(EdgeInsets.all(8)),
+      shape: WidgetStatePropertyAll(
+        RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+      ),
+    );
+  }
+
+  ButtonStyle _floatingMenuItemStyle({bool selected = false}) {
+    final colors = Theme.of(context).colorScheme;
+    return MenuItemButton.styleFrom(
+      minimumSize: const Size(0, 48),
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+      backgroundColor: selected ? colors.secondaryContainer : null,
+      foregroundColor: selected ? colors.onSecondaryContainer : null,
+    );
+  }
+
+  Widget _modelMenuContent(AiTaskController task) {
+    final models = <String>{task.activeModel, ..._models}
+        .where((model) => model.trim().isNotEmpty)
+        .toList()
+      ..sort();
+    return ConstrainedBox(
+      constraints: const BoxConstraints(minWidth: 260, maxWidth: 360, maxHeight: 360),
+      child: SingleChildScrollView(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            if (_loadingModels)
+              const Padding(
+                padding: EdgeInsets.all(16),
+                child: Center(child: CircularProgressIndicator()),
+              ),
+            if (_modelsError != null)
+              Padding(
+                padding: const EdgeInsets.fromLTRB(16, 12, 16, 4),
+                child: Text(
+                  _modelsError!,
+                  style: TextStyle(color: Theme.of(context).colorScheme.error),
+                ),
+              ),
+            for (final model in models)
+              MenuItemButton(
+                style: _floatingMenuItemStyle(selected: model == task.activeModel),
+                leadingIcon: Icon(
+                  model == task.activeModel
+                      ? Icons.check_rounded
+                      : Icons.circle_outlined,
+                  size: 18,
+                ),
+                onPressed: () {
+                  task.setModel(model);
+                  _modelMenu.close();
+                },
+                child: Text(model, overflow: TextOverflow.ellipsis),
+              ),
+            MenuItemButton(
+              style: _floatingMenuItemStyle(),
+              leadingIcon: const Icon(Icons.refresh_rounded, size: 18),
+              onPressed: () => _loadModels(task, force: true),
+              child: const Text('刷新模型列表'),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _modelPicker(AiTaskController task, {bool compact = false}) {
+    final colors = Theme.of(context).colorScheme;
+    return MenuAnchor(
+      controller: _modelMenu,
+      style: _floatingMenuStyle(),
+      alignmentOffset: const Offset(0, 4),
+      menuChildren: [_modelMenuContent(task)],
+      builder: (context, controller, child) => Tooltip(
+        message: '切换模型（${task.activeModel}）',
+        child: compact
+            ? SizedBox.square(
+                dimension: 40,
+                child: IconButton(
+                  key: const ValueKey('ai-model-picker'),
+                  onPressed: task.running
+                      ? null
+                      : () => _openModelMenu(task),
+                  icon: const Icon(Icons.tune_rounded),
+                  constraints: const BoxConstraints.tightFor(
+                    width: 40,
+                    height: 40,
+                  ),
+                  padding: EdgeInsets.zero,
+                  visualDensity: VisualDensity.compact,
+                ),
+              )
+            : TextButton.icon(
+                key: const ValueKey('ai-model-picker'),
+                onPressed: task.running ? null : () => _openModelMenu(task),
+                icon: Icon(Icons.tune_rounded, size: 15, color: colors.primary),
+                label: Text(
+                  task.activeModel,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: Theme.of(context).textTheme.labelMedium
+                      ?.copyWith(color: colors.primary),
+                ),
+                style: TextButton.styleFrom(
+                  padding: const EdgeInsets.symmetric(horizontal: 6),
+                  minimumSize: const Size(0, 40),
+                  tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                ),
+              ),
+      ),
+    );
+  }
+
+  Widget _compactModelPicker(AiTaskController task) =>
+      _modelPicker(task, compact: true);
+
+  Widget _approvalMode(AiTaskController task, {bool compact = false}) {
+    final mode = task.approvalMode;
+    final label = switch (mode) {
+      AiApprovalMode.auto => '自动审批',
+      AiApprovalMode.readOnly => '只读模式',
+      AiApprovalMode.manual => '手动审批',
+    };
+    final message = switch (mode) {
+      AiApprovalMode.auto => '高风险命令将自动执行',
+      AiApprovalMode.readOnly => 'AI 只发起工具调用，命令由客户端执行',
+      AiApprovalMode.manual => '高风险命令执行前询问',
+    };
+    final icon = switch (mode) {
+      AiApprovalMode.auto => Icons.verified_user_rounded,
+      AiApprovalMode.readOnly => Icons.visibility_outlined,
+      AiApprovalMode.manual => Icons.gpp_maybe_outlined,
+    };
+    return MenuAnchor(
+      controller: _approvalMenu,
+      style: _floatingMenuStyle(),
+      alignmentOffset: const Offset(0, 4),
+      menuChildren: [
+        for (final item in [
+          (AiApprovalMode.manual, '手动审批', '高风险命令执行前询问', Icons.gpp_maybe_outlined),
+          (AiApprovalMode.auto, '自动审批', '高风险命令将自动执行', Icons.verified_user_rounded),
+          (AiApprovalMode.readOnly, '只读模式', 'AI 只能调用读取工具，命令由客户端执行', Icons.visibility_outlined),
+        ])
+          MenuItemButton(
+            style: _floatingMenuItemStyle(selected: mode == item.$1),
+            leadingIcon: Icon(
+              mode == item.$1 ? Icons.check_rounded : item.$4,
+              size: 18,
+            ),
+            onPressed: () => task.setApprovalMode(item.$1),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(item.$2),
+                Text(
+                  item.$3,
+                  style: Theme.of(context).textTheme.bodySmall,
+                ),
+              ],
+            ),
+          ),
+      ],
+      builder: (context, controller, child) => Tooltip(
+        message: message,
+        child: compact
+            ? SizedBox.square(
+                dimension: 40,
+                child: IconButton(
+                  key: const ValueKey('ai-auto-approve'),
+                  onPressed: controller.isOpen
+                      ? controller.close
+                      : controller.open,
+                  icon: Icon(icon),
+                  constraints: const BoxConstraints.tightFor(
+                    width: 40,
+                    height: 40,
+                  ),
+                  padding: EdgeInsets.zero,
+                  visualDensity: VisualDensity.compact,
+                ),
+              )
+            : TextButton.icon(
+                key: const ValueKey('ai-auto-approve'),
+                onPressed: controller.isOpen
+                    ? controller.close
+                    : controller.open,
+                icon: Icon(icon, size: 16),
+                label: Text(label),
+                style: TextButton.styleFrom(
+                  padding: const EdgeInsets.symmetric(horizontal: 6),
+                  minimumSize: const Size(0, 40),
+                  tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                ),
+              ),
+      ),
+    );
+  }
+
+  Widget _composerOptions(AiTaskController task) {
+    final compact = MediaQuery.sizeOf(context).width < 360;
+    final modelControl = task.settings().configured
+        ? compact
+              ? _compactModelPicker(task)
+              : Expanded(
+                  child: Align(
+                    alignment: Alignment.centerRight,
+                    child: _modelPicker(task),
+                  ),
+                )
+        : null;
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(8, 2, 8, 2),
+      child: Row(
+        children: [
+          if (compact)
+            SizedBox.square(
+              dimension: 40,
+              child: IconButton(
+                key: const ValueKey('ai-add-image'),
+                onPressed: task.running || _loadingImages ? null : _pickImages,
+                constraints: const BoxConstraints.tightFor(
+                  width: 40,
+                  height: 40,
+                ),
+                padding: EdgeInsets.zero,
+                visualDensity: VisualDensity.compact,
+                icon: _loadingImages
+                    ? const SizedBox.square(
+                        dimension: 20,
+                        child: CircularProgressIndicator(strokeWidth: 2),
+                      )
+                    : const Icon(
+                        Icons.add_photo_alternate_outlined,
+                        semanticLabel: '添加图片',
+                      ),
+              ),
+            )
+          else
+            IconButton(
+              key: const ValueKey('ai-add-image'),
+              onPressed: task.running || _loadingImages ? null : _pickImages,
+              icon: _loadingImages
+                  ? const SizedBox.square(
+                      dimension: 20,
+                      child: CircularProgressIndicator(strokeWidth: 2),
+                    )
+                  : const Icon(
+                      Icons.add_photo_alternate_outlined,
+                      semanticLabel: '添加图片',
+                    ),
+            ),
+          _approvalMode(task, compact: compact),
+          if (modelControl != null) ...[
+            modelControl,
+            if (!compact) const SizedBox(width: 4),
+          ] else
+            const Spacer(),
+          ValueListenableBuilder<TextEditingValue>(
+            valueListenable: _input,
+            builder: (context, value, _) => compact
+                ? SizedBox.square(
+                    dimension: 40,
+                    child: IconButton.filled(
+                      key: const ValueKey('ai-send'),
+                      onPressed: task.running
+                          ? task.stop
+                          : _loadingImages ||
+                                (value.text.trim().isEmpty && _images.isEmpty)
+                          ? null
+                          : _send,
+                      style: IconButton.styleFrom(
+                        minimumSize: const Size.square(40),
+                        maximumSize: const Size.square(40),
+                        padding: EdgeInsets.zero,
+                        visualDensity: VisualDensity.compact,
+                        tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                      ),
+                      constraints: const BoxConstraints.tightFor(
+                        width: 40,
+                        height: 40,
+                      ),
+                      icon: Icon(
+                        task.running
+                            ? Icons.stop_rounded
+                            : Icons.arrow_upward_rounded,
+                        semanticLabel: task.running ? '停止' : '发送',
+                      ),
+                    ),
+                  )
+                : IconButton.filled(
+                    key: const ValueKey('ai-send'),
+                    onPressed: task.running
+                        ? task.stop
+                        : _loadingImages ||
+                              (value.text.trim().isEmpty && _images.isEmpty)
+                        ? null
+                        : _send,
+                    style: IconButton.styleFrom(
+                      minimumSize: const Size.square(48),
+                      maximumSize: const Size.square(48),
+                      padding: EdgeInsets.zero,
+                    ),
+                    icon: Icon(
+                      task.running
+                          ? Icons.stop_rounded
+                          : Icons.arrow_upward_rounded,
+                      semanticLabel: task.running ? '停止' : '发送',
+                    ),
+                  ),
+          ),
+        ],
+      ),
+    );
   }
 
   Widget _composer(AiTaskController task) {
@@ -250,121 +647,142 @@ class _TerminalAiPanelState extends State<TerminalAiPanel> {
               const SizedBox(height: 8),
             ],
             Row(
-              crossAxisAlignment: CrossAxisAlignment.end,
               children: [
-                IconButton(
-                  key: const ValueKey('ai-add-image'),
-                  onPressed: task.running || _loadingImages
-                      ? null
-                      : _pickImages,
-                  icon: _loadingImages
-                      ? const SizedBox.square(
-                          dimension: 20,
-                          child: CircularProgressIndicator(strokeWidth: 2),
-                        )
-                      : const Icon(
-                          Icons.add_photo_alternate_outlined,
-                          semanticLabel: '添加图片',
-                        ),
-                ),
                 Expanded(
-                  child: Actions(
-                    actions: {
-                      PasteTextIntent: CallbackAction<PasteTextIntent>(
-                        onInvoke: (_) {
-                          _paste();
-                          return null;
-                        },
-                      ),
-                    },
-                    child: TextField(
-                      key: const ValueKey('ai-task-input'),
-                      controller: _input,
-                      enabled: !task.running,
-                      contentInsertionConfiguration:
-                          ContentInsertionConfiguration(
-                            allowedMimeTypes: const [
-                              'image/png',
-                              'image/jpeg',
-                              'image/webp',
-                              'image/gif',
-                            ],
-                            onContentInserted: (content) =>
-                                _loadImages(() async {
-                                  if (content.data == null) {
-                                    throw const AiFailure('无法读取粘贴的图片');
-                                  }
-                                  final image = await AiImage.fromBytes(
-                                    '粘贴的图片',
-                                    content.data!,
-                                  );
-                                  if (mounted) _addImage(image);
-                                }),
+                  child: Focus(
+                    canRequestFocus: false,
+                    onKeyEvent: _composerKey,
+                    child: Actions(
+                      actions: {
+                        PasteTextIntent: CallbackAction<PasteTextIntent>(
+                          onInvoke: (_) {
+                            _paste();
+                            return null;
+                          },
+                        ),
+                      },
+                      child: TextField(
+                        key: const ValueKey('ai-task-input'),
+                        controller: _input,
+                        enabled: !task.running,
+                        keyboardType: TextInputType.multiline,
+                        textInputAction: TextInputAction.send,
+                        onEditingComplete: () {},
+                        onSubmitted: (_) => _send(),
+                        contentInsertionConfiguration:
+                            ContentInsertionConfiguration(
+                              allowedMimeTypes: const [
+                                'image/png',
+                                'image/jpeg',
+                                'image/webp',
+                                'image/gif',
+                              ],
+                              onContentInserted: (content) =>
+                                  _loadImages(() async {
+                                    if (content.data == null) {
+                                      throw const AiFailure('无法读取粘贴的图片');
+                                    }
+                                    final image = await AiImage.fromBytes(
+                                      '粘贴的图片',
+                                      content.data!,
+                                    );
+                                    if (mounted) _addImage(image);
+                                  }),
+                            ),
+                        contextMenuBuilder: (context, state) =>
+                            AdaptiveTextSelectionToolbar.buttonItems(
+                              anchors: state.contextMenuAnchors,
+                              buttonItems: [
+                                for (final item in state.contextMenuButtonItems)
+                                  if (item.type != ContextMenuButtonType.paste)
+                                    item,
+                                ContextMenuButtonItem(
+                                  type: ContextMenuButtonType.paste,
+                                  onPressed: () {
+                                    state.hideToolbar();
+                                    _paste();
+                                  },
+                                ),
+                              ],
+                            ),
+                        minLines: 1,
+                        maxLines: 4,
+                        decoration: const InputDecoration(
+                          hintText: '发送消息…',
+                          filled: false,
+                          border: InputBorder.none,
+                          enabledBorder: InputBorder.none,
+                          focusedBorder: InputBorder.none,
+                          disabledBorder: InputBorder.none,
+                          contentPadding: EdgeInsets.symmetric(
+                            horizontal: 12,
+                            vertical: 12,
                           ),
-                      contextMenuBuilder: (context, state) =>
-                          AdaptiveTextSelectionToolbar.buttonItems(
-                            anchors: state.contextMenuAnchors,
-                            buttonItems: [
-                              for (final item in state.contextMenuButtonItems)
-                                if (item.type != ContextMenuButtonType.paste)
-                                  item,
-                              ContextMenuButtonItem(
-                                type: ContextMenuButtonType.paste,
-                                onPressed: () {
-                                  state.hideToolbar();
-                                  _paste();
-                                },
-                              ),
-                            ],
-                          ),
-                      minLines: 1,
-                      maxLines: 4,
-                      decoration: const InputDecoration(
-                        hintText: '发送消息…',
-                        filled: false,
-                        border: InputBorder.none,
-                        enabledBorder: InputBorder.none,
-                        focusedBorder: InputBorder.none,
-                        disabledBorder: InputBorder.none,
-                        contentPadding: EdgeInsets.symmetric(
-                          horizontal: 12,
-                          vertical: 12,
                         ),
                       ),
-                    ),
-                  ),
-                ),
-                const SizedBox(width: 4),
-                ValueListenableBuilder<TextEditingValue>(
-                  valueListenable: _input,
-                  builder: (context, value, _) => IconButton.filled(
-                    key: const ValueKey('ai-send'),
-                    onPressed: task.running
-                        ? task.stop
-                        : _loadingImages ||
-                              (value.text.trim().isEmpty && _images.isEmpty)
-                        ? null
-                        : _send,
-                    style: IconButton.styleFrom(
-                      minimumSize: const Size(48, 48),
-                    ),
-                    icon: Icon(
-                      task.running
-                          ? Icons.stop_rounded
-                          : Icons.arrow_upward_rounded,
-                      semanticLabel: task.running ? '停止' : '发送',
                     ),
                   ),
                 ),
               ],
             ),
+            _composerOptions(task),
           ],
         ),
       ),
     );
   }
 
-  Widget _entry(AiTaskEntry entry) {
+  List<List<AiTaskEntry>> _messageGroups(List<AiTaskEntry> entries) {
+    final groups = <List<AiTaskEntry>>[];
+    for (final entry in entries) {
+      if (entry.user == true ||
+          entry.notice == true ||
+          groups.isEmpty ||
+          groups.last.first.user == true ||
+          groups.last.first.notice == true) {
+        groups.add([entry]);
+      } else {
+        groups.last.add(entry);
+      }
+    }
+    return groups;
+  }
+
+  Widget _markdown(String text) {
+    final theme = Theme.of(context);
+    return MarkdownBody(
+      data: text,
+      selectable: true,
+      styleSheet: MarkdownStyleSheet.fromTheme(theme).copyWith(
+        p: theme.textTheme.bodyMedium,
+        code: theme.textTheme.bodyMedium?.copyWith(
+          fontFamily: 'monospace',
+          backgroundColor: theme.colorScheme.surfaceContainerHighest,
+        ),
+        codeblockDecoration: BoxDecoration(
+          color: theme.colorScheme.surfaceContainerLow,
+          borderRadius: BorderRadius.circular(8),
+        ),
+      ),
+      onTapLink: (_, href, _) async {
+        final uri = Uri.tryParse(href ?? '');
+        if (uri == null ||
+            !const ['https', 'http', 'mailto'].contains(uri.scheme)) {
+          return;
+        }
+        try {
+          if (!await launchUrl(uri)) {
+            _notice(const AiFailure('无法打开链接'));
+          }
+        } catch (_) {
+          _notice(const AiFailure('无法打开链接'));
+        }
+      },
+    );
+  }
+
+  Widget _entry(List<AiTaskEntry> entries) {
+    final entry = entries.first;
     final theme = Theme.of(context);
     final colors = theme.colorScheme;
     if (entry.notice == true) {
@@ -391,7 +809,7 @@ class _TerminalAiPanelState extends State<TerminalAiPanel> {
         ),
       );
     }
-    if (entry.command) return _toolEntry(entry);
+    final model = entries.map((item) => item.model).nonNulls.firstOrNull;
     return Padding(
       padding: EdgeInsets.only(bottom: 16, left: entry.user == true ? 20 : 0),
       child: Material(
@@ -416,7 +834,7 @@ class _TerminalAiPanelState extends State<TerminalAiPanel> {
                     const SizedBox(width: 8),
                     Expanded(
                       child: Text(
-                        entry.model ?? 'AI',
+                        model ?? 'AI',
                         style: theme.textTheme.labelMedium?.copyWith(
                           color: colors.primary,
                         ),
@@ -426,12 +844,20 @@ class _TerminalAiPanelState extends State<TerminalAiPanel> {
                 ),
                 const SizedBox(height: 10),
               ],
-              if (entry.images?.isNotEmpty == true) ...[
-                _thumbnails(entry.images!),
-                if (entry.text.isNotEmpty) const SizedBox(height: 10),
+              for (var index = 0; index < entries.length; index++) ...[
+                if (index > 0) const SizedBox(height: 12),
+                if (entries[index].command)
+                  _toolEntry(entries[index])
+                else ...[
+                  if (entries[index].images?.isNotEmpty == true) ...[
+                    _thumbnails(entries[index].images!),
+                    if (entries[index].text.isNotEmpty)
+                      const SizedBox(height: 10),
+                  ],
+                  if (entries[index].text.isNotEmpty)
+                    _markdown(entries[index].text),
+                ],
               ],
-              if (entry.text.isNotEmpty)
-                SelectableText(entry.text, style: theme.textTheme.bodyMedium),
             ],
           ),
         ),
@@ -442,117 +868,112 @@ class _TerminalAiPanelState extends State<TerminalAiPanel> {
   Widget _toolEntry(AiTaskEntry entry) {
     final theme = Theme.of(context);
     final colors = theme.colorScheme;
-    final failed =
-        entry.finished && entry.exitCode != null && entry.exitCode != 0;
-    final label = entry.interruption != null
-        ? (entry.started == true ? '已中止' : '未执行')
-        : entry.finished
-        ? (entry.exitCode == null ? '无退出码' : '退出码 ${entry.exitCode}')
-        : entry.started == true
-        ? '执行中'
-        : '待确认';
     final shape = HarborShapes.superellipse(BorderRadius.circular(20));
-    return Padding(
-      padding: const EdgeInsets.only(bottom: 12),
-      child: ExpansionTile(
-        key: ObjectKey(entry),
-        initiallyExpanded: _expandedTools[entry] ?? false,
-        onExpansionChanged: (expanded) => _expandedTools[entry] = expanded,
-        shape: shape,
-        collapsedShape: shape,
-        backgroundColor: colors.surfaceContainerLow,
-        collapsedBackgroundColor: colors.surfaceContainerLow,
-        iconColor: colors.onSurfaceVariant,
-        collapsedIconColor: colors.onSurfaceVariant,
-        tilePadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
-        childrenPadding: const EdgeInsets.fromLTRB(14, 0, 14, 14),
-        title: Text.rich(
-          TextSpan(
-            children: [
-              WidgetSpan(
-                alignment: PlaceholderAlignment.middle,
-                child: Padding(
-                  padding: const EdgeInsets.only(right: 8),
-                  child: Icon(
-                    Icons.terminal_rounded,
-                    size: 18,
-                    color: colors.primary,
-                  ),
+    final expanded = _expandedTools[entry] ?? false;
+    return ExpansionTile(
+      key: ObjectKey(entry),
+      initiallyExpanded: expanded,
+      onExpansionChanged: (value) =>
+          setState(() => _expandedTools[entry] = value),
+      shape: shape,
+      collapsedShape: shape,
+      backgroundColor: colors.surfaceContainerLow,
+      collapsedBackgroundColor: colors.surfaceContainerLow,
+      iconColor: colors.onSurfaceVariant,
+      collapsedIconColor: colors.onSurfaceVariant,
+      tilePadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+      childrenPadding: const EdgeInsets.fromLTRB(14, 0, 14, 14),
+      title: Text.rich(
+        TextSpan(
+          children: [
+            WidgetSpan(
+              alignment: PlaceholderAlignment.middle,
+              child: Padding(
+                padding: const EdgeInsets.only(right: 8),
+                child: Icon(
+                  Icons.terminal_rounded,
+                  size: 18,
+                  color: colors.primary,
                 ),
-              ),
-              TextSpan(text: entry.reason ?? '执行命令'),
-              WidgetSpan(
-                alignment: PlaceholderAlignment.middle,
-                child: Padding(
-                  padding: const EdgeInsets.only(left: 8),
-                  child: Container(
-                    padding: const EdgeInsets.symmetric(
-                      horizontal: 8,
-                      vertical: 3,
-                    ),
-                    decoration: ShapeDecoration(
-                      shape: const StadiumBorder(),
-                      color: failed
-                          ? colors.errorContainer
-                          : colors.secondaryContainer,
-                    ),
-                    child: Text(
-                      label,
-                      style: theme.textTheme.labelSmall?.copyWith(
-                        color: failed
-                            ? colors.onErrorContainer
-                            : colors.onSecondaryContainer,
-                      ),
-                    ),
-                  ),
-                ),
-              ),
-            ],
-          ),
-          style: theme.textTheme.labelLarge,
-        ),
-        children: [
-          Align(
-            alignment: Alignment.centerLeft,
-            child: SelectableText(
-              entry.text,
-              style: theme.textTheme.bodyMedium?.copyWith(
-                fontFamily: 'monospace',
               ),
             ),
-          ),
-          if (entry.output.isNotEmpty) ...[
-            const SizedBox(height: 12),
-            ConstrainedBox(
-              constraints: const BoxConstraints(maxHeight: 240),
-              child: SingleChildScrollView(
-                child: Align(
-                  alignment: Alignment.centerLeft,
-                  child: SelectableText(
-                    entry.output,
+            TextSpan(text: entry.reason ?? '执行命令'),
+          ],
+        ),
+        style: theme.textTheme.labelLarge,
+      ),
+      subtitle: expanded
+          ? null
+          : Padding(
+              padding: const EdgeInsets.only(top: 6),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  Text(
+                    entry.text.replaceAll(RegExp(r'\s+'), ' '),
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: theme.textTheme.bodySmall?.copyWith(
+                      fontFamily: 'monospace',
+                    ),
+                  ),
+                  const SizedBox(height: 4),
+                  Text(
+                    entry.output.isNotEmpty
+                        ? entry.output.replaceAll(RegExp(r'\s+'), ' ')
+                        : entry.interruption ??
+                              (entry.finished ? '无输出' : '等待输出…'),
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
                     style: theme.textTheme.bodySmall?.copyWith(
                       fontFamily: 'monospace',
                       color: colors.onSurfaceVariant,
                     ),
                   ),
+                ],
+              ),
+            ),
+      children: [
+        Align(
+          alignment: Alignment.centerLeft,
+          child: SelectableText(
+            entry.text,
+            style: theme.textTheme.bodyMedium?.copyWith(
+              fontFamily: 'monospace',
+            ),
+          ),
+        ),
+        if (entry.output.isNotEmpty) ...[
+          const SizedBox(height: 12),
+          ConstrainedBox(
+            constraints: const BoxConstraints(maxHeight: 240),
+            child: SingleChildScrollView(
+              child: Align(
+                alignment: Alignment.centerLeft,
+                child: SelectableText(
+                  entry.output,
+                  style: theme.textTheme.bodySmall?.copyWith(
+                    fontFamily: 'monospace',
+                    color: colors.onSurfaceVariant,
+                  ),
                 ),
               ),
             ),
-          ],
-          if (entry.interruption != null) ...[
-            const SizedBox(height: 8),
-            Align(
-              alignment: Alignment.centerLeft,
-              child: Text(
-                entry.interruption!,
-                style: theme.textTheme.bodySmall?.copyWith(
-                  color: colors.onSurfaceVariant,
-                ),
-              ),
-            ),
-          ],
+          ),
         ],
-      ),
+        if (entry.interruption != null) ...[
+          const SizedBox(height: 8),
+          Align(
+            alignment: Alignment.centerLeft,
+            child: Text(
+              entry.interruption!,
+              style: theme.textTheme.bodySmall?.copyWith(
+                color: colors.onSurfaceVariant,
+              ),
+            ),
+          ),
+        ],
+      ],
     );
   }
 
@@ -565,6 +986,7 @@ class _TerminalAiPanelState extends State<TerminalAiPanel> {
         listenable: widget.task,
         builder: (context, _) {
           final task = widget.task;
+          final messages = _messageGroups(task.entries);
           final configured = task.settings().configured;
           return DropTarget(
             enable:
@@ -680,11 +1102,11 @@ class _TerminalAiPanelState extends State<TerminalAiPanel> {
                                           key: const ValueKey('ai-transcript'),
                                           controller: _scroll,
                                           itemCount:
-                                              task.entries.length +
+                                              messages.length +
                                               (task.running ? 1 : 0),
                                           itemBuilder: (_, index) =>
-                                              index < task.entries.length
-                                              ? _entry(task.entries[index])
+                                              index < messages.length
+                                              ? _entry(messages[index])
                                               : _AiActivity(
                                                   key: const ValueKey(
                                                     'ai-activity',
@@ -713,6 +1135,20 @@ class _TerminalAiPanelState extends State<TerminalAiPanel> {
                                 ],
                                 if (task.pending != null) ...[
                                   const SizedBox(height: 10),
+                                  Row(
+                                    children: [
+                                      Expanded(
+                                        child: Text(task.pending!.reason),
+                                      ),
+                                      _approvalMode(
+                                        task,
+                                        compact:
+                                            MediaQuery.sizeOf(context).width <
+                                            360,
+                                      ),
+                                    ],
+                                  ),
+                                  const SizedBox(height: 4),
                                   ConstrainedBox(
                                     constraints: const BoxConstraints(
                                       maxHeight: 120,
@@ -722,8 +1158,6 @@ class _TerminalAiPanelState extends State<TerminalAiPanel> {
                                         crossAxisAlignment:
                                             CrossAxisAlignment.stretch,
                                         children: [
-                                          Text(task.pending!.reason),
-                                          const SizedBox(height: 8),
                                           SelectableText(
                                             task.pending!.command,
                                             style: Theme.of(context)

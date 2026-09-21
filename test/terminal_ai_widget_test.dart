@@ -17,7 +17,7 @@ import 'support.dart';
 void main() {
   for (final width in [320.0, 1280.0]) {
     testWidgets('厂商预设与接口选择保存，切换厂商不混用密钥 $width', (tester) async {
-      tester.view.physicalSize = Size(width, 1000);
+      tester.view.physicalSize = Size(width, 1400);
       tester.view.devicePixelRatio = 1;
       addTearDown(tester.view.resetPhysicalSize);
       addTearDown(tester.view.resetDevicePixelRatio);
@@ -36,7 +36,9 @@ void main() {
         await tester.ensureVisible(menu);
         await tester.tap(menu);
         await tester.pumpAndSettle();
-        await tester.tap(find.text(option).last);
+        await tester.tap(
+          find.widgetWithText(MenuItemButton, option).hitTestable(),
+        );
         await tester.pumpAndSettle();
       }
 
@@ -111,6 +113,280 @@ void main() {
       model.dispose();
     });
   }
+
+  testWidgets('默认模型与审批模型可选用其他服务商', (tester) async {
+    tester.view.physicalSize = const Size(1280, 1000);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    final model = WorkspaceModel(memoryRepository());
+    await model.initialize();
+    final controller = LocalSyncSettingsController(model);
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: harborTheme(),
+        home: Scaffold(body: AiSettingsPage(controller: controller)),
+      ),
+    );
+    Future<void> select(String field, String option) async {
+      final menu = find.byKey(ValueKey('ai-setting-$field'));
+      await tester.ensureVisible(menu);
+      await tester.tap(menu);
+      await tester.pumpAndSettle();
+      await tester.tap(
+        find.widgetWithText(MenuItemButton, option).hitTestable(),
+      );
+      await tester.pumpAndSettle();
+    }
+
+    Future<void> fill(String field, String text) async {
+      final finder = find.byKey(ValueKey('ai-setting-$field'));
+      await tester.ensureVisible(finder);
+      await tester.enterText(finder, text);
+    }
+
+    await select('provider', 'Anthropic');
+    await fill('key', 'anthropic-key');
+    await fill('model', 'claude-test');
+    await select('provider', 'OpenAI');
+    await fill('key', 'openai-key');
+    await fill('model', 'gpt-test');
+    await select('approval-provider', 'Anthropic');
+    await fill('approval-model', 'claude-test');
+    await tester.ensureVisible(find.text('保存'));
+    await tester.tap(find.text('保存'));
+    await tester.pumpAndSettle();
+    expect(model.aiSettings.provider, 'openai');
+    expect(model.aiSettings.model, 'gpt-test');
+    expect(model.aiSettings.apiKey, 'openai-key');
+    expect(model.aiSettings.approvalProvider, 'anthropic');
+    expect(model.aiSettings.approvalModel, 'claude-test');
+    expect(
+      model.aiSettings.profiles.map((profile) => profile.id),
+      containsAll(['openai', 'anthropic']),
+    );
+    expect(model.aiSettings.approvalSettings!.apiKey, 'anthropic-key');
+    expect(model.aiSettings.approvalSettings!.protocol, AiProtocol.anthropic);
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: harborTheme(),
+        home: Scaffold(
+          body: AiSettingsPage(key: UniqueKey(), controller: controller),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+    expect(
+      tester
+          .widget<DropdownMenu<String>>(
+            find.byKey(const ValueKey('ai-setting-model')),
+          )
+          .controller!
+          .text,
+      'gpt-test',
+    );
+    expect(
+      tester
+          .widget<DropdownMenu<String>>(
+            find.byKey(const ValueKey('ai-setting-approval-model')),
+          )
+          .controller!
+          .text,
+      'claude-test',
+    );
+    expect(tester.takeException(), isNull);
+    await tester.pumpWidget(const SizedBox.shrink());
+    controller.dispose();
+    model.dispose();
+  });
+
+  testWidgets('审批模型可以清除', (tester) async {
+    tester.view.physicalSize = const Size(1280, 1000);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    final model = WorkspaceModel(memoryRepository());
+    await model.initialize();
+    final controller = LocalSyncSettingsController(model);
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: harborTheme(),
+        home: Scaffold(body: AiSettingsPage(controller: controller)),
+      ),
+    );
+    Future<void> select(String field, String option) async {
+      final menu = find.byKey(ValueKey('ai-setting-$field'));
+      await tester.ensureVisible(menu);
+      await tester.tap(menu);
+      await tester.pumpAndSettle();
+      await tester.tap(
+        find.widgetWithText(MenuItemButton, option).hitTestable(),
+      );
+      await tester.pumpAndSettle();
+    }
+
+    await select('provider', 'OpenAI');
+    await tester.enterText(
+      find.byKey(const ValueKey('ai-setting-key')),
+      'openai-key',
+    );
+    await tester.enterText(
+      find.byKey(const ValueKey('ai-setting-model')),
+      'gpt-test',
+    );
+    await tester.enterText(
+      find.byKey(const ValueKey('ai-setting-approval-model')),
+      'claude-test',
+    );
+    await tester.enterText(
+      find.byKey(const ValueKey('ai-setting-approval-model')),
+      '',
+    );
+    await tester.pumpAndSettle();
+    expect(
+      tester
+          .widget<DropdownMenu<String>>(
+            find.byKey(const ValueKey('ai-setting-approval-model')),
+          )
+          .controller!
+          .text,
+      isEmpty,
+    );
+    await tester.ensureVisible(find.text('保存'));
+    await tester.tap(find.text('保存'));
+    await tester.pumpAndSettle();
+    expect(model.aiSettings.approvalModel, isEmpty);
+    expect(tester.takeException(), isNull);
+    await tester.pumpWidget(const SizedBox.shrink());
+    controller.dispose();
+    model.dispose();
+  });
+
+
+  testWidgets('新建的自定义服务商可以删除', (tester) async {
+    tester.view.physicalSize = const Size(1280, 1000);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    final model = WorkspaceModel(memoryRepository());
+    await model.initialize();
+    final controller = LocalSyncSettingsController(model);
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: harborTheme(),
+        home: Scaffold(body: AiSettingsPage(controller: controller)),
+      ),
+    );
+    Future<void> openProviderMenu() async {
+      await tester.tap(find.byKey(const ValueKey('ai-provider-more')));
+      await tester.pumpAndSettle();
+    }
+
+    await openProviderMenu();
+    expect(
+      tester
+          .widget<MenuItemButton>(
+            find.byKey(const ValueKey('ai-delete-provider')),
+          )
+          .onPressed,
+      isNull,
+    );
+    await tester.tapAt(const Offset(8, 8));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byTooltip('新建服务商'));
+    await tester.pumpAndSettle();
+    await tester.enterText(
+      find.descendant(
+        of: find.byType(AlertDialog),
+        matching: find.byType(TextField),
+      ),
+      '我的代理',
+    );
+    await tester.tap(find.widgetWithText(FilledButton, '新建'));
+    await tester.pumpAndSettle();
+    await openProviderMenu();
+    expect(
+      tester
+          .widget<MenuItemButton>(
+            find.byKey(const ValueKey('ai-delete-provider')),
+          )
+          .onPressed,
+      isNotNull,
+    );
+    expect(find.text('我的代理'), findsWidgets);
+    await tester.tap(find.byKey(const ValueKey('ai-delete-provider')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.widgetWithText(FilledButton, '删除'));
+    await tester.pumpAndSettle();
+    await openProviderMenu();
+    expect(
+      tester
+          .widget<MenuItemButton>(
+            find.byKey(const ValueKey('ai-delete-provider')),
+          )
+          .onPressed,
+      isNull,
+    );
+    expect(find.text('我的代理'), findsNothing);
+    expect(tester.takeException(), isNull);
+    await tester.pumpWidget(const SizedBox.shrink());
+    controller.dispose();
+    model.dispose();
+  });
+
+  testWidgets('服务商名称可以重命名', (tester) async {
+    tester.view.physicalSize = const Size(1280, 1000);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    final model = WorkspaceModel(memoryRepository());
+    await model.initialize();
+    final controller = LocalSyncSettingsController(model);
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: harborTheme(),
+        home: Scaffold(body: AiSettingsPage(controller: controller)),
+      ),
+    );
+    await tester.tap(find.byTooltip('新建服务商'));
+    await tester.pumpAndSettle();
+    await tester.enterText(
+      find.descendant(
+        of: find.byType(AlertDialog),
+        matching: find.byType(TextField),
+      ),
+      '我的代理',
+    );
+    await tester.tap(find.widgetWithText(FilledButton, '新建'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const ValueKey('ai-provider-more')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const ValueKey('ai-rename-provider')));
+    await tester.pumpAndSettle();
+    await tester.enterText(
+      find.descendant(
+        of: find.byType(AlertDialog),
+        matching: find.byType(TextField),
+      ),
+      '公司网关',
+    );
+    await tester.tap(
+      find.descendant(
+        of: find.byType(AlertDialog),
+        matching: find.widgetWithText(FilledButton, '保存'),
+      ),
+    );
+    await tester.pumpAndSettle();
+    expect(find.text('公司网关'), findsWidgets);
+    expect(find.text('我的代理'), findsNothing);
+    expect(tester.takeException(), isNull);
+    await tester.pumpWidget(const SizedBox.shrink());
+    controller.dispose();
+    model.dispose();
+  });
+
+
+
   for (final width in [390.0, 1280.0]) {
     testWidgets('终端 AI 入口绑定当前会话 $width', (tester) async {
       tester.view.physicalSize = Size(width, 900);
