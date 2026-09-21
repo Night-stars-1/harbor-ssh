@@ -1,10 +1,10 @@
 name: Build Harbor SSH
 on:
-  push:
-  pull_request:
+  release:
+    types: [published]
   workflow_dispatch:
 permissions:
-  contents: read
+  contents: write
 jobs:
   verify:
     runs-on: ubuntu-latest
@@ -33,12 +33,15 @@ jobs:
           - os: windows-latest
             target: windows
             output: build/windows/x64/runner/Release/
+            asset: harbor-ssh-windows.zip
           - os: macos-latest
             target: macos
             output: build/macos/Build/Products/Release/*.app
+            asset: harbor-ssh-macos.zip
           - os: ubuntu-latest
             target: apk
             output: build/app/outputs/flutter-apk/*.apk
+            asset: harbor-ssh.apk
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -67,3 +70,25 @@ jobs:
         with:
           name: harbor-ssh-${{ matrix.target }}
           path: ${{ matrix.output }}
+      - name: Pack release asset
+        if: github.event_name == 'release'
+        shell: bash
+        run: |
+          case '${{ matrix.target }}' in
+            windows)
+              tar -a -c -f '${{ matrix.asset }}' -C build/windows/x64/runner/Release .
+              ;;
+            macos)
+              shopt -s nullglob
+              apps=(build/macos/Build/Products/Release/*.app)
+              ditto -c -k --keepParent "${apps[0]}" '${{ matrix.asset }}'
+              ;;
+            apk)
+              cp build/app/outputs/flutter-apk/app-release.apk '${{ matrix.asset }}'
+              ;;
+          esac
+      - name: Upload to GitHub Release
+        if: github.event_name == 'release'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release upload '${{ github.event.release.tag_name }}' '${{ matrix.asset }}' --clobber
