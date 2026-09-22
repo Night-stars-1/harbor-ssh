@@ -64,6 +64,7 @@ void main() {
     expect(find.text('手动填写'), findsNothing);
     await tester.tap(find.text('Deployment').last);
     await tester.pumpAndSettle();
+    expect(find.text('使用已保存的私钥'), findsNothing);
     await tester.ensureVisible(save);
     await tester.tap(save);
     await tester.pumpAndSettle();
@@ -73,12 +74,84 @@ void main() {
     expect(tested?.authMethod, AuthMethod.privateKey);
     expect(connected, same(credentials));
     expect(find.text('连接成功，SSH 身份验证已通过。'), findsOneWidget);
+    // 成功反馈是瞬时提示，不占表单布局，随后自动消失。
+    expect(
+      find.descendant(
+        of: find.byType(HostEditor),
+        matching: find.text('连接成功，SSH 身份验证已通过。'),
+      ),
+      findsNothing,
+    );
+    await tester.pump(const Duration(seconds: 4));
+    expect(find.text('连接成功，SSH 身份验证已通过。'), findsNothing);
     expect(find.byType(HostEditor), findsOneWidget);
     await tester.ensureVisible(find.text('保存连接'));
     await tester.ensureVisible(find.text('保存连接'));
     await tester.tap(find.text('保存连接'));
     await tester.pumpAndSettle();
     expect(saved?.userId, user.id);
+  });
+
+  testWidgets('测试成功的提示显示在对话框之上，关闭后不残留叠加层', (tester) async {
+    tester.view.physicalSize = const Size(390, 844);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    Host? saved;
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: Builder(
+            builder: (context) => TextButton(
+              onPressed: () => showDialog<void>(
+                context: context,
+                builder: (_) => HostEditor(
+                  host: Host(
+                    id: 'host',
+                    name: 'Server',
+                    address: 'localhost',
+                    username: user.username,
+                    userId: user.id,
+                    authMethod: user.authMethod,
+                  ),
+                  users: const [user],
+                  userCredentials: const {'key-user': credentials},
+                  onSave: (host, _) async {
+                    saved = host;
+                  },
+                  onTest: (_, _) async {},
+                ),
+              ),
+              child: const Text('编辑'),
+            ),
+          ),
+        ),
+      ),
+    );
+    await tester.tap(find.text('编辑'));
+    await tester.pumpAndSettle();
+    final notice = find.text('连接成功，SSH 身份验证已通过。');
+    await tester.ensureVisible(find.text('测试连接'));
+    await tester.tap(find.text('测试连接'));
+    await tester.pumpAndSettle();
+    expect(notice, findsOneWidget);
+    // 提示挂在导航叠加层而不是底层 Scaffold，因此位于对话框之上。
+    expect(
+      find.ancestor(of: notice, matching: find.byType(Scaffold)),
+      findsNothing,
+    );
+    expect(
+      find.descendant(of: find.byType(Dialog), matching: notice),
+      findsNothing,
+    );
+    // 提示显示期间不拦截点击，对话框仍可保存；关闭后不残留提示或计时器。
+    await tester.ensureVisible(find.text('保存连接'));
+    await tester.tap(find.text('保存连接'));
+    await tester.pumpAndSettle();
+    expect(saved?.userId, user.id);
+    expect(notice, findsNothing);
+    expect(find.byType(HostEditor), findsNothing);
+    expect(tester.takeException(), isNull);
   });
 
   testWidgets('缺少已存密码或私钥时阻止连接且不显示手动输入', (tester) async {

@@ -21,6 +21,7 @@ import 'package:xterm/src/ui/terminal_text_style.dart';
 import 'package:xterm/src/ui/terminal_theme.dart';
 
 typedef EditableRectCallback = void Function(Rect rect, Rect caretRect);
+typedef HorizontalMetricsCallback = void Function(double extent, double offset);
 
 class RenderTerminal extends RenderBox with RelayoutWhenSystemFontsChangeMixin {
   RenderTerminal({
@@ -39,6 +40,7 @@ class RenderTerminal extends RenderBox with RelayoutWhenSystemFontsChangeMixin {
     String? composingText,
     void Function(int firstLine, int lastLine)? prepareCellDecoration,
     TerminalCellDecoration? Function(int x, int y)? cellDecoration,
+    HorizontalMetricsCallback? onHorizontalMetrics,
   })  : _terminal = terminal,
         _controller = controller,
         _offset = offset,
@@ -51,12 +53,12 @@ class RenderTerminal extends RenderBox with RelayoutWhenSystemFontsChangeMixin {
         _composingText = composingText,
         _prepareCellDecoration = prepareCellDecoration,
         _cellDecoration = cellDecoration,
+        _onHorizontalMetrics = onHorizontalMetrics,
         _painter = TerminalPainter(
           theme: theme,
           textStyle: textStyle,
           textScaler: textScaler,
         );
-
 
   Terminal _terminal;
   set terminal(Terminal terminal) {
@@ -64,8 +66,10 @@ class RenderTerminal extends RenderBox with RelayoutWhenSystemFontsChangeMixin {
     if (attached) _terminal.removeListener(_onTerminalChange);
     _terminal = terminal;
     if (attached) _terminal.addListener(_onTerminalChange);
+    _appliedSize = null;
+    _contentColumnsDirty = true;
+    _followHorizontal = true;
     resetCursorBlink();
-    _resizeTerminalIfNeeded();
     markNeedsLayout();
   }
 
@@ -159,6 +163,41 @@ class RenderTerminal extends RenderBox with RelayoutWhenSystemFontsChangeMixin {
     markNeedsPaint();
   }
 
+  HorizontalMetricsCallback? _onHorizontalMetrics;
+  set onHorizontalMetrics(HorizontalMetricsCallback? value) {
+    if (value == _onHorizontalMetrics) return;
+    _onHorizontalMetrics = value;
+  }
+
+  double _horizontalOffset = 0;
+  int _contentColumns = 0;
+  bool _followHorizontal = true;
+  bool _contentColumnsDirty = true;
+  TerminalSize? _appliedSize;
+  double _reportedExtent = -1;
+  double _reportedOffset = -1;
+
+  double get horizontalOffset => _horizontalOffset;
+
+  set horizontalOffset(double value) {
+    final limit = hasSize ? maxHorizontalExtent : value.abs();
+    final next = value.clamp(0.0, max(0.0, limit)).toDouble();
+    if ((next - _horizontalOffset).abs() < 0.5) return;
+    _horizontalOffset = next;
+    markNeedsPaint();
+    if (attached) _notifyEditableRect();
+    _reportHorizontalMetrics();
+  }
+
+  /// Pixels of content hidden to the right of the viewport. Zero while wrapping.
+  double get maxHorizontalExtent {
+    if (_terminal.lineWrap || !hasSize) return 0;
+    final cell = _painter.cellSize.width;
+    if (cell <= 0) return 0;
+    final visible = max(1, size.width ~/ cell);
+    return max(0, _contentColumns - visible) * cell;
+  }
+
   void Function(int firstLine, int lastLine)? _prepareCellDecoration;
   set prepareCellDecoration(
     void Function(int firstLine, int lastLine)? value,
@@ -172,7 +211,6 @@ class RenderTerminal extends RenderBox with RelayoutWhenSystemFontsChangeMixin {
     _cellDecoration = value;
     markNeedsPaint();
   }
-
 
   TerminalSize? _viewportSize;
 
@@ -214,6 +252,13 @@ class RenderTerminal extends RenderBox with RelayoutWhenSystemFontsChangeMixin {
   }
 
   void _onTerminalChange() {
+    _contentColumnsDirty = true;
+    if (_terminal.lineWrap) {
+      _horizontalOffset = 0;
+      _followHorizontal = false;
+    } else {
+      _followHorizontal = true;
+    }
     resetCursorBlink();
     markNeedsLayout();
     _notifyEditableRect();
@@ -275,6 +320,75 @@ class RenderTerminal extends RenderBox with RelayoutWhenSystemFontsChangeMixin {
     if (_stickToBottom) {
       _offset.correctBy(_maxScrollExtent - _scrollOffset);
     }
+
+    _measureContentColumns();
+    _horizontalOffset = _horizontalOffset.clamp(0.0, maxHorizontalExtent);
+    if (_followHorizontal) {
+      _followHorizontal = false;
+      _revealCursor();
+    }
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (attached) _notifyEditableRect();
+    });
+    _reportHorizontalMetrics();
+  }
+
+  void _measureContentColumns() {
+    if (!_contentColumnsDirty) return;
+    _contentColumnsDirty = false;
+    if (_terminal.lineWrap) {
+      _contentColumns = _terminal.viewWidth;
+      return;
+    }
+    var columns = max(_terminal.viewWidth, _terminal.buffer.cursorX + 1);
+    final lines = _terminal.buffer.lines;
+    for (var i = 0; i < lines.length; i++) {
+      final length = lines[i].getTrimmedLength(lines[i].length);
+      if (length > columns) columns = length;
+    }
+    _contentColumns = columns;
+  }
+
+  void _revealCursor() {
+    if (!hasSize || _terminal.lineWrap) {
+      _horizontalOffset = 0;
+      return;
+    }
+    final cell = _painter.cellSize.width;
+    if (cell <= 0) return;
+    final cursor = _terminal.buffer.cursorX * cell;
+    final visible = size.width.toDouble();
+    var next = _horizontalOffset;
+    if (cursor < next) {
+      next = cursor;
+    } else if (cursor + cell > next + visible) {
+      next = max(0.0, cursor + cell - visible);
+    }
+    _horizontalOffset = next.clamp(0.0, maxHorizontalExtent);
+  }
+
+  void _reportHorizontalMetrics() {
+    final extent = maxHorizontalExtent;
+    final offset = _horizontalOffset;
+    if ((extent - _reportedExtent).abs() < 0.5 &&
+        (offset - _reportedOffset).abs() < 0.5) {
+      return;
+    }
+    _reportedExtent = extent;
+    _reportedOffset = offset;
+    final callback = _onHorizontalMetrics;
+    if (callback == null) return;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (attached && callback == _onHorizontalMetrics) {
+        callback(maxHorizontalExtent, _horizontalOffset);
+      }
+    });
+  }
+
+  int _logicalColumns(int viewportColumns) {
+    final columns = max(1, viewportColumns);
+    if (_terminal.lineWrap) return columns;
+    return max(columns, Terminal.unwrapColumns);
   }
 
   /// Total height of the terminal in pixels. Includes scrollback buffer.
@@ -298,17 +412,23 @@ class RenderTerminal extends RenderBox with RelayoutWhenSystemFontsChangeMixin {
     final col = cellOffset.x;
     final x = col * _painter.cellSize.width;
     final y = row * _painter.cellSize.height;
-    return Offset(x + _padding.left, y + _padding.top - _scrollOffset);
+    return Offset(
+      x + _padding.left - _horizontalOffset,
+      y + _padding.top - _scrollOffset,
+    );
   }
 
   /// Get the [CellOffset] of the cell that [offset] is in.
   CellOffset getCellOffset(Offset offset) {
-    final x = offset.dx - _padding.left;
+    final x = offset.dx - _padding.left + _horizontalOffset;
     final y = offset.dy - _padding.top + _scrollOffset;
     final row = y ~/ _painter.cellSize.height;
     final col = x ~/ _painter.cellSize.width;
+    final columns = _terminal.lineWrap
+        ? _terminal.viewWidth
+        : max(_terminal.viewWidth, _contentColumns);
     return CellOffset(
-      col.clamp(0, _terminal.viewWidth - 1),
+      col.clamp(0, max(0, columns - 1)),
       row.clamp(0, _terminal.buffer.lines.length - 1),
     );
   }
@@ -394,23 +514,36 @@ class RenderTerminal extends RenderBox with RelayoutWhenSystemFontsChangeMixin {
       size.width ~/ _painter.cellSize.width,
       _viewportHeight ~/ _painter.cellSize.height,
     );
+    final applied = TerminalSize(
+      _logicalColumns(viewportSize.width),
+      viewportSize.height,
+    );
 
-    if (_viewportSize != viewportSize) {
-      _viewportSize = viewportSize;
-      _resizeTerminalIfNeeded();
+    if (_viewportSize == viewportSize && _appliedSize == applied) {
+      return;
     }
+
+    _viewportSize = viewportSize;
+    _appliedSize = applied;
+    _resizeTerminalIfNeeded();
   }
 
   /// Notify the underlying terminal that the viewport size has changed.
   void _resizeTerminalIfNeeded() {
-    if (_autoResize && _viewportSize != null) {
-      _terminal.resize(
-        _viewportSize!.width,
-        _viewportSize!.height,
-        _painter.cellSize.width.round(),
-        _painter.cellSize.height.round(),
-      );
+    final applied = _appliedSize ?? _viewportSize;
+    if (!_autoResize || applied == null) {
+      return;
     }
+    if (applied.width == _terminal.viewWidth &&
+        applied.height == _terminal.viewHeight) {
+      return;
+    }
+    _terminal.resize(
+      applied.width,
+      applied.height,
+      _painter.cellSize.width.round(),
+      _painter.cellSize.height.round(),
+    );
   }
 
   /// Update the scroll offset based on the current terminal state. This should
@@ -444,12 +577,15 @@ class RenderTerminal extends RenderBox with RelayoutWhenSystemFontsChangeMixin {
   }
 
   /// The offset of the cursor from the top left corner of this render object.
-  Offset get cursorOffset {
+  Offset get _bufferCursorOffset {
     return Offset(
       _terminal.buffer.cursorX * _painter.cellSize.width,
       _terminal.buffer.absoluteCursorY * _painter.cellSize.height + _lineOffset,
     );
   }
+
+  Offset get cursorOffset =>
+      _bufferCursorOffset.translate(-_horizontalOffset, 0);
 
   Size get cellSize {
     return _painter.cellSize;
@@ -463,6 +599,11 @@ class RenderTerminal extends RenderBox with RelayoutWhenSystemFontsChangeMixin {
 
   void _paint(PaintingContext context, Offset offset) {
     final canvas = context.canvas;
+    canvas.save();
+    canvas.clipRect(offset & size);
+    if (_horizontalOffset != 0) {
+      canvas.translate(-_horizontalOffset, 0);
+    }
 
     final lines = _terminal.buffer.lines;
     final charHeight = _painter.cellSize.height;
@@ -487,17 +628,16 @@ class RenderTerminal extends RenderBox with RelayoutWhenSystemFontsChangeMixin {
       );
     }
 
-
     if (_terminal.buffer.absoluteCursorY >= effectFirstLine &&
         _terminal.buffer.absoluteCursorY <= effectLastLine) {
       if (_isComposingText) {
-        _paintComposingText(canvas, offset + cursorOffset);
+        _paintComposingText(canvas, offset + _bufferCursorOffset);
       }
 
       if (_shouldShowCursor) {
         _painter.paintCursor(
           canvas,
-          offset + cursorOffset,
+          offset + _bufferCursorOffset,
           cursorType: _cursorType,
           hasFocus: _focusNode.hasFocus,
         );
@@ -519,6 +659,7 @@ class RenderTerminal extends RenderBox with RelayoutWhenSystemFontsChangeMixin {
         effectLastLine,
       );
     }
+    canvas.restore();
   }
 
   /// Paints the text that is currently being composed in IME to [canvas] at
@@ -547,7 +688,9 @@ class RenderTerminal extends RenderBox with RelayoutWhenSystemFontsChangeMixin {
     builder.addText(composingText);
 
     final paragraph = builder.build();
-    paragraph.layout(ParagraphConstraints(width: size.width));
+    paragraph.layout(ParagraphConstraints(
+      width: max(size.width, offset.dx + composingText.length * cellSize.width),
+    ));
 
     canvas.drawParagraph(paragraph, Offset(0, offset.dy));
   }
@@ -607,7 +750,11 @@ class RenderTerminal extends RenderBox with RelayoutWhenSystemFontsChangeMixin {
   @pragma('vm:prefer-inline')
   void _paintSegment(Canvas canvas, BufferSegment segment, Color color) {
     final start = segment.start ?? 0;
-    final end = segment.end ?? _terminal.viewWidth;
+    var end = segment.end;
+    if (end == null) {
+      final line = _terminal.buffer.lines[segment.line];
+      end = _terminal.lineWrap ? _terminal.viewWidth : line.length;
+    }
 
     final startOffset = Offset(
       start * _painter.cellSize.width,

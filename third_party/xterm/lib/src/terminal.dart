@@ -85,6 +85,27 @@ class Terminal with Observable implements TerminalState, EscapeHandler {
     this.wordSeparators,
   });
 
+  /// Columns requested from the PTY when [lineWrap] is false and the viewport
+  /// is narrower. A longer line stays one row; the PTY is not resized for it.
+  static const unwrapColumns = 512;
+
+  bool _lineWrap = true;
+
+  @override
+  bool get lineWrap => _lineWrap;
+
+  set lineWrap(bool value) {
+    if (_lineWrap == value) return;
+    _lineWrap = value;
+    if (value) {
+      // The renderer only resizes when the applied column count changes, so a
+      // viewport that is already as wide as the applied columns needs an
+      // explicit rewrap of lines that are wider than the viewport.
+      _mainBuffer.rewrap();
+    }
+    notifyListeners();
+  }
+
   late final _parser = EscapeParser(this);
 
   final _emitter = const EscapeEmitter();

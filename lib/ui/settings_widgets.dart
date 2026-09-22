@@ -12,7 +12,7 @@ void showSettingsNotice(
     ..removeCurrentSnackBar()
     ..showSnackBar(
       SnackBar(
-        content: _SettingsNotice(message: message, error: error),
+        content: SettingsNotice(message: message, error: error),
         duration: const Duration(seconds: 3),
         behavior: SnackBarBehavior.floating,
         elevation: 0,
@@ -24,8 +24,17 @@ void showSettingsNotice(
     );
 }
 
-class _SettingsNotice extends StatelessWidget {
-  const _SettingsNotice({required this.message, required this.error});
+/// Rounded transient notice used for settings feedback.
+///
+/// [showSettingsNotice] hosts it in a snack bar. Callers that cannot use a
+/// scaffold — dialogs render above one, so a snack bar would sit behind them —
+/// place it in the navigator overlay instead.
+class SettingsNotice extends StatelessWidget {
+  const SettingsNotice({
+    super.key,
+    required this.message,
+    this.error = false,
+  });
   final String message;
   final bool error;
 

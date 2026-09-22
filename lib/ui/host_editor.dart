@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
@@ -5,6 +7,8 @@ import '../data/key_file.dart';
 import '../data/ssh_keys.dart';
 import '../domain/host.dart';
 import 'expressive_widgets.dart';
+import 'settings_widgets.dart';
+import 'theme.dart';
 
 typedef SaveHost = Future<void> Function(Host host, Credentials? stored);
 typedef TestHost = Future<void> Function(Host host, Credentials credentials);
@@ -34,7 +38,8 @@ class _HostEditorState extends State<HostEditor> {
   late final _name = TextEditingController(text: widget.host?.name);
   late final _address = TextEditingController(text: widget.host?.address);
   late final _port = TextEditingController(text: '${widget.host?.port ?? 22}');
-  late final _group = TextEditingController(text: widget.host?.group);
+  final _tags = <String>[];
+  final _tagInput = TextEditingController();
   late final _username = TextEditingController(
     text: widget.host?.username ?? 'root',
   );
@@ -54,11 +59,13 @@ class _HostEditorState extends State<HostEditor> {
       widget.host?.id ?? DateTime.now().microsecondsSinceEpoch.toString();
   bool _saving = false, _testing = false;
   bool get _busy => _saving || _testing;
-  String? _testResult;
   String? _error;
+  Timer? _noticeTimer;
+  OverlayEntry? _notice;
   @override
   void initState() {
     super.initState();
+    _tags.addAll(widget.host?.tags ?? const []);
     if (_userId.isNotEmpty && _users.every((user) => user.id != _userId)) {
       _userId = '';
     }
@@ -67,11 +74,12 @@ class _HostEditorState extends State<HostEditor> {
 
   @override
   void dispose() {
+    _dismissNotice();
     for (final controller in [
       _name,
       _address,
       _port,
-      _group,
+      _tagInput,
       _username,
       _password,
     ]) {
@@ -79,6 +87,54 @@ class _HostEditorState extends State<HostEditor> {
     }
     super.dispose();
   }
+
+  /// Shows [_noticeDuration]-long feedback above everything else on screen.
+  ///
+  /// A dialog lives in the navigator overlay, so a snack bar bound to the
+  /// scaffold underneath would render behind it. The notice is therefore
+  /// inserted at the top of that same overlay and ignores pointers, keeping the
+  /// dialog usable while it fades away.
+  void _showNotice(String message) {
+    _dismissNotice();
+    final bottom = MediaQuery.paddingOf(context).bottom;
+    final entry = OverlayEntry(
+      builder: (context) => Positioned(
+        left: 16,
+        right: 16,
+        bottom: bottom + 16,
+        child: IgnorePointer(
+          child: Semantics(
+            liveRegion: true,
+            child: TweenAnimationBuilder<double>(
+              tween: Tween(begin: 0, end: 1),
+              duration: expressiveDuration(context),
+              curve: expressiveCurve,
+              builder: (context, value, child) => Opacity(
+                opacity: value,
+                child: Transform.translate(
+                  offset: Offset(0, 12 * (1 - value)),
+                  child: child,
+                ),
+              ),
+              child: SettingsNotice(message: message),
+            ),
+          ),
+        ),
+      ),
+    );
+    _notice = entry;
+    Overlay.of(context).insert(entry);
+    _noticeTimer = Timer(_noticeDuration, _dismissNotice);
+  }
+
+  void _dismissNotice() {
+    _noticeTimer?.cancel();
+    _noticeTimer = null;
+    _notice?.remove();
+    _notice = null;
+  }
+
+  static const _noticeDuration = Duration(seconds: 3);
 
   SshUser? get _selectedUser =>
       _users.where((user) => user.id == _userId).firstOrNull;
@@ -89,6 +145,30 @@ class _HostEditorState extends State<HostEditor> {
 
   String? _required(String? value) =>
       value == null || value.trim().isEmpty ? '请填写此项' : null;
+
+  /// 加入 [raw] 标签：去首尾空白，忽略空值与重复项，不按空格拆分。
+  void _addTag(String raw) {
+    if (_busy) return;
+    final value = raw.trim();
+    if (value.isEmpty) return;
+    _tagInput.clear();
+    if (_tags.contains(value)) return;
+    setState(() => _tags.add(value));
+  }
+
+  void _removeTag(String tag) {
+    if (_busy) return;
+    setState(() => _tags.remove(tag));
+  }
+
+  /// 保存/测试所用的标签列表，含尚未按“添加”的非空输入。
+  List<String> _collectTags() {
+    final pending = _tagInput.text.trim();
+    return [
+      ..._tags,
+      if (pending.isNotEmpty && !_tags.contains(pending)) pending,
+    ];
+  }
 
   Future<void> _submit({required bool test}) async {
     if (_busy) return;
@@ -109,7 +189,6 @@ class _HostEditorState extends State<HostEditor> {
       _saving = !test;
       _testing = test;
       _error = null;
-      _testResult = null;
     });
     final host = Host(
       id: _id,
@@ -117,7 +196,7 @@ class _HostEditorState extends State<HostEditor> {
       address: _address.text.trim(),
       port: int.parse(_port.text),
       username: _username.text.trim(),
-      group: _group.text.trim(),
+      tags: _collectTags(),
       authMethod: _auth,
       favorite: widget.host?.favorite ?? false,
       userId: _auth == AuthMethod.privateKey ? _userId : '',
@@ -125,7 +204,7 @@ class _HostEditorState extends State<HostEditor> {
     try {
       if (test) {
         await widget.onTest(host, credentials!);
-        if (mounted) setState(() => _testResult = '连接成功，SSH 身份验证已通过。');
+        if (mounted) _showNotice('连接成功，SSH 身份验证已通过。');
       } else {
         await widget.onSave(
           host,
@@ -165,11 +244,8 @@ class _HostEditorState extends State<HostEditor> {
           child: Form(
             key: _form,
             onChanged: () {
-              if (!_busy && (_testResult != null || _error != null)) {
-                setState(() {
-                  _testResult = null;
-                  _error = null;
-                });
+              if (!_busy && _error != null) {
+                setState(() => _error = null);
               }
             },
             child: Column(
@@ -256,13 +332,46 @@ class _HostEditorState extends State<HostEditor> {
                   },
                 ),
                 const SizedBox(height: 16),
-                TextFormField(
-                  controller: _group,
-                  enabled: !_busy,
-                  decoration: const InputDecoration(
-                    labelText: '分组（可选）',
-                    hintText: '工作 / 个人 / 测试环境',
-                  ),
+                Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    TextFormField(
+                      controller: _tagInput,
+                      enabled: !_busy,
+                      textInputAction: TextInputAction.done,
+                      // 默认的 onEditingComplete 会在回车后让输入框失焦，
+                      // 覆盖成空实现以便连续添加多个标签。
+                      onEditingComplete: () {},
+                      onFieldSubmitted: _addTag,
+                      decoration: InputDecoration(
+                        labelText: '标签（可选）',
+                        hintText: '按回车或点右侧按钮添加，例如：生产环境',
+                        suffixIcon: IconButton(
+                          tooltip: '添加标签',
+                          onPressed: _busy
+                              ? null
+                              : () => _addTag(_tagInput.text),
+                          icon: const Icon(Icons.add_rounded),
+                        ),
+                      ),
+                    ),
+                    if (_tags.isNotEmpty) ...[
+                      const SizedBox(height: 12),
+                      Wrap(
+                        spacing: 8,
+                        runSpacing: 8,
+                        children: [
+                          for (final tag in _tags)
+                            _TagPill(
+                              tag: tag,
+                              onDeleted: _busy
+                                  ? null
+                                  : () => _removeTag(tag),
+                            ),
+                        ],
+                      ),
+                    ],
+                  ],
                 ),
                 const SizedBox(height: 16),
                 TextFormField(
@@ -342,11 +451,6 @@ class _HostEditorState extends State<HostEditor> {
                       inputDecorationTheme: Theme.of(context)
                           .inputDecorationTheme,
                       label: const Text('凭证（可选）'),
-                      helperText: _selectedUser == null
-                          ? null
-                          : '使用已保存的私钥',
-                      decorationBuilder: (_, _) =>
-                          const InputDecoration(helperMaxLines: 3),
                       alignmentOffset: const Offset(0, 4),
                       menuStyle: MenuStyle(
                         backgroundColor: WidgetStatePropertyAll(
@@ -375,7 +479,6 @@ class _HostEditorState extends State<HostEditor> {
                             ? AuthMethod.password
                             : AuthMethod.privateKey;
                         _error = null;
-                        _testResult = null;
                       }),
                       validator: (_) =>
                           _auth == AuthMethod.privateKey &&
@@ -392,19 +495,6 @@ class _HostEditorState extends State<HostEditor> {
                       _error!,
                       style: TextStyle(
                         color: Theme.of(context).colorScheme.error,
-                      ),
-                    ),
-                  ),
-                if (_testResult != null)
-                  Padding(
-                    padding: const EdgeInsets.only(top: 12),
-                    child: Semantics(
-                      liveRegion: true,
-                      child: Text(
-                        _testResult!,
-                        style: TextStyle(
-                          color: Theme.of(context).colorScheme.primary,
-                        ),
                       ),
                     ),
                   ),
@@ -450,6 +540,59 @@ class _HostEditorState extends State<HostEditor> {
       ),
     ),
   );
+}
+
+/// 已添加标签的胶囊：标签文字可换行，长标签在窄屏上不会溢出。
+///
+/// 不用 [InputChip] 是因为它把标签固定成单行（内部 `maxLines: 1` 且
+/// `softWrap: false`），长标签会被淡出截断而读不全。
+class _TagPill extends StatelessWidget {
+  const _TagPill({required this.tag, required this.onDeleted});
+  final String tag;
+  final VoidCallback? onDeleted;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final chip = theme.chipTheme;
+    final labelStyle = chip.labelStyle ?? theme.textTheme.labelLarge;
+    return ConstrainedBox(
+      constraints: const BoxConstraints(maxWidth: double.infinity),
+      child: DecoratedBox(
+        decoration: ShapeDecoration(
+          color: chip.backgroundColor ?? theme.colorScheme.surfaceContainerHighest,
+          shape: chip.shape ?? const StadiumBorder(),
+        ),
+      child: Padding(
+        padding: const EdgeInsetsDirectional.fromSTEB(12, 4, 4, 4),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Flexible(
+              child: Padding(
+                padding: const EdgeInsets.symmetric(vertical: 4),
+                child: Text(tag, style: labelStyle),
+              ),
+            ),
+            IconButton(
+              tooltip: '删除标签 $tag',
+              onPressed: onDeleted,
+              icon: const Icon(Icons.close_rounded, size: 18),
+              // 主题把 IconButton 的最小尺寸定为 48，这里收回到胶囊尺寸。
+              style: IconButton.styleFrom(
+                minimumSize: const Size(32, 32),
+                visualDensity: VisualDensity.standard,
+                tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                padding: EdgeInsets.zero,
+                shape: const CircleBorder(),
+              ),
+            ),
+          ],
+        ),
+      ),
+    ),
+    );
+  }
 }
 
 class CredentialFields extends StatelessWidget {

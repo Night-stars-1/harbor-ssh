@@ -25,5 +25,5 @@ const testHost = Host(
   name: '开发服务器',
   address: 'dev.example.com',
   username: 'deploy',
-  group: '开发',
+  tags: ['开发'],
 );

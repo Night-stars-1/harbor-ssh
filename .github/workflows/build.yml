@@ -40,8 +40,8 @@ jobs:
             asset: harbor-ssh-macos.dmg
           - os: ubuntu-latest
             target: apk
-            output: build/app/outputs/flutter-apk/*.apk
-            asset: harbor-ssh.apk
+            output: build/app/outputs/flutter-apk/app-*-release.apk
+            asset: harbor-ssh-android-*.apk
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -65,7 +65,11 @@ jobs:
           if [[ -n "$GITHUB_OAUTH_CLIENT_ID" ]]; then
             oauth_args+=(--dart-define="GITHUB_OAUTH_CLIENT_ID=$GITHUB_OAUTH_CLIENT_ID")
           fi
-          flutter build ${{ matrix.target }} --release "${oauth_args[@]}"
+          build_args=()
+          if [[ '${{ matrix.target }}' == 'apk' ]]; then
+            build_args+=(--split-per-abi)
+          fi
+          flutter build ${{ matrix.target }} --release "${build_args[@]}" "${oauth_args[@]}"
       - uses: actions/upload-artifact@v4
         with:
           name: harbor-ssh-${{ matrix.target }}
@@ -90,11 +94,14 @@ jobs:
               hdiutil create -volname 'Harbor SSH' -srcfolder dmg -ov -format UDZO '${{ matrix.asset }}'
               ;;
             apk)
-              cp build/app/outputs/flutter-apk/app-release.apk '${{ matrix.asset }}'
+              for abi in armeabi-v7a arm64-v8a x86_64; do
+                cp "build/app/outputs/flutter-apk/app-${abi}-release.apk" "harbor-ssh-android-${abi}.apk"
+              done
               ;;
           esac
       - name: Upload to GitHub Release
         if: github.event_name == 'release'
+        shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: gh release upload '${{ github.event.release.tag_name }}' '${{ matrix.asset }}' --clobber
+        run: gh release upload '${{ github.event.release.tag_name }}' ${{ matrix.asset }} --clobber

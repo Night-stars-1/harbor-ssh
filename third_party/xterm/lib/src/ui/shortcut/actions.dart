@@ -1,3 +1,5 @@
+import 'dart:math' show max;
+
 import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 import 'package:xterm/src/terminal.dart';
@@ -50,15 +52,17 @@ class TerminalActions extends StatelessWidget {
         ),
         SelectAllTextIntent: CallbackAction<SelectAllTextIntent>(
           onInvoke: (intent) {
+            final buffer = terminal.buffer;
+            final lastLine = buffer.lines[buffer.height - 1];
+            // A wrapped line never holds more than the viewport width, but an
+            // unwrapped line can run past it; select the whole line either way.
+            final endColumn = max(
+              terminal.viewWidth,
+              lastLine.getTrimmedLength(lastLine.length),
+            );
             controller.setSelection(
-              terminal.buffer.createAnchor(
-                0,
-                terminal.buffer.height - terminal.viewHeight,
-              ),
-              terminal.buffer.createAnchor(
-                terminal.viewWidth,
-                terminal.buffer.height - 1,
-              ),
+              buffer.createAnchor(0, buffer.height - terminal.viewHeight),
+              buffer.createAnchor(endColumn, buffer.height - 1),
               mode: SelectionMode.line,
             );
             return null;

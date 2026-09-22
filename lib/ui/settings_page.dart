@@ -65,7 +65,7 @@ class _SettingsPageState extends State<SettingsPage> {
   static const _descriptions = [
     '默认目录',
     'WebDAV、GitHub Gist 与自动同步',
-    '主题色与显示模式',
+    '主题色、显示模式与终端字体',
     '模型服务与终端任务',
   ];
 

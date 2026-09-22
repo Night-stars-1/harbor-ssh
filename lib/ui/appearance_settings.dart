@@ -111,6 +111,69 @@ class _AppearanceSettingsState extends State<AppearanceSettings> {
               ),
             ],
           ),
+          const SizedBox(height: 24),
+          SettingsGroup(
+            title: '终端',
+            children: [
+              SettingsRow(
+                title: '默认字体大小',
+                description: '只保存在本机，新建终端使用，范围 10–24',
+                inline: true,
+                control: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    IconButton(
+                      key: const ValueKey('terminal-font-smaller'),
+                      tooltip: '减小默认字体',
+                      onPressed: _saving || appearance.terminalFontSize <= 10
+                          ? null
+                          : () => _save(
+                              appearance.copyWith(
+                                terminalFontSize:
+                                    appearance.terminalFontSize - 1,
+                              ),
+                            ),
+                      icon: const Icon(Icons.remove_rounded),
+                    ),
+                    SizedBox(
+                      width: 32,
+                      child: Text(
+                        '${appearance.terminalFontSize}',
+                        key: const ValueKey('terminal-font-size'),
+                        textAlign: TextAlign.center,
+                      ),
+                    ),
+                    IconButton(
+                      key: const ValueKey('terminal-font-larger'),
+                      tooltip: '增大默认字体',
+                      onPressed: _saving || appearance.terminalFontSize >= 24
+                          ? null
+                          : () => _save(
+                              appearance.copyWith(
+                                terminalFontSize:
+                                    appearance.terminalFontSize + 1,
+                              ),
+                            ),
+                      icon: const Icon(Icons.add_rounded),
+                    ),
+                  ],
+                ),
+              ),
+              SettingsRow(
+                title: '自动换行',
+                description: '关闭后长行保持在同一行，可横向滚动。只保存在本机',
+                inline: true,
+                control: Switch.adaptive(
+                  key: const ValueKey('terminal-wrap'),
+                  value: appearance.terminalWrap,
+                  onChanged: _saving
+                      ? null
+                      : (enabled) =>
+                            _save(appearance.copyWith(terminalWrap: enabled)),
+                ),
+              ),
+            ],
+          ),
         ],
       );
     },

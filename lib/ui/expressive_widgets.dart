@@ -81,7 +81,7 @@ class ExpressiveHostCard extends StatelessWidget {
   Widget build(BuildContext context) => _ConnectionTile(
     title: host.name,
     subtitle: host.destination,
-    badge: host.group.isEmpty ? '未分组' : host.group,
+    badges: host.tags,
     favorite: host.favorite,
     icon: Icons.dns_rounded,
     actionLabel: '连接',
@@ -131,7 +131,7 @@ class ExpressiveUserCard extends StatelessWidget {
     subtitle: user.publicKey.isEmpty
         ? 'SSH 密钥'
         : user.publicKey.split(' ').first,
-    badge: user.authMethod == AuthMethod.password ? '旧版凭证' : '私钥 / 公钥',
+    badges: [user.authMethod == AuthMethod.password ? '旧版凭证' : '私钥 / 公钥'],
     icon: Icons.vpn_key_rounded,
     actionLabel: '编辑',
     menuLabel: '管理凭证',
@@ -150,7 +150,7 @@ class _ConnectionTile extends StatefulWidget {
   const _ConnectionTile({
     required this.title,
     required this.subtitle,
-    required this.badge,
+    required this.badges,
     required this.icon,
     required this.actionLabel,
     required this.menuLabel,
@@ -162,7 +162,8 @@ class _ConnectionTile extends StatefulWidget {
     this.favorite = false,
     this.showMenuButton = true,
   });
-  final String title, subtitle, badge, actionLabel, menuLabel;
+  final String title, subtitle, actionLabel, menuLabel;
+  final List<String> badges;
   final IconData icon;
   final bool favorite, asCard, showMenuButton;
   final HarborListSlot slot;
@@ -292,6 +293,36 @@ class _ConnectionTileState extends State<_ConnectionTile>
       overflow: TextOverflow.ellipsis,
       style: type.bodyMedium?.copyWith(color: colors.onSurfaceVariant),
     );
+    final badges = widget.badges.isEmpty
+        ? null
+        : Padding(
+            padding: const EdgeInsets.only(top: 4),
+            child: Wrap(
+              spacing: 6,
+              runSpacing: 4,
+              children: [
+                for (final label in widget.badges)
+                  Container(
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 8,
+                      vertical: 2,
+                    ),
+                    decoration: ShapeDecoration(
+                      color: colors.secondaryContainer,
+                      shape: HarborShapes.pill,
+                    ),
+                    child: Text(
+                      label,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: type.labelMedium?.copyWith(
+                        color: colors.onSecondaryContainer,
+                      ),
+                    ),
+                  ),
+              ],
+            ),
+          );
     final content = Padding(
       padding: EdgeInsets.fromLTRB(14, 10, widget.showMenuButton ? 6 : 14, 10),
       child: Row(
@@ -306,25 +337,7 @@ class _ConnectionTileState extends State<_ConnectionTile>
                 title,
                 const SizedBox(height: 2),
                 subtitle,
-                const SizedBox(height: 4),
-                Container(
-                  padding: const EdgeInsets.symmetric(
-                    horizontal: 8,
-                    vertical: 2,
-                  ),
-                  decoration: ShapeDecoration(
-                    color: colors.secondaryContainer,
-                    shape: HarborShapes.pill,
-                  ),
-                  child: Text(
-                    widget.badge,
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: type.labelMedium?.copyWith(
-                      color: colors.onSecondaryContainer,
-                    ),
-                  ),
-                ),
+                ?badges,
               ],
             ),
           ),

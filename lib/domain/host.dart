@@ -10,12 +10,13 @@ class Host {
     required this.address,
     required this.username,
     this.port = 22,
-    this.group = '',
+    this.tags = const [],
     this.authMethod = AuthMethod.password,
     this.favorite = false,
     this.userId = '',
   });
-  final String id, name, address, username, group, userId;
+  final String id, name, address, username, userId;
+  final List<String> tags;
   final int port;
   final AuthMethod authMethod;
   final bool favorite;
@@ -28,7 +29,7 @@ class Host {
     address: address,
     username: username,
     port: port,
-    group: group,
+    tags: tags,
     authMethod: authMethod,
     favorite: value,
     userId: userId,
@@ -39,7 +40,7 @@ class Host {
     'address': address,
     'username': username,
     'port': port,
-    'group': group,
+    'tags': tags,
     'authMethod': authMethod.name,
     'favorite': favorite,
     'userId': userId,
@@ -50,11 +51,37 @@ class Host {
     address: json['address'] as String,
     username: json['username'] as String,
     port: json['port'] as int,
-    group: json['group'] as String? ?? '',
+    tags: _tagsFromJson(json),
     authMethod: AuthMethod.values.byName(json['authMethod'] as String),
     favorite: json['favorite'] as bool? ?? false,
     userId: json['userId'] as String? ?? '',
   );
+
+  /// `tags` 数组优先；仅当字段缺失（或为 null）时才把旧数据的
+  /// `group` 字符串降级为单个标签，显式的空数组不会回落到旧字段。
+  static List<String> _tagsFromJson(Map<String, dynamic> json) {
+    final value = json['tags'];
+    if (value != null) {
+      if (value is! List) throw const FormatException('tags 必须是字符串数组');
+      return _normalizeTags(value);
+    }
+    final legacy = json['group'];
+    if (legacy == null) return const [];
+    if (legacy is! String) throw const FormatException('group 必须是字符串');
+    return _normalizeTags([legacy]);
+  }
+
+  /// 去除首尾空白、丢弃空项与重复项（保持顺序，区分大小写）。
+  static List<String> _normalizeTags(Iterable<Object?> values) {
+    final tags = <String>[];
+    for (final value in values) {
+      if (value is! String) throw const FormatException('标签必须是字符串');
+      final tag = value.trim();
+      if (tag.isEmpty || tags.contains(tag)) continue;
+      tags.add(tag);
+    }
+    return tags;
+  }
 }
 
 @immutable

@@ -10,14 +10,21 @@ import 'theme.dart';
 bool get usesWindowsTitleBar =>
     !kIsWeb && defaultTargetPlatform == TargetPlatform.windows;
 
+bool get usesMacosTitleBar =>
+    !kIsWeb && defaultTargetPlatform == TargetPlatform.macOS;
+
+bool get usesCustomTitleBar => usesWindowsTitleBar || usesMacosTitleBar;
+
+const _macosTrafficLightInset = 78.0;
+
 Future<void> initializeWindowsWindow({bool settings = false}) async {
-  if (!usesWindowsTitleBar) return;
+  if (!usesCustomTitleBar) return;
   await windowManager.ensureInitialized();
   await windowManager.waitUntilReadyToShow(
     WindowOptions(
       title: settings ? '设置 · Harbor SSH' : 'Harbor SSH',
       titleBarStyle: TitleBarStyle.hidden,
-      windowButtonVisibility: false,
+      windowButtonVisibility: usesMacosTitleBar,
       minimumSize: settings ? const Size(360, 560) : const Size(320, 480),
     ),
   );
@@ -158,15 +165,24 @@ class _WindowsWindowFrameState extends State<WindowsWindowFrame>
               height: 40,
               child: Row(
                 children: [
+                  if (usesMacosTitleBar)
+                    const SizedBox(
+                      key: ValueKey('macos-traffic-light-inset'),
+                      width: _macosTrafficLightInset,
+                    ),
                   Expanded(
                     child: GestureDetector(
                       key: const ValueKey('window-drag-area'),
                       behavior: HitTestBehavior.opaque,
                       onPanStart: (_) => windowManager.startDragging(),
                       onDoubleTap: _toggleMaximize,
-                      onSecondaryTap: windowManager.popUpWindowMenu,
+                      onSecondaryTap: usesMacosTitleBar
+                          ? null
+                          : windowManager.popUpWindowMenu,
                       child: Padding(
-                        padding: const EdgeInsets.only(left: 14),
+                        padding: EdgeInsets.only(
+                          left: usesMacosTitleBar ? 0 : 14,
+                        ),
                         child: Row(
                           children: [
                             const ExpressiveMark(size: 24, flower: true),
@@ -190,28 +206,30 @@ class _WindowsWindowFrameState extends State<WindowsWindowFrame>
                       ),
                     ),
                   ),
-                  _button(
-                    name: 'minimize',
-                    label: '最小化',
-                    icon: Icons.horizontal_rule_rounded,
-                    onPressed: windowManager.minimize,
-                  ),
-                  _button(
-                    name: 'maximize',
-                    label: _maximized ? '还原窗口' : '最大化',
-                    icon: _maximized
-                        ? Icons.filter_none_rounded
-                        : Icons.crop_square_rounded,
-                    onPressed: _toggleMaximize,
-                  ),
-                  _button(
-                    name: 'close',
-                    label: '关闭窗口',
-                    icon: Icons.close_rounded,
-                    onPressed: windowManager.close,
-                    close: true,
-                  ),
-                  const SizedBox(width: 6),
+                  if (!usesMacosTitleBar) ...[
+                    _button(
+                      name: 'minimize',
+                      label: '最小化',
+                      icon: Icons.horizontal_rule_rounded,
+                      onPressed: windowManager.minimize,
+                    ),
+                    _button(
+                      name: 'maximize',
+                      label: _maximized ? '还原窗口' : '最大化',
+                      icon: _maximized
+                          ? Icons.filter_none_rounded
+                          : Icons.crop_square_rounded,
+                      onPressed: _toggleMaximize,
+                    ),
+                    _button(
+                      name: 'close',
+                      label: '关闭窗口',
+                      icon: Icons.close_rounded,
+                      onPressed: windowManager.close,
+                      close: true,
+                    ),
+                    const SizedBox(width: 6),
+                  ],
                 ],
               ),
             ),

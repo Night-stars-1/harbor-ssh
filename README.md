@@ -6,15 +6,15 @@
 
 ## 已实现
 
-- 主机新增、编辑、删除、收藏、分组及搜索，配置保存在本机。
+- 主机新增、编辑、删除、收藏、多标签及搜索，配置保存在本机。
 - 密码、PEM/OpenSSH 私钥和加密私钥口令认证。
 - 填写的密码和私钥自动保存到系统安全存储；已信任指纹同样安全存储，不写入普通配置。
 - 首次连接显示服务器 SHA256 指纹；后续指纹变化时拒绝连接，核实后可手动重置。
 - 多会话标签、ANSI 终端、UTF-8、PTY 尺寸同步、保活、断开及手动重连。
 - 终端复制、粘贴、字体大小调整；工具栏/快捷键的多行粘贴先显示内容确认。
 - 手机提供 Esc、Tab、Ctrl C/D/L、方向键辅助栏。
-- 深浅色响应式布局、桌面侧栏、手机底部导航、抽屉分组与分组筛选。
-- WebDAV / GitHub Gist 加密云同步：连接、分组、收藏及凭证，支持手动/自动同步和冲突选择。
+- 深浅色响应式布局、桌面侧栏、手机底部导航、标签导航与标签筛选。
+- WebDAV / GitHub Gist 加密云同步：连接、标签、收藏及凭证，支持手动/自动同步和冲突选择。
 - SSH 终端 AI 任务：输入目标，自主执行命令、读取结果并继续处理，支持随时停止。
 
 当前不包含跳板机、端口转发、SSH agent、交互式 MFA 和后台常驻连接。Android 后台连接可能被系统暂停；断开后可重新连接。
@@ -67,7 +67,7 @@ Gist 沿用下述自动同步、三方合并与冲突选择。提交前会再次
 ```sh
 flutter run -d windows --dart-define=GITHUB_OAUTH_CLIENT_ID=你的ClientID
 flutter build windows --release --dart-define=GITHUB_OAUTH_CLIENT_ID=你的ClientID
-flutter build apk --release --dart-define=GITHUB_OAUTH_CLIENT_ID=你的ClientID
+flutter build apk --release --split-per-abi --dart-define=GITHUB_OAUTH_CLIENT_ID=你的ClientID
 ```
 
 Client ID 是公开的应用标识，可随安装包分发，最终用户无需注册 OAuth App。GitHub Actions 构建从仓库的 Settings → Secrets and variables → Actions → Variables 中读取变量 `HARBOR_GITHUB_CLIENT_ID`，未设置时使用项目默认值（GitHub 不允许仓库变量以 `GITHUB_` 开头）。通过 `--dart-define` 覆盖此编译配置后需要重新启动/构建，不能仅热更新。
@@ -80,7 +80,7 @@ Client ID 是公开的应用标识，可随安装包分发，最终用户无需�
 
 设置至少 12 个字符的同步加密密码，各设备使用相同的目录和加密密码。点击「测试连接」检查账号和目录，再点击「保存并同步」。开启「自动同步」后，保存连接/凭证的更改会触发同步，应用运行时每两分钟检查云端更新。
 
-同步文件为目录下的 `harbor-ssh-sync.v1.json`，使用 PBKDF2-HMAC-SHA256（210,000 次）派生密钥、AES-256-GCM 加密和校验。WebDAV 账号及加密密码保存在系统安全存储。加密密码无法通过 WebDAV 账号找回。同步范围包含连接、分组、收藏、密码和私钥/公钥，不包含终端输出、命令历史、SFTP 文件或设备的主机信任指纹。
+同步文件为目录下的 `harbor-ssh-sync.v1.json`，使用 PBKDF2-HMAC-SHA256（210,000 次）派生密钥、AES-256-GCM 加密和校验。WebDAV 账号及加密密码保存在系统安全存储。加密密码无法通过 WebDAV 账号找回。同步范围包含连接、标签、收藏、密码和私钥/公钥，不包含终端输出、命令历史、SFTP 文件或设备的主机信任指纹。
 
 同步会合并两端不同记录的更改并传播删除；同一记录被两端同时修改时，由用户选择冲突项保留本机还是云端版本。上传使用 ETag 条件写入，服务端必须支持强 ETag 和 `If-Match`/`If-None-Match`。同步文件缺失、解密失败或版本变化时不会直接覆盖；本地写入带有可恢复的安全存储日志。
 
@@ -98,9 +98,9 @@ flutter devices
 flutter run -d <android-device-id>
 ```
 
-首次打开没有演示主机。新建连接时填写地址、端口和用户名，选择密码登录并填写密码，或选择已有私钥凭证。凭证页只管理私钥和公钥，可生成密钥对或导入已有私钥并复制公钥。密码随连接安全保存，私钥在凭证页安全保存。底部「测试连接」验证 SSH 登录后自动断开；「保存连接」只保存配置。
+首次打开没有演示主机。新建连接时填写地址、端口和用户名，可添加多个标签，选择密码登录并填写密码，或选择已有私钥凭证。凭证页只管理私钥和公钥，可生成密钥对或导入已有私钥并复制公钥。密码随连接安全保存，私钥在凭证页安全保存。底部「测试连接」验证 SSH 登录后自动断开；「保存连接」只保存配置。
 
-点击主机卡片即可连接。PC 右键或手机长按可打开管理菜单，进行收藏/取消收藏、编辑连接、重置主机指纹或删除连接。键盘可用 Tab 聚焦卡片，再按 Shift+F10 或菜单键打开菜单。主机卡片不显示三点按钮，底部以 tag 显示分组；凭证卡片额外保留「更多」按钮。
+点击主机卡片即可连接。PC 右键或手机长按可打开管理菜单，进行收藏/取消收藏、编辑连接、重置主机指纹或删除连接。键盘可用 Tab 聚焦卡片，再按 Shift+F10 或菜单键打开菜单。主机卡片不显示三点按钮，底部以多个独立 tag 显示标签；凭证卡片额外保留「更多」按钮。
 
 没有保存任何主机时，标题下方显示「熟悉的终端。随行的工作空间。」欢迎卡片，桌面端带 QUICK START 步骤；已有主机时不显示欢迎卡片，只保留紧凑标题和操作区。搜索无结果不会触发欢迎卡片。
 
@@ -116,18 +116,18 @@ flutter build windows --release
 flutter build macos --release
 
 # 需要 Android SDK、JDK 及对应 SDK 许可
-flutter build apk --release
+flutter build apk --release --split-per-abi
 ```
 
 - Windows：`build/windows/x64/runner/Release/harbor_ssh.exe`。分发时请保留整个 Release 目录的 DLL 和 data 文件夹。
 - macOS：`build/macos/Build/Products/Release/Harbor SSH.app`。对外分发需要自行签名与公证。
-- Android：`build/app/outputs/flutter-apk/app-release.apk`。未配置正式签名时使用开发签名，仅适合本地试用。
+- Android：`build/app/outputs/flutter-apk/` 下按架构生成 `app-arm64-v8a-release.apk`（多数现代手机）、`app-armeabi-v7a-release.apk`（32 位 ARM）、`app-x86_64-release.apk`（x86_64 设备或模拟器）。只需安装与设备匹配的一个 APK。未配置正式签名时使用开发签名，仅适合本地试用。
 
 Android 正式签名可复制 `android/key.properties.example` 为 `android/key.properties` 并填写自己的密钥信息。此文件与 keystore 不应提交到版本库。
 
 macOS 已配置出站网络权限；凭据采用不共享的传统 Keychain，避免将应用绑定到开发机器的 Keychain Sharing provisioning profile。Android 关闭应用备份，避免凭据与设备加密密钥分离。
 
-`.github/workflows/build.yml` 包含测试及三端构建任务，在推送代码或手动触发时运行。
+`.github/workflows/build.yml` 包含测试及三端构建任务，在发布 GitHub Release 或手动触发时运行。Android 使用 `--split-per-abi`，构建产物包含三个架构的 APK；发布时分别上传 `harbor-ssh-android-arm64-v8a.apk`、`harbor-ssh-android-armeabi-v7a.apk`、`harbor-ssh-android-x86_64.apk`，不再生成通用 APK。
 
 ### 本机 Java 回环错误
 
@@ -135,7 +135,7 @@ macOS 已配置出站网络权限；凭据采用不共享的传统 Keychain，�
 
 ```powershell
 $env:JAVA_TOOL_OPTIONS = '-Djdk.net.unixdomain.tmpdir=H:/Project/Github/SSHAPP/.tools/no-unix-sockets'
-flutter build apk --release
+flutter build apk --release --split-per-abi
 ```
 
 替换为当前项目下的不存在路径；不要创建该目录。不需要修改系统网络或安全设置。本项目本机验证使用了此临时进程设置。

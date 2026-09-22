@@ -19,17 +19,35 @@ class AppearancePreferences {
   const AppearancePreferences({
     this.mode = AppThemeMode.system,
     this.color = AppThemeColor.defaultColor,
+    this.terminalFontSize = 14,
+    this.terminalWrap = true,
   });
   final AppThemeMode mode;
   final AppThemeColor color;
+  final int terminalFontSize;
 
-  AppearancePreferences copyWith({AppThemeMode? mode, AppThemeColor? color}) =>
-      AppearancePreferences(
-        mode: mode ?? this.mode,
-        color: color ?? this.color,
-      );
+  /// When false, the terminal keeps each logical line intact and scrolls
+  /// horizontally. Stored only on this device.
+  final bool terminalWrap;
 
-  Map<String, String> toJson() => {'mode': mode.name, 'color': color.name};
+  AppearancePreferences copyWith({
+    AppThemeMode? mode,
+    AppThemeColor? color,
+    int? terminalFontSize,
+    bool? terminalWrap,
+  }) => AppearancePreferences(
+    mode: mode ?? this.mode,
+    color: color ?? this.color,
+    terminalFontSize: terminalFontSize ?? this.terminalFontSize,
+    terminalWrap: terminalWrap ?? this.terminalWrap,
+  );
+
+  Map<String, Object> toJson() => {
+    'mode': mode.name,
+    'color': color.name,
+    'terminalFontSize': terminalFontSize,
+    'terminalWrap': terminalWrap,
+  };
 
   factory AppearancePreferences.fromJson(Map<dynamic, dynamic> json) =>
       AppearancePreferences(
@@ -43,5 +61,11 @@ class AppearancePreferences {
                 .where((v) => v.name == json['color'])
                 .firstOrNull ??
             AppThemeColor.defaultColor,
+        terminalFontSize: _fontSize(json['terminalFontSize']),
+        terminalWrap: json['terminalWrap'] != false,
       );
+  static int _fontSize(Object? value) {
+    final size = value is num ? value.round() : int.tryParse('$value');
+    return size == null ? 14 : size.clamp(10, 24).toInt();
+  }
 }

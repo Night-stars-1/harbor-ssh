@@ -111,4 +111,68 @@ void main() {
     semantics.dispose();
     debugDefaultTargetPlatformOverride = null;
   });
+
+  testWidgets('macOS 标题栏保留系统按钮并留出交通灯空位', (tester) async {
+    debugDefaultTargetPlatformOverride = TargetPlatform.macOS;
+    addTearDown(() => debugDefaultTargetPlatformOverride = null);
+    const channel = MethodChannel('window_manager');
+    final calls = <MethodCall>[];
+    tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(channel, (
+      call,
+    ) async {
+      calls.add(call);
+      return switch (call.method) {
+        'isFocused' => true,
+        'isMaximized' || 'isFullScreen' || 'isMinimized' => false,
+        _ => null,
+      };
+    });
+    addTearDown(
+      () => tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+        channel,
+        null,
+      ),
+    );
+    await initializeWindowsWindow();
+    expect(calls.firstWhere((c) => c.method == 'setTitleBarStyle').arguments, {
+      'titleBarStyle': 'hidden',
+      'windowButtonVisibility': true,
+    });
+    final text = TextEditingController(text: 'page state');
+    addTearDown(text.dispose);
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: harborTheme(),
+        builder: (context, child) => WindowsWindowFrame(child: child!),
+        home: Scaffold(body: TextField(controller: text)),
+      ),
+    );
+    await tester.pumpAndSettle();
+    final fieldState = tester.state(find.byType(TextField));
+    expect(find.text('Harbor SSH'), findsOneWidget);
+    expect(find.byKey(const ValueKey('window-minimize')), findsNothing);
+    expect(find.byKey(const ValueKey('window-maximize')), findsNothing);
+    expect(find.byKey(const ValueKey('window-close')), findsNothing);
+    expect(
+      tester
+          .getSize(find.byKey(const ValueKey('macos-traffic-light-inset')))
+          .width,
+      78,
+    );
+    await tester.drag(
+      find.byKey(const ValueKey('window-drag-area')),
+      const Offset(80, 0),
+    );
+    await tester.pumpAndSettle();
+    expect(calls.any((call) => call.method == 'startDragging'), isTrue);
+    for (final listener in windowManager.listeners) {
+      listener.onWindowEnterFullScreen();
+    }
+    await tester.pump();
+    expect(find.byKey(const ValueKey('windows-title-bar')), findsNothing);
+    expect(tester.state(find.byType(TextField)), same(fieldState));
+    await tester.pumpWidget(const SizedBox.shrink());
+    expect(windowManager.listeners, isEmpty);
+    debugDefaultTargetPlatformOverride = null;
+  });
 }

@@ -67,7 +67,7 @@ class _HarborAppState extends State<HarborApp> {
             : HarborMotion.effectsDuration,
         themeMode: flutterThemeMode(appearance.mode),
         builder: (context, child) =>
-            usesWindowsTitleBar ? WindowsWindowFrame(child: child!) : child!,
+            usesCustomTitleBar ? WindowsWindowFrame(child: child!) : child!,
         home: Builder(
           builder: (context) => Workspace(
             model: widget.model,
@@ -421,10 +421,22 @@ class _WorkspaceState extends State<Workspace> {
             ? null
             : model.activeSession;
         final canAdd = !model.loading && model.loadError == null;
+        final nestedPage =
+            model.showingSettings ||
+            model.showingFiles ||
+            model.showingUsers ||
+            terminalSession != null;
         return PopScope(
-          canPop: !model.showingSettings,
+          canPop: !nestedPage,
           onPopInvokedWithResult: (didPop, result) {
-            if (!didPop && model.showingSettings) _backFromSettings();
+            if (didPop) return;
+            if (model.showingSettings) {
+              _backFromSettings();
+            } else if (terminalSession != null) {
+              model.selectSession(null);
+            } else {
+              model.filter();
+            }
           },
           child: Scaffold(
             appBar: wide
@@ -476,7 +488,7 @@ class _WorkspaceState extends State<Workspace> {
                                     ? '凭证'
                                     : model.favoritesOnly
                                     ? '收藏'
-                                    : model.group ?? '连接'),
+                                    : model.selectedTag ?? '连接'),
                             maxLines: 1,
                             overflow: TextOverflow.ellipsis,
                           ),
@@ -638,6 +650,15 @@ class _WorkspaceState extends State<Workspace> {
                                             },
                                             activeSession: model.activeSession,
                                             hosts: model.hosts,
+                                            fontSize: model
+                                                .appearance
+                                                .value
+                                                .terminalFontSize
+                                                .toDouble(),
+                                            terminalWrap: model
+                                                .appearance
+                                                .value
+                                                .terminalWrap,
                                             desktop: wide,
                                             visible:
                                                 !model.showingSettings &&
@@ -823,7 +844,7 @@ class _WorkspaceState extends State<Workspace> {
                         !model.showingFiles &&
                         !model.showingUsers &&
                         !model.favoritesOnly &&
-                        model.group == null,
+                        model.selectedTag == null,
                     () => model.filter(),
                     bottomSpacing: 0,
                   ),
@@ -857,28 +878,28 @@ class _WorkspaceState extends State<Workspace> {
                     model.showingFiles && !model.showingSettings,
                     model.showFiles,
                   ),
-                  _sectionLabel('分组'),
-                  if (model.groups.isEmpty && !_sidebarCollapsed)
+                  _sectionLabel('标签'),
+                  if (model.tags.isEmpty && !_sidebarCollapsed)
                     Padding(
                       padding: const EdgeInsets.symmetric(horizontal: 16),
                       child: Text(
-                        '添加连接时创建分组',
+                        '添加连接时创建标签',
                         style: type.bodySmall?.copyWith(
                           color: colors.onSurfaceVariant,
                         ),
                       ),
                     ),
-                  for (final group in model.groups)
+                  for (final tag in model.tags)
                     _navItem(
-                      Icons.folder_outlined,
-                      group,
+                      Icons.sell_outlined,
+                      tag,
                       '',
-                      model.group == group &&
+                      model.selectedTag == tag &&
                           !model.showingSettings &&
                           !model.showingFiles &&
                           model.activeSessionId == null &&
                           !model.showingUsers,
-                      () => model.filter(selectedGroup: group),
+                      () => model.filter(tag: tag),
                     ),
                   _sectionLabel('会话'),
                   if (model.sessions.isEmpty && !_sidebarCollapsed)
@@ -1062,7 +1083,7 @@ class _WorkspaceState extends State<Workspace> {
                       style: type.bodyLarge,
                       onChanged: model.search,
                       decoration: InputDecoration(
-                        hintText: usersMode ? '搜索凭证名称' : '搜索主机、地址或分组',
+                        hintText: usersMode ? '搜索凭证名称' : '搜索主机、地址或标签',
                         prefixIcon: const Icon(Icons.search_rounded),
                         constraints: const BoxConstraints(minHeight: 56),
                         contentPadding: const EdgeInsets.symmetric(
@@ -1093,21 +1114,21 @@ class _WorkspaceState extends State<Workspace> {
                               ),
                       ),
                     ),
-                    if (!usersMode && model.groups.isNotEmpty) ...[
+                    if (!usersMode && model.tags.isNotEmpty) ...[
                       const SizedBox(height: 12),
                       SingleChildScrollView(
                         scrollDirection: Axis.horizontal,
                         child: Row(
                           children: [
-                            for (final group in [null, ...model.groups])
+                            for (final tag in [null, ...model.tags])
                               Padding(
                                 padding: const EdgeInsets.only(right: 8),
                                 child: FilterChip(
-                                  label: Text(group ?? '所有分组'),
-                                  selected: model.group == group,
+                                  label: Text(tag ?? '所有标签'),
+                                  selected: model.selectedTag == tag,
                                   onSelected: (_) => model.filter(
                                     favorites: model.favoritesOnly,
-                                    selectedGroup: group,
+                                    tag: tag,
                                   ),
                                 ),
                               ),
@@ -1172,19 +1193,12 @@ class _WorkspaceState extends State<Workspace> {
             if (count > 0 && grid)
               SliverPadding(
                 padding: EdgeInsets.symmetric(horizontal: inset),
-                sliver: SliverGrid(
-                  gridDelegate: const SliverGridDelegateWithMaxCrossAxisExtent(
-                    maxCrossAxisExtent: 380,
-                    mainAxisExtent: 112,
-                    crossAxisSpacing: 8,
-                    mainAxisSpacing: 8,
-                  ),
-                  delegate: SliverChildBuilderDelegate(
-                    (_, index) => usersMode
-                        ? _userCard(users[index], asCard: true)
-                        : _hostCard(hosts[index], asCard: true),
-                    childCount: count,
-                  ),
+                sliver: _cardGrid(
+                  hosts: hosts,
+                  users: users,
+                  usersMode: usersMode,
+                  count: count,
+                  available: constraints.maxWidth - inset * 2,
                 ),
               ),
             SliverToBoxAdapter(child: SizedBox(height: wide ? 28 : 128)),
@@ -1192,6 +1206,60 @@ class _WorkspaceState extends State<Workspace> {
         );
       },
     );
+  }
+
+  static const _cardGap = 8.0;
+  static const _cardMinHeight = 112.0;
+
+  /// Cards keep the previous column width, but every row grows with the tags a
+  /// card shows instead of clipping them into a fixed card height.
+  Widget _cardGrid({
+    required List<Host> hosts,
+    required List<SshUser> users,
+    required bool usersMode,
+    required int count,
+    required double available,
+  }) {
+    var columns = (available / (380 + _cardGap)).ceil();
+    if (columns < 1) columns = 1;
+    final rows = (count + columns - 1) ~/ columns;
+    return SliverList.separated(
+      itemCount: rows,
+      separatorBuilder: (_, _) => const SizedBox(height: _cardGap),
+      itemBuilder: (_, row) => Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          for (var column = 0; column < columns; column++) ...[
+            if (column > 0) const SizedBox(width: _cardGap),
+            Expanded(
+              child: ConstrainedBox(
+                constraints: const BoxConstraints(minHeight: _cardMinHeight),
+                child: _cardSlot(
+                  hosts: hosts,
+                  users: users,
+                  usersMode: usersMode,
+                  count: count,
+                  index: row * columns + column,
+                ),
+              ),
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+
+  Widget _cardSlot({
+    required List<Host> hosts,
+    required List<SshUser> users,
+    required bool usersMode,
+    required int count,
+    required int index,
+  }) {
+    if (index >= count) return const SizedBox.shrink();
+    return usersMode
+        ? _userCard(users[index], asCard: true)
+        : _hostCard(hosts[index], asCard: true);
   }
 
   Widget _workspaceHeader(bool wide, bool compact) {
@@ -1202,7 +1270,7 @@ class _WorkspaceState extends State<Workspace> {
         ? '你的连接凭证'
         : model.favoritesOnly
         ? '收藏连接'
-        : model.group ?? '连接工作空间';
+        : model.selectedTag ?? '连接工作空间';
     final active = model.sessions
         .where((s) => s.status == ConnectionStatus.connected)
         .length;
@@ -1414,7 +1482,7 @@ class _WorkspaceState extends State<Workspace> {
                   ? '右键或长按连接卡片，选择“收藏”'
                   : sourceEmpty
                   ? (users ? '新建凭证，生成密钥对或导入 SSH 私钥' : '新建连接，填写主机地址，即可开启终端')
-                  : '试试其他关键词，或切换分组',
+                  : '试试其他关键词，或切换标签',
               textAlign: TextAlign.center,
               style: type.bodyMedium?.copyWith(color: colors.onSurfaceVariant),
             ),

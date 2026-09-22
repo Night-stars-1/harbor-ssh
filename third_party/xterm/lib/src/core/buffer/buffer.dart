@@ -67,11 +67,28 @@ class Buffer {
 
   /// Horizontal position of the cursor relative to the top-left cornor of the
   /// screen, starting from 0.
-  int get cursorX => _cursorX.clamp(0, terminal.viewWidth - 1);
+  int get cursorX => _cursorX.clamp(0, _cursorLimit(currentLine));
 
-  /// Insertion boundary, including the pending-wrap position after the final
-  /// cell. Text completion must include that cell rather than dropping it.
-  int get insertionX => _cursorX.clamp(0, terminal.viewWidth);
+  /// Insertion boundary. With wrapping this includes the pending-wrap cell.
+  /// Without wrapping it follows the real cursor, including past [viewWidth].
+  int get insertionX {
+    if (!terminal.lineWrap) {
+      return _cursorX.clamp(0, currentLine.length);
+    }
+    return _cursorX.clamp(0, terminal.viewWidth);
+  }
+
+  int _editableWidth(BufferLine line) =>
+      terminal.lineWrap ? viewWidth : max(viewWidth, line.length);
+
+  int _cursorLimit(BufferLine line) => max(0, _editableWidth(line) - 1);
+
+  bool _lineExtendsPast(int width) {
+    for (var i = 0; i < lines.length; i++) {
+      if (lines[i].length > width) return true;
+    }
+    return false;
+  }
 
   /// Vertical position of the cursor relative to the top-left cornor of the
   /// screen, starting from 0.
@@ -114,7 +131,7 @@ class Buffer {
     codePoint = charset.translate(codePoint);
 
     final cellWidth = unicodeV11.wcwidth(codePoint);
-    if (_cursorX >= terminal.viewWidth) {
+    if (_cursorX >= terminal.viewWidth && terminal.lineWrap) {
       index();
       setCursorX(0);
       if (terminal.autoWrapMode) {
@@ -123,9 +140,13 @@ class Buffer {
     }
 
     final line = currentLine;
+    final advance = cellWidth > 0 ? cellWidth : 1;
+    if (_cursorX + advance > line.length) {
+      line.resize(_cursorX + advance);
+    }
     line.setCell(_cursorX, codePoint, cellWidth, terminal.cursor);
 
-    if (_cursorX < viewWidth) {
+    if (!terminal.lineWrap || _cursorX < viewWidth) {
       _cursorX++;
     }
 
@@ -143,7 +164,7 @@ class Buffer {
     if (_cursorX == 0 && currentLine.isWrapped) {
       currentLine.isWrapped = false;
       moveCursor(viewWidth - 1, -1);
-    } else if (_cursorX == viewWidth) {
+    } else if (_cursorX == viewWidth && terminal.lineWrap) {
       moveCursor(-2, 0);
     } else {
       moveCursor(-1, 0);
@@ -158,7 +179,7 @@ class Buffer {
     for (var i = absoluteCursorY + 1; i < height; i++) {
       final line = lines[i];
       line.isWrapped = false;
-      line.eraseRange(0, viewWidth, terminal.cursor);
+      line.eraseRange(0, _editableWidth(line), terminal.cursor);
     }
   }
 
@@ -170,7 +191,7 @@ class Buffer {
     for (var i = 0; i < _cursorY; i++) {
       final line = lines[i + scrollBack];
       line.isWrapped = false;
-      line.eraseRange(0, viewWidth, terminal.cursor);
+      line.eraseRange(0, _editableWidth(line), terminal.cursor);
     }
   }
 
@@ -179,7 +200,7 @@ class Buffer {
     for (var i = 0; i < viewHeight; i++) {
       final line = lines[i + scrollBack];
       line.isWrapped = false;
-      line.eraseRange(0, viewWidth, terminal.cursor);
+      line.eraseRange(0, _editableWidth(line), terminal.cursor);
     }
   }
 
@@ -187,7 +208,8 @@ class Buffer {
   /// cursor position.
   void eraseLineFromCursor() {
     currentLine.isWrapped = false;
-    currentLine.eraseRange(_cursorX, viewWidth, terminal.cursor);
+    currentLine.eraseRange(
+        _cursorX, _editableWidth(currentLine), terminal.cursor);
   }
 
   /// Erases the line from the start of the line to the cursor, including the
@@ -200,7 +222,7 @@ class Buffer {
   /// Erases the line at the current cursor position.
   void eraseLine() {
     currentLine.isWrapped = false;
-    currentLine.eraseRange(0, viewWidth, terminal.cursor);
+    currentLine.eraseRange(0, _editableWidth(currentLine), terminal.cursor);
   }
 
   /// Erases [count] cells starting at the cursor position.
@@ -289,7 +311,7 @@ class Buffer {
   }
 
   void setCursorX(int cursorX) {
-    _cursorX = cursorX.clamp(0, viewWidth - 1);
+    _cursorX = cursorX.clamp(0, _cursorLimit(currentLine));
   }
 
   void setCursorY(int cursorY) {
@@ -312,8 +334,8 @@ class Buffer {
       maxCursorY = _marginBottom;
     }
 
-    _cursorX = cursorX.clamp(0, viewWidth - 1);
     _cursorY = cursorY.clamp(0, maxCursorY);
+    _cursorX = cursorX.clamp(0, _cursorLimit(currentLine));
   }
 
   void moveCursor(int offsetX, int offsetY) {
@@ -361,8 +383,9 @@ class Buffer {
   }
 
   void deleteChars(int count) {
-    final start = _cursorX.clamp(0, viewWidth);
-    count = min(count, viewWidth - start);
+    final width = _editableWidth(currentLine);
+    final start = _cursorX.clamp(0, width);
+    count = min(count, width - start);
     currentLine.removeCells(start, count, terminal.cursor);
   }
 
@@ -460,24 +483,88 @@ class Buffer {
       }
     }
 
-    // Ensure cursor is within the screen.
-    _cursorX = _cursorX.clamp(0, newWidth - 1);
+    // A wrapped cursor parks on the last visible cell. An unwrapped cursor may
+    // sit further along the same logical line, so a narrower viewport must not
+    // pull it back. A reflow uses the unclamped column below to keep the cursor
+    // on the cell it was on.
     _cursorY = _cursorY.clamp(0, newHeight - 1);
+    final cursorColumn = _cursorX;
+    if (terminal.lineWrap) {
+      _cursorX = _cursorX.clamp(0, newWidth - 1);
+    }
 
     // 2. Adjust the width.
     if (newWidth != oldWidth) {
-      if (terminal.reflowEnabled && !isAltBuffer) {
-        final reflowResult = reflow(lines, oldWidth, newWidth);
-
-        while (reflowResult.length < newHeight) {
-          reflowResult.add(_newEmptyLine(newWidth));
+      final canReflow = terminal.reflowEnabled && !isAltBuffer;
+      if (!terminal.lineWrap) {
+        // Join existing wrapped lines when growing, but leave already-wide
+        // logical lines intact. Shrinking must not split unwrapped content.
+        if (newWidth > oldWidth && canReflow && !_lineExtendsPast(oldWidth)) {
+          final reflowResult = reflow(lines, oldWidth, newWidth);
+          while (reflowResult.length < newHeight) {
+            reflowResult.add(_newEmptyLine(newWidth));
+          }
+          lines.replaceWith(reflowResult);
+        } else if (newWidth > oldWidth) {
+          lines.forEach((item) {
+            if (item.length < newWidth) item.resize(newWidth);
+          });
         }
-
-        lines.replaceWith(reflowResult);
+      } else if (canReflow) {
+        _reflow(oldWidth, newWidth, newHeight, cursorColumn);
       } else {
         lines.forEach((item) => item.resize(newWidth));
       }
     }
+  }
+
+  /// Rewraps the buffer at its current width.
+  ///
+  /// [resize] reflows only when the applied column count changes, and the
+  /// renderer reports the unchanged applied width while the viewport is already
+  /// as wide as the applied columns. Switching wrapping back on therefore has to
+  /// rewrap explicitly, otherwise lines that are wider than the viewport would
+  /// stay unwrapped.
+  void rewrap() {
+    if (!terminal.reflowEnabled || isAltBuffer) return;
+    if (!_lineExtendsPast(viewWidth)) return;
+
+    _reflow(viewWidth, viewWidth, viewHeight, _cursorX);
+  }
+
+  /// Reflows the buffer from [oldWidth] to [newWidth] columns and pads the
+  /// result to [newHeight] rows.
+  ///
+  /// Reflow moves the cursor to a different row, or into the tail of a line that
+  /// no longer fits. The anchor is carried along by the reflow, so the cursor
+  /// keeps its offset inside the logical line and typing after switching
+  /// wrapping back on appends instead of overwriting. [cursorColumn] is the
+  /// cursor column before any clamp to the viewport.
+  void _reflow(
+    int oldWidth,
+    int newWidth,
+    int newHeight,
+    int cursorColumn,
+  ) {
+    // [viewHeight] is still the old height while [resize] runs, so the cursor
+    // row is derived from the height the buffer is resized to.
+    final cursorLine = lines[_cursorY + lines.length - newHeight];
+    final cursorAnchor = cursorLine.createAnchor(cursorColumn);
+    final reflowResult = reflow(lines, oldWidth, newWidth);
+
+    while (reflowResult.length < newHeight) {
+      reflowResult.add(_newEmptyLine(newWidth));
+    }
+
+    lines.replaceWith(reflowResult);
+
+    if (cursorAnchor.attached) {
+      _cursorX = cursorAnchor.x;
+      _cursorY =
+          (cursorAnchor.y - (lines.length - newHeight)).clamp(0, newHeight - 1);
+    }
+
+    cursorAnchor.dispose();
   }
 
   /// Create a new [CellAnchor] at the specified [x] and [y] coordinates.
@@ -537,7 +624,7 @@ class Buffer {
     } while (true);
 
     do {
-      if (end >= viewWidth) {
+      if (end >= (terminal.lineWrap ? viewWidth : line.length)) {
         break;
       }
       final char = line.getCodePoint(end);

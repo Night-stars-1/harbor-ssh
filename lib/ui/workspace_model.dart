@@ -86,7 +86,7 @@ class WorkspaceModel extends ChangeNotifier {
   List<SshConnection> get sessions => List.unmodifiable(_sessions);
   String? activeSessionId;
   String query = '';
-  String? group;
+  String? selectedTag;
   bool favoritesOnly = false;
   bool showingUsers = false;
   bool showingFiles = false;
@@ -117,16 +117,15 @@ class WorkspaceModel extends ChangeNotifier {
     return null;
   }
 
-  List<String> get groups =>
-      _hosts.map((h) => h.group).where((g) => g.isNotEmpty).toSet().toList()
-        ..sort();
+  List<String> get tags =>
+      _hosts.expand((h) => h.tags).toSet().toList()..sort();
   List<Host> get filteredHosts =>
       _hosts
           .where(
             (h) =>
                 (!favoritesOnly || h.favorite) &&
-                (group == null || h.group == group) &&
-                '${h.name} ${h.address} ${h.username} ${h.group}'
+                (selectedTag == null || h.tags.contains(selectedTag)) &&
+                '${h.name} ${h.address} ${h.username} ${h.tags.join(' ')}'
                     .toLowerCase()
                     .contains(query.toLowerCase()),
           )
@@ -339,13 +338,13 @@ class WorkspaceModel extends ChangeNotifier {
 
   void filter({
     bool favorites = false,
-    String? selectedGroup,
+    String? tag,
     bool users = false,
   }) {
     showingSettings = false;
     showingFiles = false;
     favoritesOnly = favorites;
-    group = selectedGroup;
+    selectedTag = tag;
     showingUsers = users;
     activeSessionId = null;
     _notify();

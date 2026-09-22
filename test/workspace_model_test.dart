@@ -18,12 +18,12 @@ void main() {
     expect((await repository.credentials(testHost.id))!.password, 'original');
     model.dispose();
   });
-  test('保存、查询、分组、收藏和删除均持久化', () async {
+  test('保存、查询、标签、收藏和删除均持久化', () async {
     final repository = memoryRepository();
     final model = WorkspaceModel(repository);
     await model.initialize();
     await model.saveHost(testHost, const Credentials(password: 'example'));
-    expect(model.groups, ['开发']);
+    expect(model.tags, ['开发']);
     model.search('DEV.EXAMPLE');
     expect(model.filteredHosts.single.id, testHost.id);
     model.search('missing');
@@ -62,6 +62,74 @@ void main() {
     expect(await repository.userCredentials(user.id), isNull);
     model.dispose();
     reloaded.dispose();
+  });
+  test('标签全集去重排序且空标签不产生标签', () async {
+    final repository = memoryRepository();
+    final model = WorkspaceModel(repository);
+    await model.initialize();
+    for (final host in const [
+      Host(
+        id: 'host-a',
+        name: 'A',
+        address: 'a.example.com',
+        username: 'deploy',
+        tags: ['test', 'dev'],
+      ),
+      Host(
+        id: 'host-b',
+        name: 'B',
+        address: 'b.example.com',
+        username: 'deploy',
+        tags: ['dev', 'prod'],
+      ),
+      Host(
+        id: 'host-c',
+        name: 'C',
+        address: 'c.example.com',
+        username: 'deploy',
+      ),
+    ]) {
+      await model.saveHost(host, null);
+    }
+    expect(model.tags, ['dev', 'prod', 'test']);
+    model.dispose();
+  });
+  test('按任一标签筛中多标签主机并搜索非首个标签', () async {
+    final repository = memoryRepository();
+    final model = WorkspaceModel(repository);
+    await model.initialize();
+    const multi = Host(
+      id: 'host-multi',
+      name: '构建机',
+      address: 'build.internal',
+      username: 'deploy',
+      tags: ['dev', '夜间构建'],
+    );
+    const ops = Host(
+      id: 'host-ops',
+      name: '运维机',
+      address: 'ops.internal',
+      username: 'deploy',
+      tags: ['夜间构建'],
+    );
+    await model.saveHost(multi, null);
+    await model.saveHost(ops, null);
+    model.filter(tag: 'dev');
+    expect(model.filteredHosts.single.id, multi.id);
+    model.filter(tag: '夜间构建');
+    expect(
+      model.filteredHosts.map((host) => host.id).toSet(),
+      {'host-multi', 'host-ops'},
+    );
+    model.filter();
+    model.search('夜间构建');
+    expect(model.filteredHosts.map((host) => host.id).toSet(), {'host-multi', 'host-ops'});
+    model.search('dev');
+    expect(model.filteredHosts.single.id, multi.id);
+    model.search('');
+    model.filter(tag: 'missing');
+    expect(model.filteredHosts, isEmpty);
+    model.dispose();
   });
   test('保存失败不把未保存配置显示为成功', () async {
     final repository = memoryRepository();

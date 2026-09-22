@@ -86,7 +86,7 @@ void main() {
           name: 'Production API',
           address: 'api.example.com',
           username: 'deploy',
-          group: '生产环境',
+          tags: ['生产环境'],
           favorite: true,
           authMethod: AuthMethod.privateKey,
         ),
@@ -95,14 +95,14 @@ void main() {
           name: '开发服务器',
           address: 'dev.example.com',
           username: 'developer',
-          group: '开发环境',
+          tags: ['开发环境'],
         ),
         const Host(
           id: '3',
           name: 'Home Lab',
           address: '192.0.2.10',
           username: 'admin',
-          group: '个人',
+          tags: ['个人'],
           authMethod: AuthMethod.privateKey,
         ),
         if (variant.endsWith('dense'))
@@ -112,7 +112,7 @@ void main() {
               name: 'Node ${index.toString().padLeft(2, '0')}',
               address: 'node$index.example.com',
               username: 'deploy',
-              group: index.isEven ? '生产环境' : '开发环境',
+              tags: [index.isEven ? '生产环境' : '开发环境'],
             ),
       ]);
       if (variant.endsWith('empty')) await repository.saveHosts([]);

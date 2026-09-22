@@ -28,6 +28,8 @@ class TerminalPane extends StatefulWidget {
     this.autofocus = true,
     this.onFocused,
     this.maxErrorHeight = 180,
+    this.fontSize = 14,
+    this.terminalWrap = true,
     this.aiSettings,
     this.onAiSettings,
   });
@@ -43,6 +45,8 @@ class TerminalPane extends StatefulWidget {
   final bool autofocus;
   final VoidCallback? onFocused;
   final double maxErrorHeight;
+  final double fontSize;
+  final bool terminalWrap;
   final AiSettings Function()? aiSettings;
   final VoidCallback? onAiSettings;
   @override
@@ -80,7 +84,7 @@ class _TerminalPaneState extends State<TerminalPane> {
   final _scrollController = ScrollController();
   final _linkStyle = TerminalLinkStyle(const Color(0xff9ecaff));
 
-  double _fontSize = 14;
+  late double _fontSize = widget.fontSize.clamp(10, 24).toDouble();
   PointerDownEvent? _linkDown;
   Uri? _pressedLink;
   Offset? _hoverPosition;
@@ -174,6 +178,7 @@ class _TerminalPaneState extends State<TerminalPane> {
     widget.controller?._state = this;
     _focus.addListener(_reportFocus);
     _listenForLinkHover();
+    _applyLineWrap();
   }
 
   void _reportFocus() {
@@ -213,11 +218,11 @@ class _TerminalPaneState extends State<TerminalPane> {
   @override
   void didUpdateWidget(TerminalPane oldWidget) {
     super.didUpdateWidget(oldWidget);
-    if (oldWidget.controller != widget.controller &&
-        oldWidget.controller?._state == this) {
-      oldWidget.controller?._state = null;
-    }
     widget.controller?._state = this;
+    _applyLineWrap();
+    if (oldWidget.fontSize != widget.fontSize) {
+      _fontSize = widget.fontSize;
+    }
     if (oldWidget.session != widget.session) {
       oldWidget.session.removeListener(_connectionChanged);
       widget.session.addListener(_connectionChanged);
@@ -231,6 +236,10 @@ class _TerminalPaneState extends State<TerminalPane> {
       widget.session.terminal.addListener(_scheduleHoverRefresh);
       _hoverPosition = null;
     }
+  }
+
+  void _applyLineWrap() {
+    widget.session.terminal.lineWrap = widget.terminalWrap;
   }
 
   bool _handleHoverKey(KeyEvent event) {
@@ -309,7 +318,6 @@ class _TerminalPaneState extends State<TerminalPane> {
     }
     return _linkStyle.decoration(x, y);
   }
-
 
   void _selectOption(String value) {
     if (value == 'larger') {
@@ -744,8 +752,6 @@ class _TerminalPaneState extends State<TerminalPane> {
     );
   }
 }
-
-
 
 /// Shares terminal actions with the mobile app bar without moving terminal state.
 class TerminalPaneController {

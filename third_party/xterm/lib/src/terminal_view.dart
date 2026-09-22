@@ -1,3 +1,4 @@
+import 'package:flutter/gestures.dart';
 import 'package:flutter/cupertino.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart';
@@ -54,7 +55,6 @@ class TerminalView extends StatefulWidget {
     this.onPrepareCellDecoration,
     this.cellDecoration,
   });
-
 
   /// The underlying terminal that this widget renders.
   final Terminal terminal;
@@ -153,7 +153,6 @@ class TerminalView extends StatefulWidget {
   /// Optional per-cell appearance override used while painting.
   final TerminalCellDecoration? Function(int x, int y)? cellDecoration;
 
-
   @override
   State<TerminalView> createState() => TerminalViewState();
 }
@@ -174,6 +173,9 @@ class TerminalViewState extends State<TerminalView> {
   late TerminalController _controller;
 
   late ScrollController _scrollController;
+  final _horizontalController = ScrollController();
+  double _horizontalExtent = 0;
+  bool _applyingHorizontal = false;
 
   RenderTerminal get renderTerminal =>
       _viewportKey.currentContext!.findRenderObject() as RenderTerminal;
@@ -186,6 +188,7 @@ class TerminalViewState extends State<TerminalView> {
     _shortcutManager = ShortcutManager(
       shortcuts: widget.shortcuts ?? defaultTerminalShortcuts,
     );
+    _horizontalController.addListener(_onHorizontalScroll);
     super.initState();
   }
 
@@ -215,6 +218,7 @@ class TerminalViewState extends State<TerminalView> {
 
   @override
   void dispose() {
+    _horizontalController.dispose();
     if (widget.focusNode == null) {
       _focusNode.dispose();
     }
@@ -251,8 +255,8 @@ class TerminalViewState extends State<TerminalView> {
           composingText: _composingText,
           prepareCellDecoration: widget.onPrepareCellDecoration,
           cellDecoration: widget.cellDecoration,
+          onHorizontalMetrics: _onHorizontalMetrics,
         );
-
       },
     );
 
@@ -332,7 +336,17 @@ class TerminalViewState extends State<TerminalView> {
     child = Container(
       color: widget.theme.background.withOpacity(widget.backgroundOpacity),
       padding: widget.padding,
-      child: child,
+      child: Column(
+        children: [
+          Expanded(
+            child: Listener(
+              onPointerSignal: _onHorizontalPointer,
+              child: child,
+            ),
+          ),
+          if (_horizontalExtent > 0) _horizontalBar(),
+        ],
+      ),
     );
 
     return child;
@@ -457,6 +471,78 @@ class TerminalViewState extends State<TerminalView> {
     _customTextEditKey.currentState?.setEditableRect(rect, caretRect);
   }
 
+  void _onHorizontalScroll() {
+    if (_applyingHorizontal || !_horizontalController.hasClients) return;
+    final render = _viewportKey.currentContext?.findRenderObject();
+    if (render is RenderTerminal) {
+      render.horizontalOffset = _horizontalController.offset;
+    }
+  }
+
+  void _onHorizontalMetrics(double extent, double offset) {
+    if (!mounted) return;
+    final shown = widget.terminal.lineWrap ? 0.0 : extent;
+    if ((shown - _horizontalExtent).abs() > 0.5) {
+      setState(() => _horizontalExtent = shown);
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        _applyHorizontalTarget(offset);
+      });
+    } else {
+      _applyHorizontalTarget(offset);
+    }
+  }
+
+  void _applyHorizontalTarget(double offset) {
+    if (!mounted || !_horizontalController.hasClients) return;
+    final position = _horizontalController.position;
+    final target =
+        offset.clamp(position.minScrollExtent, position.maxScrollExtent);
+    if ((_horizontalController.offset - target).abs() <= 0.5) return;
+    _applyingHorizontal = true;
+    _horizontalController.jumpTo(target);
+    _applyingHorizontal = false;
+  }
+
+  void _onHorizontalPointer(PointerSignalEvent event) {
+    if (widget.terminal.lineWrap ||
+        event is! PointerScrollEvent ||
+        event.scrollDelta.dx == 0 ||
+        !_horizontalController.hasClients) return;
+    final position = _horizontalController.position;
+    final next = (position.pixels + event.scrollDelta.dx).clamp(
+      position.minScrollExtent,
+      position.maxScrollExtent,
+    );
+    _horizontalController.jumpTo(next);
+  }
+
+  Widget _horizontalBar() {
+    return SizedBox(
+      key: const ValueKey('terminal-horizontal-scrollbar'),
+      height: 12,
+      child: LayoutBuilder(
+        builder: (context, constraints) => RawScrollbar(
+          controller: _horizontalController,
+          thumbVisibility: true,
+          interactive: true,
+          thumbColor: widget.theme.foreground.withOpacity(0.6),
+          thickness: 6,
+          radius: const Radius.circular(3),
+          notificationPredicate: (notification) =>
+              notification.metrics.axis == Axis.horizontal,
+          child: SingleChildScrollView(
+            controller: _horizontalController,
+            scrollDirection: Axis.horizontal,
+            child: SizedBox(
+              width: constraints.maxWidth + _horizontalExtent,
+              height: 12,
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
   void _scrollToBottom() {
     renderTerminal.resetCursorBlink();
     final position = _scrollableKey.currentState?.position;
@@ -484,6 +570,7 @@ class _TerminalView extends LeafRenderObjectWidget {
     this.composingText,
     this.prepareCellDecoration,
     this.cellDecoration,
+    this.onHorizontalMetrics,
   });
 
   final Terminal terminal;
@@ -516,6 +603,8 @@ class _TerminalView extends LeafRenderObjectWidget {
 
   final TerminalCellDecoration? Function(int x, int y)? cellDecoration;
 
+  final HorizontalMetricsCallback? onHorizontalMetrics;
+
   @override
   RenderTerminal createRenderObject(BuildContext context) {
     return RenderTerminal(
@@ -534,6 +623,7 @@ class _TerminalView extends LeafRenderObjectWidget {
       composingText: composingText,
       prepareCellDecoration: prepareCellDecoration,
       cellDecoration: cellDecoration,
+      onHorizontalMetrics: onHorizontalMetrics,
     );
   }
 
@@ -554,6 +644,7 @@ class _TerminalView extends LeafRenderObjectWidget {
       ..onEditableRect = onEditableRect
       ..composingText = composingText
       ..prepareCellDecoration = prepareCellDecoration
-      ..cellDecoration = cellDecoration;
+      ..cellDecoration = cellDecoration
+      ..onHorizontalMetrics = onHorizontalMetrics;
   }
 }

@@ -36,6 +36,10 @@ abstract class TerminalState {
 
   bool get appKeypadMode;
 
+  /// When false, the buffer keeps one logical line instead of wrapping at
+  /// [viewWidth].
+  bool get lineWrap;
+
   bool get reportFocusMode;
 
   bool get altBufferMouseScrollMode;

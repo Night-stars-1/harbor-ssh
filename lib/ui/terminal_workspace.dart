@@ -24,6 +24,8 @@ class TerminalWorkspace extends StatefulWidget {
     required this.onFiles,
     this.aiSettings,
     this.onAiSettings,
+    this.fontSize = 14,
+    this.terminalWrap = true,
   });
 
   final List<SshConnection> sessions;
@@ -36,6 +38,8 @@ class TerminalWorkspace extends StatefulWidget {
   final ValueChanged<SshConnection> onClose, onFiles;
   final AiSettings Function()? aiSettings;
   final VoidCallback? onAiSettings;
+  final double fontSize;
+  final bool terminalWrap;
 
   @override
   State<TerminalWorkspace> createState() => _TerminalWorkspaceState();
@@ -362,7 +366,8 @@ class _TerminalWorkspaceState extends State<TerminalWorkspace> {
                         ),
                   showHeader: widget.desktop,
                   maxErrorHeight: (height - 160).clamp(0, 180),
-                  autofocus: widget.visible && _focused == side,
+                  fontSize: widget.fontSize,
+                  terminalWrap: widget.terminalWrap,
                   onFocused: () {
                     final assignedSide = _slots.indexOf(session.id);
                     if (widget.visible &&

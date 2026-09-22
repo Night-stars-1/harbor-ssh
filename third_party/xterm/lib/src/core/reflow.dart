@@ -1,3 +1,5 @@
+import 'dart:math' show max;
+
 import 'package:xterm/src/core/buffer/line.dart';
 import 'package:xterm/src/utils/circular_buffer.dart';
 
@@ -62,7 +64,10 @@ class _LineReflow {
   /// Adds a line to the reflow operation. This method will try to reuse the
   /// given line if possible.
   void add(BufferLine line) {
-    final trimmedLength = line.getTrimmedLength(oldWidth);
+    // Lines laid out with wrapping never hold more than [oldWidth] columns, so
+    // scanning up to [oldWidth] is the normal bound. An unwrapped line may run
+    // past it; scanning only [oldWidth] would drop everything beyond it.
+    final trimmedLength = line.getTrimmedLength(max(oldWidth, line.length));
 
     // A fast path for empty lines
     if (trimmedLength == 0) {
@@ -77,19 +82,22 @@ class _LineReflow {
       return;
     }
 
-    if (newWidth >= oldWidth) {
+    if (trimmedLength > newWidth) {
+      // The line does not fit the new width, so keep its head here and copy the
+      // rest into the lines after it. Reflowing at the same width also lands
+      // here, where a line can still be wider than the target.
+      _lines.add(line);
+
+      if (line.getWidth(newWidth - 1) == 2) {
+        _addPart(line, from: newWidth - 1, to: trimmedLength);
+      } else {
+        _addPart(line, from: newWidth, to: trimmedLength);
+      }
+    } else if (newWidth >= oldWidth) {
       // Reuse the line to avoid copying the content and object allocation.
       _builder.setBuffer(line, trimmedLength);
     } else {
       _lines.add(line);
-
-      if (trimmedLength > newWidth) {
-        if (line.getWidth(newWidth - 1) == 2) {
-          _addPart(line, from: newWidth - 1, to: trimmedLength);
-        } else {
-          _addPart(line, from: newWidth, to: trimmedLength);
-        }
-      }
     }
 
     line.resize(newWidth);
@@ -119,8 +127,12 @@ class _LineReflow {
         lineFilled = true;
       }
 
-      // Leave the last cell to the next iteration if it's a wide char.
-      if (lineFilled && line.getWidth(from + cellsToCopy - 1) == 2) {
+      // Leave the last cell to the next iteration if it's a wide char. A reused
+      // line can already fill the builder, and then there is no copied cell to
+      // look at.
+      if (lineFilled &&
+          cellsToCopy > 0 &&
+          line.getWidth(from + cellsToCopy - 1) == 2) {
         cellsToCopy--;
       }
 

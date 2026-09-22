@@ -250,6 +250,40 @@ void main() {
     expect(tester.takeException(), isNull);
     await tester.pumpWidget(const SizedBox.shrink());
   });
+  testWidgets('手机系统返回先退出终端、文件和凭证，再退出应用', (tester) async {
+    tester.view.physicalSize = const Size(390, 844);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    final session = SshConnection(id: 'mobile-session', host: testHost)
+      ..status = ConnectionStatus.connected;
+    final model = _SidebarWorkspaceModel([session]);
+    await tester.pumpWidget(HarborApp(model: model));
+    await tester.pumpAndSettle();
+    expect(find.byType(TerminalView), findsOneWidget);
+
+    Future<void> back() async {
+      final navigator = Navigator.of(tester.element(find.byType(Workspace)));
+      expect(await navigator.maybePop(), isTrue);
+      await tester.pumpAndSettle();
+    }
+
+    await back();
+    expect(model.activeSessionId, isNull);
+    expect(find.byType(TerminalView), findsNothing);
+    model.showFiles();
+    await tester.pumpAndSettle();
+    await back();
+    expect(model.showingFiles, isFalse);
+    model.filter(users: true);
+    await tester.pumpAndSettle();
+    await back();
+    expect(model.showingUsers, isFalse);
+    final navigator = Navigator.of(tester.element(find.byType(Workspace)));
+    expect(await navigator.maybePop(), isFalse);
+    expect(tester.takeException(), isNull);
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
   for (final size in [
     const Size(1280, 800),
     const Size(800, 900),
@@ -414,7 +448,6 @@ void main() {
     expect(find.text('生产部署'), findsWidgets);
     expect(find.widgetWithText(TextFormField, '用户名'), findsOneWidget);
     expect(find.widgetWithText(TextFormField, '密码'), findsNothing);
-    expect(find.text('使用已保存的私钥'), findsOneWidget);
     expect(tester.takeException(), isNull);
     await tester.pumpWidget(const SizedBox.shrink());
   });
