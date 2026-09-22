@@ -10,6 +10,56 @@ import 'package:harbor_ssh/ui/workspace_model.dart';
 import 'support.dart';
 
 void main() {
+  for (final width in [390.0, 1280.0]) {
+    testWidgets('主机地址隐藏与恢复不修改连接数据，布局宽度 $width', (tester) async {
+      tester.view.physicalSize = Size(width, 900);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+      final semantics = tester.ensureSemantics();
+      final repository = memoryRepository();
+      const host = Host(
+        id: 'privacy',
+        name: '隐私测试主机',
+        address: '192.0.2.42',
+        username: 'deploy',
+        port: 2222,
+        tags: ['生产环境'],
+      );
+      await repository.saveHosts([host]);
+      final model = WorkspaceModel(repository);
+      await tester.pumpWidget(HarborApp(model: model));
+      await tester.pumpAndSettle();
+      final toggle = find.byKey(const ValueKey('toggle-host-addresses'));
+      expect(find.text('deploy@192.0.2.42:2222'), findsOneWidget);
+      await tester.tap(toggle);
+      await tester.pumpAndSettle();
+      expect(find.textContaining(host.address), findsNothing);
+      expect(find.text('deploy@••••••:2222'), findsOneWidget);
+      expect(find.text(host.name), findsOneWidget);
+      expect(
+        find.descendant(
+          of: find.byType(ExpressiveHostCard),
+          matching: find.text('生产环境'),
+        ),
+        findsOneWidget,
+      );
+      expect(find.byTooltip('显示 IP 地址'), findsOneWidget);
+      expect(
+        tester.getSemantics(find.byType(ExpressiveHostCard)).toStringDeep(),
+        isNot(contains(host.address)),
+      );
+      expect(model.hosts.single.address, host.address);
+      await tester.tap(toggle);
+      await tester.pumpAndSettle();
+      expect(find.text('deploy@192.0.2.42:2222'), findsOneWidget);
+      expect(find.byTooltip('隐藏 IP 地址'), findsOneWidget);
+      expect(tester.takeException(), isNull);
+      await tester.pumpWidget(const SizedBox.shrink());
+      semantics.dispose();
+    });
+  }
+
   for (final mouse in [true, false]) {
     testWidgets('${mouse ? '右键' : '长按'}打开菜单且不连接，菜单操作可用', (tester) async {
       var connections = 0;
@@ -121,8 +171,8 @@ void main() {
     expect(tester.takeException(), isNull);
   });
 
-  testWidgets('无标签主机不显示伪造的标签徽章', (tester) async {
-    await tester.pumpWidget(
+  testWidgets('无标签主机显示未分组徽章，添加标签后替换默认徽章', (tester) async {
+    Future<void> showHost(List<String> tags) => tester.pumpWidget(
       MaterialApp(
         theme: harborTheme(),
         home: Scaffold(
@@ -130,11 +180,12 @@ void main() {
             child: SizedBox(
               width: 280,
               child: ExpressiveHostCard(
-                host: const Host(
+                host: Host(
                   id: 'bare',
-                  name: '裸机',
+                  name: '测试主机',
                   address: 'bare.internal',
                   username: 'deploy',
+                  tags: tags,
                 ),
                 onConnect: () {},
                 onFavorite: () {},
@@ -145,13 +196,13 @@ void main() {
         ),
       ),
     );
+    await showHost(const []);
     await tester.pumpAndSettle();
-    final card = find.byType(ExpressiveHostCard);
-    expect(
-      find.descendant(of: card, matching: find.byType(Text)),
-      findsNWidgets(2),
-    );
-    expect(find.textContaining('分组'), findsNothing);
+    expect(find.text('未分组'), findsOneWidget);
+    await showHost(const ['生产环境']);
+    await tester.pumpAndSettle();
+    expect(find.text('未分组'), findsNothing);
+    expect(find.text('生产环境'), findsOneWidget);
     expect(tester.takeException(), isNull);
   });
 
@@ -160,9 +211,8 @@ void main() {
       MaterialApp(
         theme: harborTheme(),
         builder: (context, child) => MediaQuery(
-          data: MediaQuery.of(
-            context,
-          ).copyWith(textScaler: const TextScaler.linear(2)),
+          data: MediaQuery.of(context)
+              .copyWith(textScaler: const TextScaler.linear(2)),
           child: child!,
         ),
         home: Scaffold(
@@ -192,7 +242,7 @@ void main() {
     expect(tester.takeException(), isNull);
   });
 
-  testWidgets('桌面网格按标签数量增高卡片且不溢出', (tester) async {
+  testWidgets('桌面网格卡片等高且完整容纳多标签', (tester) async {
     tester.view.physicalSize = const Size(1280, 800);
     tester.view.devicePixelRatio = 1;
     addTearDown(tester.view.resetPhysicalSize);
@@ -229,7 +279,22 @@ void main() {
     final bare = tester.getSize(
       find.ancestor(of: find.text('裸机'), matching: card),
     );
-    expect(tagged.height, greaterThan(bare.height));
+    expect(tagged.height, bare.height);
+    for (final element in card.evaluate()) {
+      final item = find.byWidget(element.widget);
+      final surface = find
+          .descendant(of: item, matching: find.byType(Material))
+          .first;
+      expect(tester.getSize(surface).height, tester.getSize(item).height);
+      final bounds = tester.getRect(item);
+      for (final text
+          in find
+              .descendant(of: item, matching: find.byType(Text))
+              .evaluate()) {
+        final textBounds = tester.getRect(find.byWidget(text.widget));
+        expect(textBounds.bottom, lessThanOrEqualTo(bounds.bottom));
+      }
+    }
     expect(tester.takeException(), isNull);
     await tester.pumpWidget(const SizedBox.shrink());
   });

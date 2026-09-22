@@ -10,6 +10,173 @@ import 'package:harbor_ssh/ui/workspace_model.dart';
 import 'support.dart';
 
 void main() {
+  for (final width in [320.0, 390.0]) {
+    testWidgets('手机可从首页找回会话并在终端中切换 $width', (tester) async {
+      tester.view.physicalSize = Size(width, 900);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+      final first = SshConnection(id: 'mobile-first', host: testHost)
+        ..status = ConnectionStatus.connected;
+      final second = SshConnection(
+        id: 'mobile-second',
+        host: const Host(
+          id: 'second',
+          name: '第二会话',
+          address: 'second.example.com',
+          username: 'root',
+        ),
+      )..status = ConnectionStatus.closed;
+      first.terminal.write('preserved output');
+      final model = _SidebarWorkspaceModel([first, second])..filter();
+      await tester.pumpWidget(HarborApp(model: model));
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.byKey(const ValueKey('host-sessions')));
+      await tester.pumpAndSettle();
+      expect(find.text('已连接'), findsOneWidget);
+      expect(find.text('已断开'), findsOneWidget);
+      await tester.tap(
+        find.byKey(const ValueKey('mobile-session-mobile-second')),
+      );
+      await tester.pumpAndSettle();
+      expect(model.activeSession, same(second));
+      expect(second.status, ConnectionStatus.closed);
+      expect(find.byKey(const ValueKey('mobile-session-list')), findsNothing);
+      final switcherSize = tester.getSize(
+        find.byKey(const ValueKey('mobile-session-switcher')),
+      );
+      expect(switcherSize.width, greaterThanOrEqualTo(48));
+      expect(switcherSize.height, greaterThanOrEqualTo(48));
+
+      await tester.tap(find.byKey(const ValueKey('mobile-session-switcher')));
+      await tester.pumpAndSettle();
+      expect(
+        tester
+            .widget<ListTile>(
+              find.byKey(const ValueKey('mobile-session-mobile-second')),
+            )
+            .selected,
+        isTrue,
+      );
+      await tester.tap(
+        find.byKey(const ValueKey('mobile-session-mobile-first')),
+      );
+      await tester.pumpAndSettle();
+      expect(model.activeSession, same(first));
+      expect(first.terminal.buffer.lines[0].getText(), 'preserved output');
+      await tester.tap(find.byTooltip('返回连接'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const ValueKey('host-sessions')));
+      await tester.pumpAndSettle();
+      await tester.tap(
+        find.byKey(const ValueKey('mobile-session-mobile-first')),
+      );
+      await tester.pumpAndSettle();
+      expect(model.sessions, [first, second]);
+      expect(first.status, ConnectionStatus.connected);
+      expect(first.terminal.buffer.lines[0].getText(), 'preserved output');
+      expect(tester.takeException(), isNull);
+      await tester.pumpWidget(const SizedBox.shrink());
+    });
+  }
+
+  testWidgets('手机会话列表断开保留记录，关闭后显示空态', (tester) async {
+    tester.view.physicalSize = const Size(390, 844);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    final session = SshConnection(id: 'manage-mobile', host: testHost)
+      ..status = ConnectionStatus.connected;
+    final model = _SidebarWorkspaceModel([session])..filter();
+    await tester.pumpWidget(HarborApp(model: model));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const ValueKey('host-sessions')));
+    await tester.pumpAndSettle();
+    final row = find.byKey(const ValueKey('mobile-session-manage-mobile'));
+    await tester.tap(
+      find.descendant(of: row, matching: find.byTooltip('管理会话')),
+    );
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('断开连接'));
+    await tester.pumpAndSettle();
+    expect(model.sessions.single, same(session));
+    expect(
+      find.descendant(of: row, matching: find.text('已断开')),
+      findsOneWidget,
+    );
+    await tester.tap(
+      find.descendant(of: row, matching: find.byTooltip('管理会话')),
+    );
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('关闭会话'));
+    await tester.pumpAndSettle();
+    expect(model.sessions, isEmpty);
+    expect(find.text('暂无会话'), findsOneWidget);
+    expect(tester.takeException(), isNull);
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
+
+  for (final width in [390.0, 1280.0]) {
+    testWidgets('未分组入口常驻且自动收纳无标签主机 $width', (tester) async {
+      tester.view.physicalSize = Size(width, 900);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+      const bare = Host(
+        id: 'bare',
+        name: '未标记节点',
+        address: '192.0.2.18',
+        username: 'root',
+      );
+      final repository = memoryRepository();
+      await repository.saveHosts([bare]);
+      final model = WorkspaceModel(repository);
+      await tester.pumpWidget(HarborApp(model: model));
+      await tester.pumpAndSettle();
+      final ungrouped = find.byKey(const ValueKey('filter-ungrouped'));
+      expect(ungrouped, findsOneWidget);
+      await tester.tap(ungrouped);
+      await tester.pumpAndSettle();
+      expect(find.text(bare.name), findsOneWidget);
+      expect(tester.widget<FilterChip>(ungrouped).selected, isTrue);
+      expect(
+        tester
+            .widget<FilterChip>(find.widgetWithText(FilterChip, '所有标签'))
+            .selected,
+        isFalse,
+      );
+      if (width > 800) {
+        await tester.tap(find.text('所有连接'));
+        await tester.pumpAndSettle();
+        await tester.tap(find.byKey(const ValueKey('sidebar-ungrouped')));
+        await tester.pumpAndSettle();
+        expect(tester.widget<FilterChip>(ungrouped).selected, isTrue);
+      }
+
+      await model.saveHost(
+        const Host(
+          id: 'bare',
+          name: '未标记节点',
+          address: '192.0.2.18',
+          username: 'root',
+          tags: ['开发'],
+        ),
+        null,
+      );
+      await tester.pumpAndSettle();
+      expect(find.text(bare.name), findsNothing);
+      expect(find.text('暂无未分组主机'), findsOneWidget);
+      expect(ungrouped, findsOneWidget);
+      await tester.tap(find.widgetWithText(FilterChip, '所有标签'));
+      await tester.pumpAndSettle();
+      expect(find.text(bare.name), findsOneWidget);
+      expect(tester.widget<FilterChip>(ungrouped).selected, isFalse);
+      expect(tester.takeException(), isNull);
+      await tester.pumpWidget(const SizedBox.shrink());
+    });
+  }
+
   testWidgets('桌面分屏与侧栏会话选择联动，返回首页再打开保留分屏和终端状态', (tester) async {
     tester.view.physicalSize = const Size(1280, 800);
     tester.view.devicePixelRatio = 1;

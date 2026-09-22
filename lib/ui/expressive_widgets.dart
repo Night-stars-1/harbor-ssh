@@ -1,3 +1,5 @@
+import 'dart:math';
+
 import 'package:flutter/material.dart';
 import 'package:flutter/physics.dart';
 import 'package:flutter/services.dart';
@@ -60,6 +62,9 @@ class ExpressiveMark extends StatelessWidget {
   }
 }
 
+List<String> _hostBadges(Host host) =>
+    host.tags.isEmpty ? const ['未分组'] : host.tags;
+
 class ExpressiveHostCard extends StatelessWidget {
   const ExpressiveHostCard({
     super.key,
@@ -69,6 +74,8 @@ class ExpressiveHostCard extends StatelessWidget {
     required this.onAction,
     this.slot = HarborListSlot.single,
     this.asCard = false,
+    this.hideAddress = false,
+    this.menuController,
   });
   final Host host;
   final VoidCallback onConnect;
@@ -77,11 +84,24 @@ class ExpressiveHostCard extends StatelessWidget {
   final HarborListSlot slot;
   final bool asCard;
 
+  /// Handle an outer gesture owner — the reorder宿主 — uses to open this
+  /// card's menu. While one is attached the card leaves long press to that
+  /// owner, so its delayed drag recognizer is never raced by the InkWell.
+  final HostCardMenuController? menuController;
+
+  /// Masks the rendered address (never the stored [Host]) so the list can be
+  /// shown over a shoulder. [Host.username] and [Host.port] stay readable.
+  final bool hideAddress;
+
+  static const _addressMask = '••••••';
+
   @override
   Widget build(BuildContext context) => _ConnectionTile(
     title: host.name,
-    subtitle: host.destination,
-    badges: host.tags,
+    subtitle: hideAddress
+        ? '${host.username}@$_addressMask:${host.port}'
+        : host.destination,
+    badges: _hostBadges(host),
     favorite: host.favorite,
     icon: Icons.dns_rounded,
     actionLabel: '连接',
@@ -89,6 +109,7 @@ class ExpressiveHostCard extends StatelessWidget {
     showMenuButton: false,
     slot: slot,
     asCard: asCard,
+    menuController: menuController,
     onTap: onConnect,
     onAction: (action) {
       if (action == 'favorite') {
@@ -146,6 +167,133 @@ class ExpressiveUserCard extends StatelessWidget {
   );
 }
 
+/// Card surface geometry, shared by [ExpressiveHostCard], the grid height
+/// measurement and the reorder drag proxy, so all three agree on the outline.
+abstract final class HostCardShape {
+  static const double radius = 20;
+  static const double pressedRadius = 16;
+  static const BorderRadius border = BorderRadius.all(Radius.circular(radius));
+}
+
+/// Handle on a card's overflow menu.
+///
+/// A reorder宿主 owns the long press of the cards it arranges, so it needs a
+/// way to open the menu that long press used to open. The card keeps building
+/// the items itself — the owner only asks it to show them — so the menu never
+/// gets duplicated.
+class HostCardMenuController {
+  _ConnectionTileState? _tile;
+
+  /// Opens the attached card's menu, anchored at [position] in global
+  /// coordinates (the card picks its own anchor when null).
+  void show([Offset? position]) => _tile?._openMenu(position);
+
+  void _attach(_ConnectionTileState tile) => _tile = tile;
+
+  void _detach(_ConnectionTileState tile) {
+    if (identical(_tile, tile)) _tile = null;
+  }
+}
+
+/// Metrics of a card's content.
+///
+/// The card's build and [hostCardGridExtent] both read them, so a grid cell
+/// reserves exactly the room the card then asks for.
+const _cardMarkSize = 36.0;
+const _cardMarkGap = 10.0;
+const _cardTitleGap = 2.0;
+const _cardStarSize = 18.0;
+const _cardPadding = EdgeInsets.fromLTRB(14, 10, 14, 10);
+const _cardCompactPadding = 6.0;
+const _tagPadding = EdgeInsets.symmetric(horizontal: 8, vertical: 2);
+const _tagSpacing = 6.0;
+const _tagRunSpacing = 4.0;
+const _tagTopPadding = 4.0;
+
+/// Height a grid cell must reserve so no host card clips its content.
+///
+/// A grid hands every cell the same extent, so one card being a line taller
+/// than another would otherwise be cut off. This measures the real card
+/// content for [width]: theme fonts at the ambient text scale, one line of
+/// title and destination, and the tag chips wrapped into as many runs as they
+/// need. [minHeight] keeps short cards on the usual card size.
+///
+/// It is pure geometry over the given hosts, so callers run it while building
+/// the sliver — never while a pointer moves.
+double hostCardGridExtent(
+  BuildContext context, {
+  required double width,
+  required Iterable<Host> hosts,
+  double minHeight = 112,
+}) {
+  final type = Theme.of(context).textTheme;
+  final scaler = MediaQuery.textScalerOf(context);
+  // Text merges the ambient default under its own style, so measure the same
+  // way; that keeps the reserved height identical to what the card renders.
+  final ambient = DefaultTextStyle.of(context).style;
+  final title = ambient.merge(type.titleMedium);
+  final body = ambient.merge(type.bodyMedium);
+  final label = ambient.merge(type.labelMedium);
+  final textWidth =
+      width - _cardPadding.horizontal - _cardMarkSize - _cardMarkGap;
+  var extent = minHeight;
+  for (final host in hosts) {
+    final content =
+        max(
+          _lineSize(host.name, title, scaler).height,
+          host.favorite ? _cardStarSize : 0,
+        ) +
+        _cardTitleGap +
+        _lineSize(host.destination, body, scaler).height +
+        _tagRunsHeight(_hostBadges(host), label, scaler, textWidth);
+    final height = _cardPadding.vertical + max(_cardMarkSize, content);
+    if (height > extent) extent = height;
+  }
+  // Round up: a sub-pixel line height must never clip the last tag.
+  return extent.ceilToDouble();
+}
+
+/// Size of [text] laid out on a single line, unconstrained so a long label
+/// reports the width a chip would need before any ellipsis.
+Size _lineSize(String text, TextStyle? style, TextScaler scaler) {
+  final painter = TextPainter(
+    text: TextSpan(text: text, style: style),
+    maxLines: 1,
+    textScaler: scaler,
+    textDirection: TextDirection.ltr,
+  )..layout();
+  final size = Size(painter.width, painter.height);
+  painter.dispose();
+  return size;
+}
+
+/// Height of the tag [Wrap] for [labels], mirroring its greedy run layout with
+/// the same spacing, run spacing and chip padding.
+double _tagRunsHeight(
+  List<String> labels,
+  TextStyle? style,
+  TextScaler scaler,
+  double width,
+) {
+  if (labels.isEmpty) return 0;
+  var rows = 0, used = 0.0, rowHeight = 0.0;
+  for (final label in labels) {
+    final size = _lineSize(label, style, scaler);
+    final chip = size.width + _tagPadding.horizontal;
+    rowHeight = max(rowHeight, size.height + _tagPadding.vertical);
+    if (rows == 0) {
+      rows = 1;
+      used = chip;
+    } else if (used + _tagSpacing + chip <= width) {
+      used += _tagSpacing + chip;
+    } else {
+      rows++;
+      used = chip;
+    }
+  }
+  return _tagTopPadding + rows * rowHeight + (rows - 1) * _tagRunSpacing;
+}
+
 class _ConnectionTile extends StatefulWidget {
   const _ConnectionTile({
     required this.title,
@@ -161,6 +309,7 @@ class _ConnectionTile extends StatefulWidget {
     required this.asCard,
     this.favorite = false,
     this.showMenuButton = true,
+    this.menuController,
   });
   final String title, subtitle, actionLabel, menuLabel;
   final List<String> badges;
@@ -170,6 +319,11 @@ class _ConnectionTile extends StatefulWidget {
   final VoidCallback onTap;
   final ValueChanged<String> onAction;
   final List<PopupMenuEntry<String>> menuItems;
+
+  /// Owner of this tile's long press. While set, the tile never opens its menu
+  /// itself — the owner asks for it through the controller — so a delayed drag
+  /// recognizer outside the tile is not raced by the InkWell.
+  final HostCardMenuController? menuController;
   @override
   State<_ConnectionTile> createState() => _ConnectionTileState();
 }
@@ -178,11 +332,19 @@ class _ConnectionTileState extends State<_ConnectionTile>
     with SingleTickerProviderStateMixin {
   late final _scale = AnimationController.unbounded(vsync: this, value: 1);
   final _focus = FocusNode();
+
   bool _hovered = false, _focused = false, _pressed = false, _menuOpen = false;
   Offset? _pressPosition;
 
   @override
+  void initState() {
+    super.initState();
+    widget.menuController?._attach(this);
+  }
+
+  @override
   void dispose() {
+    widget.menuController?._detach(this);
     _scale.dispose();
     _focus.dispose();
     super.dispose();
@@ -194,6 +356,15 @@ class _ConnectionTileState extends State<_ConnectionTile>
     if (MediaQuery.disableAnimationsOf(context)) {
       _scale.stop();
       _scale.value = 1;
+    }
+  }
+
+  @override
+  void didUpdateWidget(covariant _ConnectionTile oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.menuController != widget.menuController) {
+      oldWidget.menuController?._detach(this);
+      widget.menuController?._attach(this);
     }
   }
 
@@ -242,16 +413,12 @@ class _ConnectionTileState extends State<_ConnectionTile>
     final colors = Theme.of(context).colorScheme;
     final type = Theme.of(context).textTheme;
     final radius = widget.asCard
-        ? BorderRadius.circular(_pressed ? 16 : 20)
+        ? BorderRadius.circular(
+            _pressed ? HostCardShape.pressedRadius : HostCardShape.radius,
+          )
         : HarborShapes.listItem(widget.slot);
-    final shape = RoundedRectangleBorder(
-      borderRadius: radius,
-      side: _focused
-          ? BorderSide(color: colors.primary, width: 2)
-          : BorderSide.none,
-    );
     final mark = ExpressiveMark(
-      size: 36,
+      size: _cardMarkSize,
       icon: widget.icon,
       flower: widget.favorite,
       color: widget.favorite
@@ -280,7 +447,7 @@ class _ConnectionTileState extends State<_ConnectionTile>
           const SizedBox(width: 4),
           Icon(
             Icons.star_rounded,
-            size: 18,
+            size: _cardStarSize,
             color: colors.tertiary,
             semanticLabel: '已收藏',
           ),
@@ -296,17 +463,14 @@ class _ConnectionTileState extends State<_ConnectionTile>
     final badges = widget.badges.isEmpty
         ? null
         : Padding(
-            padding: const EdgeInsets.only(top: 4),
+            padding: const EdgeInsets.only(top: _tagTopPadding),
             child: Wrap(
-              spacing: 6,
-              runSpacing: 4,
+              spacing: _tagSpacing,
+              runSpacing: _tagRunSpacing,
               children: [
                 for (final label in widget.badges)
                   Container(
-                    padding: const EdgeInsets.symmetric(
-                      horizontal: 8,
-                      vertical: 2,
-                    ),
+                    padding: _tagPadding,
                     decoration: ShapeDecoration(
                       color: colors.secondaryContainer,
                       shape: HarborShapes.pill,
@@ -324,18 +488,25 @@ class _ConnectionTileState extends State<_ConnectionTile>
             ),
           );
     final content = Padding(
-      padding: EdgeInsets.fromLTRB(14, 10, widget.showMenuButton ? 6 : 14, 10),
+      // Matches [_cardPadding]: the grid measurement reserves the room this
+      // padding asks for.
+      padding: EdgeInsets.fromLTRB(
+        _cardPadding.left,
+        _cardPadding.top,
+        widget.showMenuButton ? _cardCompactPadding : _cardPadding.right,
+        _cardPadding.bottom,
+      ),
       child: Row(
         children: [
           mark,
-          const SizedBox(width: 10),
+          const SizedBox(width: _cardMarkGap),
           Expanded(
             child: Column(
               mainAxisSize: MainAxisSize.min,
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 title,
-                const SizedBox(height: 2),
+                const SizedBox(height: _cardTitleGap),
                 subtitle,
                 ?badges,
               ],
@@ -345,11 +516,18 @@ class _ConnectionTileState extends State<_ConnectionTile>
         ],
       ),
     );
+    final shape = RoundedRectangleBorder(
+      borderRadius: radius,
+      side: _focused
+          ? BorderSide(color: colors.primary, width: 2)
+          : BorderSide.none,
+    );
+    final bindings = {
+      const SingleActivator(LogicalKeyboardKey.f10, shift: true): _openMenu,
+      const SingleActivator(LogicalKeyboardKey.contextMenu): _openMenu,
+    };
     return CallbackShortcuts(
-      bindings: {
-        const SingleActivator(LogicalKeyboardKey.f10, shift: true): _openMenu,
-        const SingleActivator(LogicalKeyboardKey.contextMenu): _openMenu,
-      },
+      bindings: bindings,
       child: Semantics(
         button: true,
         hint: '${widget.actionLabel} ${widget.title}',
@@ -368,7 +546,12 @@ class _ConnectionTileState extends State<_ConnectionTile>
               onTap: widget.onTap,
               onTapDown: (details) => _pressPosition = details.globalPosition,
               onSecondaryTapUp: (details) => _openMenu(details.globalPosition),
-              onLongPress: () => _openMenu(_pressPosition),
+              // A tile whose long press belongs to an outer reorder owner only
+              // responds to the menu request that owner sends when a press
+              // never moved.
+              onLongPress: widget.menuController == null
+                  ? () => _openMenu(_pressPosition)
+                  : null,
               onHover: (value) => setState(() => _hovered = value),
               onFocusChange: (value) => setState(() => _focused = value),
               onHighlightChanged: _highlight,

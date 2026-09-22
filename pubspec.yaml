@@ -50,6 +50,7 @@ dependencies:
   pasteboard: ^0.5.0
   desktop_drop: ^0.8.4
   flutter_markdown_plus: ^1.0.12
+  reorderable_grid: ^1.0.13
 
 dev_dependencies:
   flutter_test:

@@ -5,6 +5,66 @@ import 'package:harbor_ssh/ui/workspace_model.dart';
 import 'support.dart';
 
 void main() {
+  test('未分组按空标签归类，与同名标签隔离且可组合搜索收藏', () async {
+    final repository = memoryRepository();
+    const bare = Host(
+      id: 'bare',
+      name: '未标记主机',
+      address: 'bare.example.com',
+      username: 'root',
+      favorite: true,
+    );
+    const named = Host(
+      id: 'named',
+      name: '有同名标签的主机',
+      address: 'named.example.com',
+      username: 'root',
+      tags: ['未分组'],
+    );
+    await repository.saveHosts([bare, named, testHost]);
+    final model = WorkspaceModel(repository);
+    addTearDown(model.dispose);
+    await model.initialize();
+    model.filter(ungrouped: true);
+    expect(model.filteredHosts.map((h) => h.id), ['bare']);
+    model.search('BARE.EXAMPLE');
+    expect(model.filteredHosts.single.id, 'bare');
+    model.search('named');
+    expect(model.filteredHosts, isEmpty);
+    model.search('');
+    model.filter(ungrouped: true, favorites: true);
+    expect(model.filteredHosts.single.id, 'bare');
+    await model.toggleFavorite(bare);
+    expect(model.filteredHosts, isEmpty);
+    model.filter(tag: '未分组');
+    expect(model.filteredHosts.single.id, 'named');
+    model.filter();
+    expect(model.filteredHosts.map((h) => h.id).toSet(), {
+      'bare',
+      'named',
+      testHost.id,
+    });
+
+    model.filter(ungrouped: true);
+    await model.saveHost(
+      const Host(
+        id: 'bare',
+        name: '未标记主机',
+        address: 'bare.example.com',
+        username: 'root',
+        tags: ['开发'],
+      ),
+      null,
+    );
+    expect(model.filteredHosts, isEmpty);
+    await model.saveHost(bare, null);
+    expect(model.filteredHosts.single.id, 'bare');
+    expect(
+      (await repository.loadHosts()).firstWhere((h) => h.id == 'bare').tags,
+      isEmpty,
+    );
+  });
+
   test('编辑配置失败时恢复原有凭据', () async {
     final repository = memoryRepository();
     final model = WorkspaceModel(repository);
@@ -117,13 +177,16 @@ void main() {
     model.filter(tag: 'dev');
     expect(model.filteredHosts.single.id, multi.id);
     model.filter(tag: '夜间构建');
-    expect(
-      model.filteredHosts.map((host) => host.id).toSet(),
-      {'host-multi', 'host-ops'},
-    );
+    expect(model.filteredHosts.map((host) => host.id).toSet(), {
+      'host-multi',
+      'host-ops',
+    });
     model.filter();
     model.search('夜间构建');
-    expect(model.filteredHosts.map((host) => host.id).toSet(), {'host-multi', 'host-ops'});
+    expect(model.filteredHosts.map((host) => host.id).toSet(), {
+      'host-multi',
+      'host-ops',
+    });
     model.search('dev');
     expect(model.filteredHosts.single.id, multi.id);
     model.search('');

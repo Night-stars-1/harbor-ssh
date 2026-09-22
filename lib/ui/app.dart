@@ -8,6 +8,7 @@ import '../domain/appearance.dart';
 import 'host_editor.dart';
 import 'host_identity_dialog.dart';
 import 'expressive_widgets.dart';
+import 'reorderable_host_collection.dart';
 import 'terminal_pane.dart';
 import 'terminal_workspace.dart';
 import 'theme.dart';
@@ -115,9 +116,24 @@ class _WorkspaceState extends State<Workspace> {
   late final _search = TextEditingController(text: model.query);
   final _terminalController = TerminalPaneController();
   bool _sidebarCollapsed = false;
+  bool _hideAddresses = false;
   bool _settingsOpened = false;
+  bool _sessionsOpen = false;
   final _settingsNavigation = SettingsNavigation();
   double _sidebarWidth = 264;
+
+  // 虚拟默认分组：无标签主机的入口，不写入真实标签。
+  static const _ungroupedLabel = '未分组';
+
+  bool get _ungroupedSelected =>
+      model.ungroupedOnly &&
+      model.activeSessionId == null &&
+      !model.showingSettings &&
+      !model.showingFiles &&
+      !model.showingUsers;
+
+  /// 真实标签恰好同名时，仅在显示上加以区分。
+  String _tagLabel(String tag) => tag == _ungroupedLabel ? '$tag（标签）' : tag;
 
   @override
   void dispose() {
@@ -392,6 +408,61 @@ class _WorkspaceState extends State<Workspace> {
     if (mounted) model.closeSession(session);
   }
 
+  Future<void> _showSessions() async {
+    if (_sessionsOpen) return;
+    _sessionsOpen = true;
+    try {
+      await showModalBottomSheet<void>(
+        context: context,
+        isScrollControlled: true,
+        useSafeArea: true,
+        showDragHandle: true,
+        builder: (sheetContext) => FractionallySizedBox(
+          heightFactor: 0.7,
+          child: SafeArea(
+            top: false,
+            child: ListenableBuilder(
+              listenable: model,
+              builder: (context, _) {
+                final sessions = model.sessions;
+                return ListView(
+                  key: const ValueKey('mobile-session-list'),
+                  padding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
+                  children: [
+                    Padding(
+                      padding: const EdgeInsets.fromLTRB(8, 0, 8, 16),
+                      child: Text(
+                        '会话 (${sessions.length})',
+                        style: Theme.of(context).textTheme.titleLarge,
+                      ),
+                    ),
+                    if (sessions.isEmpty)
+                      const ListTile(
+                        leading: Icon(Icons.terminal_rounded),
+                        title: Text('暂无会话'),
+                        subtitle: Text('连接主机后，可在这里查看和切换会话。'),
+                      ),
+                    for (final session in sessions)
+                      _sessionNavItem(
+                        session,
+                        mobile: true,
+                        onSelected: () {
+                          Navigator.of(sheetContext).pop();
+                          model.selectSession(session.id);
+                        },
+                      ),
+                  ],
+                );
+              },
+            ),
+          ),
+        ),
+      );
+    } finally {
+      _sessionsOpen = false;
+    }
+  }
+
   void _navigate(VoidCallback action) {
     action();
   }
@@ -443,6 +514,7 @@ class _WorkspaceState extends State<Workspace> {
                 ? null
                 : AppBar(
                     automaticallyImplyLeading: false,
+                    titleSpacing: terminalSession == null ? null : 0,
                     leading: model.showingSettings
                         ? IconButton(
                             key: ValueKey(
@@ -463,37 +535,54 @@ class _WorkspaceState extends State<Workspace> {
                             icon: const Icon(Icons.arrow_back_rounded),
                             tooltip: '返回连接',
                           ),
-                    title: Row(
-                      children: [
-                        if (terminalSession != null) ...[
-                          Icon(
-                            Icons.circle,
-                            size: 8,
-                            color:
-                                model.activeSession!.status ==
-                                    ConnectionStatus.connected
-                                ? colors.primary
-                                : colors.onSurfaceVariant,
-                          ),
-                          const SizedBox(width: 8),
-                        ],
-                        Expanded(
-                          child: Text(
-                            terminalSession?.host.name ??
-                                (model.showingSettings
-                                    ? _settingsNavigation.title
-                                    : model.showingFiles
-                                    ? 'SFTP'
-                                    : model.showingUsers
-                                    ? '凭证'
-                                    : model.favoritesOnly
-                                    ? '收藏'
-                                    : model.selectedTag ?? '连接'),
-                            maxLines: 1,
-                            overflow: TextOverflow.ellipsis,
+                    title: Tooltip(
+                      message: terminalSession == null ? '' : '切换会话',
+                      child: InkWell(
+                        key: const ValueKey('mobile-session-switcher'),
+                        onTap: terminalSession == null ? null : _showSessions,
+                        borderRadius: BorderRadius.circular(8),
+                        child: SizedBox(
+                          height: 48,
+                          child: Row(
+                            children: [
+                              if (terminalSession != null) ...[
+                                Icon(
+                                  Icons.circle,
+                                  size: 8,
+                                  color:
+                                      model.activeSession!.status ==
+                                          ConnectionStatus.connected
+                                      ? colors.primary
+                                      : colors.onSurfaceVariant,
+                                ),
+                                const SizedBox(width: 8),
+                              ],
+                              Expanded(
+                                child: Text(
+                                  terminalSession?.host.name ??
+                                      (model.showingSettings
+                                          ? _settingsNavigation.title
+                                          : model.showingFiles
+                                          ? 'SFTP'
+                                          : model.showingUsers
+                                          ? '凭证'
+                                          : model.favoritesOnly
+                                          ? '收藏'
+                                          : model.ungroupedOnly
+                                          ? _ungroupedLabel
+                                          : model.selectedTag == null
+                                          ? '连接'
+                                          : _tagLabel(model.selectedTag!)),
+                                  maxLines: 1,
+                                  overflow: TextOverflow.ellipsis,
+                                ),
+                              ),
+                              if (terminalSession != null)
+                                const Icon(Icons.expand_more_rounded, size: 18),
+                            ],
                           ),
                         ),
-                      ],
+                      ),
                     ),
                     actions: [
                       _themeButton(),
@@ -844,6 +933,7 @@ class _WorkspaceState extends State<Workspace> {
                         !model.showingFiles &&
                         !model.showingUsers &&
                         !model.favoritesOnly &&
+                        !model.ungroupedOnly &&
                         model.selectedTag == null,
                     () => model.filter(),
                     bottomSpacing: 0,
@@ -879,6 +969,14 @@ class _WorkspaceState extends State<Workspace> {
                     model.showFiles,
                   ),
                   _sectionLabel('标签'),
+                  _navItem(
+                    Icons.sell_outlined,
+                    _ungroupedLabel,
+                    '',
+                    _ungroupedSelected,
+                    () => model.filter(ungrouped: true),
+                    key: const ValueKey('sidebar-ungrouped'),
+                  ),
                   if (model.tags.isEmpty && !_sidebarCollapsed)
                     Padding(
                       padding: const EdgeInsets.symmetric(horizontal: 16),
@@ -892,7 +990,7 @@ class _WorkspaceState extends State<Workspace> {
                   for (final tag in model.tags)
                     _navItem(
                       Icons.sell_outlined,
-                      tag,
+                      _tagLabel(tag),
                       '',
                       model.selectedTag == tag &&
                           !model.showingSettings &&
@@ -962,8 +1060,17 @@ class _WorkspaceState extends State<Workspace> {
           ),
         );
 
-  Widget _sessionNavItem(SshConnection session) {
+  Widget _sessionNavItem(
+    SshConnection session, {
+    bool mobile = false,
+    VoidCallback? onSelected,
+  }) {
     final colors = Theme.of(context).colorScheme;
+    final selected =
+        model.activeSessionId == session.id &&
+        !model.showingSettings &&
+        !model.showingFiles;
+    final select = onSelected ?? () => model.selectSession(session.id);
     return MenuAnchor(
       key: ValueKey('session-menu-${session.id}'),
       style: MenuStyle(
@@ -996,16 +1103,43 @@ class _WorkspaceState extends State<Workspace> {
           final box = context.findRenderObject()! as RenderBox;
           controller.open(position: box.globalToLocal(details.globalPosition));
         },
-        child: child,
-      ),
-      child: _navItem(
-        Icons.terminal_rounded,
-        session.host.name,
-        '',
-        model.activeSessionId == session.id &&
-            !model.showingSettings &&
-            !model.showingFiles,
-        () => model.selectSession(session.id),
+        onLongPress: mobile ? () => controller.open() : null,
+        child: mobile
+            ? ListTile(
+                key: ValueKey('mobile-session-${session.id}'),
+                selected: selected,
+                selectedTileColor: colors.secondaryContainer,
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(12),
+                ),
+                leading: Icon(
+                  Icons.terminal_rounded,
+                  color: session.status == ConnectionStatus.connected
+                      ? colors.primary
+                      : colors.onSurfaceVariant,
+                ),
+                title: Text(
+                  session.host.name,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                ),
+                subtitle: Text(session.statusLabel),
+                onTap: select,
+                trailing: IconButton(
+                  tooltip: '管理会话',
+                  onPressed: () => controller.isOpen
+                      ? controller.close()
+                      : controller.open(),
+                  icon: const Icon(Icons.more_horiz_rounded),
+                ),
+              )
+            : _navItem(
+                Icons.terminal_rounded,
+                session.host.name,
+                '',
+                selected,
+                select,
+              ),
       ),
     );
   }
@@ -1016,8 +1150,10 @@ class _WorkspaceState extends State<Workspace> {
     String count,
     bool selected,
     VoidCallback action, {
+    Key? key,
     double bottomSpacing = 4,
   }) => SidebarNavigationItem(
+    key: key,
     icon: icon,
     title: title,
     count: count,
@@ -1025,6 +1161,21 @@ class _WorkspaceState extends State<Workspace> {
     collapsed: _sidebarCollapsed,
     bottomSpacing: bottomSpacing,
     onTap: () => _navigate(action),
+  );
+
+  Widget _filterChip(
+    String label, {
+    Key? key,
+    required bool selected,
+    required VoidCallback onSelected,
+  }) => Padding(
+    padding: const EdgeInsets.only(right: 8),
+    child: FilterChip(
+      key: key,
+      label: Text(label),
+      selected: selected,
+      onSelected: (_) => onSelected(),
+    ),
   );
 
   Widget _home(bool wide) {
@@ -1059,6 +1210,20 @@ class _WorkspaceState extends State<Workspace> {
         final scaled = MediaQuery.textScalerOf(context).scale(16) > 20;
         final grid = constraints.maxWidth >= 680 && !scaled;
         final inset = constraints.maxWidth < 600 ? 20.0 : 28.0;
+        final Widget hostCollection = grid
+            ? ReorderableHostGridSliver(
+                hosts: hosts,
+                width: constraints.maxWidth - inset * 2,
+                cardBuilder: _hostCards(hosts, hosts.length, asCard: true),
+                enabled: _canReorder,
+                onReorder: _reorder,
+              )
+            : ReorderableHostSliver(
+                hosts: hosts,
+                cardBuilder: _hostCards(hosts, hosts.length),
+                enabled: _canReorder,
+                onReorder: _reorder,
+              );
         return CustomScrollView(
           slivers: [
             SliverPadding(
@@ -1114,22 +1279,38 @@ class _WorkspaceState extends State<Workspace> {
                               ),
                       ),
                     ),
-                    if (!usersMode && model.tags.isNotEmpty) ...[
+                    if (!usersMode) ...[
                       const SizedBox(height: 12),
                       SingleChildScrollView(
                         scrollDirection: Axis.horizontal,
                         child: Row(
                           children: [
-                            for (final tag in [null, ...model.tags])
-                              Padding(
-                                padding: const EdgeInsets.only(right: 8),
-                                child: FilterChip(
-                                  label: Text(tag ?? '所有标签'),
-                                  selected: model.selectedTag == tag,
-                                  onSelected: (_) => model.filter(
-                                    favorites: model.favoritesOnly,
-                                    tag: tag,
-                                  ),
+                            _filterChip(
+                              '所有标签',
+                              selected:
+                                  model.selectedTag == null &&
+                                  !model.ungroupedOnly,
+                              onSelected: () =>
+                                  model.filter(favorites: model.favoritesOnly),
+                            ),
+                            _filterChip(
+                              _ungroupedLabel,
+                              key: const ValueKey('filter-ungrouped'),
+                              selected: model.ungroupedOnly,
+                              onSelected: () => model.filter(
+                                favorites: model.favoritesOnly,
+                                ungrouped: true,
+                              ),
+                            ),
+                            for (final tag in model.tags)
+                              _filterChip(
+                                _tagLabel(tag),
+                                selected:
+                                    !model.ungroupedOnly &&
+                                    model.selectedTag == tag,
+                                onSelected: () => model.filter(
+                                  favorites: model.favoritesOnly,
+                                  tag: tag,
                                 ),
                               ),
                           ],
@@ -1137,26 +1318,56 @@ class _WorkspaceState extends State<Workspace> {
                       ),
                     ],
                     const SizedBox(height: 16),
-                    Wrap(
-                      spacing: 12,
-                      runSpacing: 8,
-                      crossAxisAlignment: WrapCrossAlignment.center,
+                    Row(
                       children: [
-                        Text(
-                          usersMode ? '凭证列表' : '主机列表',
-                          style: type.titleMedium,
-                        ),
-                        Text(
-                          '$count',
-                          style: type.labelLarge?.copyWith(
-                            color: colors.primary,
+                        Expanded(
+                          child: Wrap(
+                            spacing: 12,
+                            runSpacing: 8,
+                            crossAxisAlignment: WrapCrossAlignment.center,
+                            children: [
+                              Text(
+                                usersMode ? '凭证列表' : '主机列表',
+                                style: type.titleMedium,
+                              ),
+                              Text(
+                                '$count',
+                                style: type.labelLarge?.copyWith(
+                                  color: colors.primary,
+                                ),
+                              ),
+                              if (count > 0 && usersMode)
+                                Text(
+                                  '点按编辑 · 更多选项管理',
+                                  style: type.bodySmall?.copyWith(
+                                    color: colors.onSurfaceVariant,
+                                  ),
+                                ),
+                            ],
                           ),
                         ),
-                        if (count > 0 && usersMode)
-                          Text(
-                            '点按编辑 · 更多选项管理',
-                            style: type.bodySmall?.copyWith(
-                              color: colors.onSurfaceVariant,
+                        if (!usersMode)
+                          IconButton(
+                            key: const ValueKey('host-sessions'),
+                            tooltip: '会话',
+                            onPressed: _showSessions,
+                            icon: Badge.count(
+                              count: model.sessions.length,
+                              isLabelVisible: model.sessions.isNotEmpty,
+                              child: const Icon(Icons.terminal_outlined),
+                            ),
+                          ),
+                        if (!usersMode)
+                          IconButton(
+                            key: const ValueKey('toggle-host-addresses'),
+                            tooltip: _hideAddresses ? '显示 IP 地址' : '隐藏 IP 地址',
+                            onPressed: () => setState(
+                              () => _hideAddresses = !_hideAddresses,
+                            ),
+                            icon: Icon(
+                              _hideAddresses
+                                  ? Icons.visibility_outlined
+                                  : Icons.visibility_off_outlined,
                             ),
                           ),
                       ],
@@ -1175,31 +1386,28 @@ class _WorkspaceState extends State<Workspace> {
             if (count > 0 && !grid)
               SliverPadding(
                 padding: EdgeInsets.symmetric(horizontal: inset),
-                sliver: SliverList.separated(
-                  itemCount: count,
-                  separatorBuilder: (_, _) =>
-                      const SizedBox(height: HarborShapes.listGap),
-                  itemBuilder: (_, index) => usersMode
-                      ? _userCard(
+                sliver: usersMode
+                    ? SliverList.separated(
+                        itemCount: count,
+                        separatorBuilder: (_, _) =>
+                            const SizedBox(height: HarborShapes.listGap),
+                        itemBuilder: (_, index) => _userCard(
                           users[index],
                           slot: HarborShapes.listSlot(index, count),
-                        )
-                      : _hostCard(
-                          hosts[index],
-                          slot: HarborShapes.listSlot(index, count),
                         ),
-                ),
+                      )
+                    : hostCollection,
               ),
             if (count > 0 && grid)
               SliverPadding(
                 padding: EdgeInsets.symmetric(horizontal: inset),
-                sliver: _cardGrid(
-                  hosts: hosts,
-                  users: users,
-                  usersMode: usersMode,
-                  count: count,
-                  available: constraints.maxWidth - inset * 2,
-                ),
+                sliver: usersMode
+                    ? _userCardGrid(
+                        users: users,
+                        count: count,
+                        available: constraints.maxWidth - inset * 2,
+                      )
+                    : hostCollection,
               ),
             SliverToBoxAdapter(child: SizedBox(height: wide ? 28 : 128)),
           ],
@@ -1211,12 +1419,10 @@ class _WorkspaceState extends State<Workspace> {
   static const _cardGap = 8.0;
   static const _cardMinHeight = 112.0;
 
-  /// Cards keep the previous column width, but every row grows with the tags a
-  /// card shows instead of clipping them into a fixed card height.
-  Widget _cardGrid({
-    required List<Host> hosts,
+  /// Credential cards keep the plain row grid: only hosts are reorderable, and
+  /// a credential carries a single badge line.
+  Widget _userCardGrid({
     required List<SshUser> users,
-    required bool usersMode,
     required int count,
     required double available,
   }) {
@@ -1234,32 +1440,15 @@ class _WorkspaceState extends State<Workspace> {
             Expanded(
               child: ConstrainedBox(
                 constraints: const BoxConstraints(minHeight: _cardMinHeight),
-                child: _cardSlot(
-                  hosts: hosts,
-                  users: users,
-                  usersMode: usersMode,
-                  count: count,
-                  index: row * columns + column,
-                ),
+                child: row * columns + column < count
+                    ? _userCard(users[row * columns + column], asCard: true)
+                    : const SizedBox.shrink(),
               ),
             ),
           ],
         ],
       ),
     );
-  }
-
-  Widget _cardSlot({
-    required List<Host> hosts,
-    required List<SshUser> users,
-    required bool usersMode,
-    required int count,
-    required int index,
-  }) {
-    if (index >= count) return const SizedBox.shrink();
-    return usersMode
-        ? _userCard(users[index], asCard: true)
-        : _hostCard(hosts[index], asCard: true);
   }
 
   Widget _workspaceHeader(bool wide, bool compact) {
@@ -1270,7 +1459,11 @@ class _WorkspaceState extends State<Workspace> {
         ? '你的连接凭证'
         : model.favoritesOnly
         ? '收藏连接'
-        : model.selectedTag ?? '连接工作空间';
+        : model.ungroupedOnly
+        ? _ungroupedLabel
+        : model.selectedTag == null
+        ? '连接工作空间'
+        : _tagLabel(model.selectedTag!);
     final active = model.sessions
         .where((s) => s.status == ConnectionStatus.connected)
         .length;
@@ -1444,6 +1637,9 @@ class _WorkspaceState extends State<Workspace> {
     final type = Theme.of(context).textTheme;
     final favorites = !users && model.favoritesOnly;
     final noFavorites = favorites && !model.hosts.any((host) => host.favorite);
+    final ungrouped = !users && model.ungroupedOnly;
+    final noUngrouped =
+        ungrouped && !model.hosts.any((host) => host.tags.isEmpty);
     return Material(
       color: colors.surfaceContainerLow,
       shape: HarborShapes.superellipse(HarborShapes.tile),
@@ -1454,7 +1650,9 @@ class _WorkspaceState extends State<Workspace> {
             ExpressiveMark(
               size: 64,
               flower: true,
-              icon: noFavorites
+              icon: noUngrouped
+                  ? Icons.folder_outlined
+                  : noFavorites
                   ? Icons.star_outline_rounded
                   : sourceEmpty
                   ? (users ? Icons.key_rounded : Icons.add_to_queue_rounded)
@@ -1464,7 +1662,9 @@ class _WorkspaceState extends State<Workspace> {
             ),
             const SizedBox(height: 20),
             Text(
-              noFavorites
+              noUngrouped
+                  ? '暂无未分组主机'
+                  : noFavorites
                   ? '暂无收藏连接'
                   : sourceEmpty
                   ? (users ? '先保存一份凭证' : '从第一台服务器开始')
@@ -1478,7 +1678,11 @@ class _WorkspaceState extends State<Workspace> {
             ),
             const SizedBox(height: 8),
             Text(
-              noFavorites
+              noUngrouped
+                  ? (model.hosts.isEmpty
+                        ? '新建连接且不设置标签，主机会自动归入这里'
+                        : '未设置标签的主机会自动归入这里；当前主机都已设置标签')
+                  : noFavorites
                   ? '右键或长按连接卡片，选择“收藏”'
                   : sourceEmpty
                   ? (users ? '新建凭证，生成密钥对或导入 SSH 私钥' : '新建连接，填写主机地址，即可开启终端')
@@ -1486,13 +1690,17 @@ class _WorkspaceState extends State<Workspace> {
               textAlign: TextAlign.center,
               style: type.bodyMedium?.copyWith(color: colors.onSurfaceVariant),
             ),
-            if (!sourceEmpty && !noFavorites) ...[
+            if (!sourceEmpty && !noFavorites && !noUngrouped) ...[
               const SizedBox(height: 16),
               TextButton(
                 onPressed: () {
                   _search.clear();
                   model.search('');
-                  model.filter(users: users, favorites: favorites);
+                  model.filter(
+                    users: users,
+                    favorites: favorites,
+                    ungrouped: ungrouped,
+                  );
                 },
                 child: const Text('清除筛选'),
               ),
@@ -1503,20 +1711,34 @@ class _WorkspaceState extends State<Workspace> {
     );
   }
 
-  Widget _hostCard(
-    Host host, {
-    HarborListSlot slot = HarborListSlot.single,
+  /// Cards for a reorder宿主. The宿主 owns the key, the drag and the menu
+  /// hand-off; the card itself only draws and reports taps.
+  HostCardBuilder _hostCards(
+    List<Host> hosts,
+    int count, {
     bool asCard = false,
-  }) => ExpressiveHostCard(
-    host: host,
-    slot: slot,
-    asCard: asCard,
-    onConnect: () => _connect(host),
-    onFavorite: model.saving
-        ? null
-        : () => _guard(() => model.toggleFavorite(host)),
-    onAction: (action) => _hostAction(host, action),
-  );
+  }) =>
+      (context, index, menu) => ExpressiveHostCard(
+        host: hosts[index],
+        slot: asCard
+            ? HarborListSlot.single
+            : HarborShapes.listSlot(index, count),
+        asCard: asCard,
+        hideAddress: _hideAddresses,
+        menuController: menu,
+        onConnect: () => _connect(hosts[index]),
+        onFavorite: model.saving
+            ? null
+            : () => _guard(() => model.toggleFavorite(hosts[index])),
+        onAction: (action) => _hostAction(hosts[index], action),
+      );
+
+  /// Reordering is off while the model loads or writes an order.
+  bool get _canReorder => !model.saving && !model.loading;
+
+  /// One write per drop, and none for a long press that never moved.
+  void _reorder(Host source, Host target) =>
+      _guard(() => model.reorderHost(source.id, target.id));
 
   Widget _userCard(
     SshUser user, {

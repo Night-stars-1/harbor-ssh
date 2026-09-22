@@ -80,6 +80,68 @@ class WorkspaceModel extends ChangeNotifier {
   Timer? _syncDelay, _syncPoll;
   List<Host> _hosts = [];
   List<Host> get hosts => List.unmodifiable(_hosts);
+  static const _hostOrderKey = 'harbor.host-order.v1';
+  Map<String, int> _hostRank = const {};
+
+  Future<void> _loadHostOrder() async {
+    try {
+      final saved = await repository.preferences.read(_hostOrderKey);
+      if (saved == null || _disposed) return;
+      final decoded = jsonDecode(saved);
+      if (decoded is! List) return;
+      final rank = <String, int>{};
+      for (final item in decoded) {
+        if (item is! String || rank.containsKey(item)) continue;
+        rank[item] = rank.length;
+      }
+      _hostRank = rank;
+    } catch (_) {
+      // A corrupt local order must not prevent loading connections.
+    }
+  }
+
+  /// 本地顺序优先，未登记的主机（含首次排序前的全部主机）回退收藏/名称。
+  int _compareHosts(Host a, Host b) {
+    final rankA = _hostRank[a.id];
+    final rankB = _hostRank[b.id];
+    if (rankA != null || rankB != null) {
+      if (rankA == null) return 1;
+      if (rankB == null) return -1;
+      if (rankA != rankB) return rankA.compareTo(rankB);
+    }
+    if (a.favorite != b.favorite) return a.favorite ? -1 : 1;
+    return a.name.toLowerCase().compareTo(b.name.toLowerCase());
+  }
+
+  /// 把 [sourceId] 移动到当前可见列表中 [targetId] 所在的位置，隐藏主机
+  /// 占据的全局槽位保持不动；保存成功后才应用新的本地顺序。
+  Future<void> reorderHost(String sourceId, String targetId) async {
+    if (saving) return;
+    final visible = filteredHosts;
+    final source = visible.indexWhere((h) => h.id == sourceId);
+    final target = visible.indexWhere((h) => h.id == targetId);
+    if (source < 0 || target < 0 || source == target) return;
+    final reordered = visible.map((h) => h.id).toList()..removeAt(source);
+    reordered.insert(target, sourceId);
+    final visibleIds = visible.map((h) => h.id).toSet();
+    var cursor = 0;
+    final global = [..._hosts]..sort(_compareHosts);
+    final next = <String>[
+      for (final host in global)
+        if (visibleIds.contains(host.id)) reordered[cursor++] else host.id,
+    ];
+    saving = true;
+    _notify();
+    try {
+      await repository.preferences.write(_hostOrderKey, jsonEncode(next));
+      if (_disposed) return;
+      _hostRank = {for (var i = 0; i < next.length; i++) next[i]: i};
+    } finally {
+      saving = false;
+      _notify();
+    }
+  }
+
   List<SshUser> _users = [];
   List<SshUser> get users => List.unmodifiable(_users);
   final List<SshConnection> _sessions = [];
@@ -87,6 +149,7 @@ class WorkspaceModel extends ChangeNotifier {
   String? activeSessionId;
   String query = '';
   String? selectedTag;
+  bool ungroupedOnly = false;
   bool favoritesOnly = false;
   bool showingUsers = false;
   bool showingFiles = false;
@@ -125,15 +188,13 @@ class WorkspaceModel extends ChangeNotifier {
             (h) =>
                 (!favoritesOnly || h.favorite) &&
                 (selectedTag == null || h.tags.contains(selectedTag)) &&
+                (!ungroupedOnly || h.tags.isEmpty) &&
                 '${h.name} ${h.address} ${h.username} ${h.tags.join(' ')}'
                     .toLowerCase()
                     .contains(query.toLowerCase()),
           )
           .toList()
-        ..sort((a, b) {
-          if (a.favorite != b.favorite) return a.favorite ? -1 : 1;
-          return a.name.toLowerCase().compareTo(b.name.toLowerCase());
-        });
+        ..sort(_compareHosts);
   List<SshUser> get filteredUsers =>
       _users
           .where(
@@ -149,6 +210,7 @@ class WorkspaceModel extends ChangeNotifier {
     _notify();
     await _loadAppearance();
     await _loadAiSettings();
+    await _loadHostOrder();
     try {
       await SyncStorage(repository).recover();
       _hosts = await repository.loadHosts();
@@ -339,12 +401,14 @@ class WorkspaceModel extends ChangeNotifier {
   void filter({
     bool favorites = false,
     String? tag,
+    bool ungrouped = false,
     bool users = false,
   }) {
     showingSettings = false;
     showingFiles = false;
     favoritesOnly = favorites;
-    selectedTag = tag;
+    ungroupedOnly = ungrouped;
+    selectedTag = ungrouped ? null : tag;
     showingUsers = users;
     activeSessionId = null;
     _notify();
