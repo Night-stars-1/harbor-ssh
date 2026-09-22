@@ -28,6 +28,11 @@ Future<void> initializeWindowsWindow({bool settings = false}) async {
       minimumSize: settings ? const Size(360, 560) : const Size(320, 480),
     ),
   );
+  if (usesMacosTitleBar) {
+    // MainFlutterWindow hides the native window until configuration is ready.
+    await windowManager.show();
+    await windowManager.focus();
+  }
 }
 
 /// Lives outside the navigator so dialogs keep the window controls accessible.

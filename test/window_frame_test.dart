@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -7,6 +9,55 @@ import 'package:harbor_ssh/ui/window_frame.dart';
 import 'package:window_manager/window_manager.dart';
 
 void main() {
+  testWidgets('macOS 启动配置完成后显示被原生层隐藏的窗口', (tester) async {
+    debugDefaultTargetPlatformOverride = TargetPlatform.macOS;
+    addTearDown(() => debugDefaultTargetPlatformOverride = null);
+    const channel = MethodChannel('window_manager');
+    final ready = Completer<void>();
+    var visible = false;
+    var focused = false;
+    tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(channel, (
+      call,
+    ) async {
+      switch (call.method) {
+        case 'waitUntilReadyToShow':
+          await ready.future;
+          return null;
+        case 'show':
+          visible = true;
+          return null;
+        case 'focus':
+          focused = visible;
+          return null;
+        case 'isVisible':
+          return visible;
+        case 'isFocused':
+          return focused;
+        case 'isFullScreen':
+        case 'isMaximized':
+        case 'isMinimized':
+          return false;
+        default:
+          return null;
+      }
+    });
+    addTearDown(
+      () => tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+        channel,
+        null,
+      ),
+    );
+
+    final initialization = initializeWindowsWindow();
+    await tester.pump();
+    expect(await windowManager.isVisible(), isFalse);
+    ready.complete();
+    await initialization;
+    expect(await windowManager.isVisible(), isTrue);
+    expect(await windowManager.isFocused(), isTrue);
+    debugDefaultTargetPlatformOverride = null;
+  });
+
   testWidgets('Windows 标题栏调用窗口操作、同步状态并保留页面', (tester) async {
     final semantics = tester.ensureSemantics();
     debugDefaultTargetPlatformOverride = TargetPlatform.windows;
