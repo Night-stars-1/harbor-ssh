@@ -1346,7 +1346,7 @@ class _WorkspaceState extends State<Workspace> {
                             ],
                           ),
                         ),
-                        if (!usersMode)
+                        if (!wide && !usersMode)
                           IconButton(
                             key: const ValueKey('host-sessions'),
                             tooltip: '会话',

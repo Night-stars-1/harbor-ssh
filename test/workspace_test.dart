@@ -291,12 +291,15 @@ void main() {
     await tester.pumpAndSettle();
     expect(model.showingUsers, isFalse);
     expect(model.favoritesOnly, isFalse);
+    expect(find.byKey(const ValueKey('host-sessions')), findsNothing);
     tester.view.physicalSize = const Size(390, 844);
     await tester.pumpAndSettle();
     expect(sidebar, findsNothing);
     expect(find.byType(NavigationBar), findsOneWidget);
+    expect(find.byKey(const ValueKey('host-sessions')), findsOneWidget);
     tester.view.physicalSize = const Size(1280, 800);
     await tester.pumpAndSettle();
+    expect(find.byKey(const ValueKey('host-sessions')), findsNothing);
     expect(tester.getSize(sidebar).width, 80);
     await tester.tap(toggle);
     await tester.pumpAndSettle();
