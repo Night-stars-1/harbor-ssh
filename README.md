@@ -136,9 +136,9 @@ flutter build apk --release --split-per-abi
 
 - Windows：`build/windows/x64/runner/Release/harbor_ssh.exe`。分发时请保留整个 Release 目录的 DLL 和 data 文件夹。
 - macOS：`build/macos/Build/Products/Release/Harbor SSH.app`。对外分发需要自行签名与公证。
-- Android：`build/app/outputs/flutter-apk/` 下按架构生成 `app-arm64-v8a-release.apk`（多数现代手机）、`app-armeabi-v7a-release.apk`（32 位 ARM）、`app-x86_64-release.apk`（x86_64 设备或模拟器）。只需安装与设备匹配的一个 APK。未配置正式签名时使用开发签名，仅适合本地试用。
+- Android：`build/app/outputs/flutter-apk/` 下按架构生成 `app-arm64-v8a-release.apk`（多数现代手机）、`app-armeabi-v7a-release.apk`（32 位 ARM）、`app-x86_64-release.apk`（x86_64 设备或模拟器）。只需安装与设备匹配的一个 APK。GitHub Release 从 v1.0.6 起使用固定的正式签名密钥；v1.0.5 及更早的 CI 安装包使用临时 debug 签名，无法直接覆盖升级到正式签名版。卸载旧版再安装会删除本地数据，操作前请导出需要保留的配置。
 
-Android 正式签名可复制 `android/key.properties.example` 为 `android/key.properties` 并填写自己的密钥信息。此文件与 keystore 不应提交到版本库。
+本地正式签名可复制 `android/key.properties.example` 为 `android/key.properties`，填写同一发布密钥的路径和密码；不要新建另一份密钥，也不要把 keystore 或密码提交到版本库。CI 从 GitHub Secrets `ANDROID_RELEASE_KEYSTORE_BASE64` 和 `ANDROID_RELEASE_STORE_PASSWORD` 恢复密钥，缺失时停止构建；构建后核对 APK 证书 SHA-256 指纹，避免发布错误签名。请将原始 keystore 和密码分别离线备份：丢失后无法为已有安装包发布可升级的版本。
 
 macOS 已配置出站网络权限；凭据采用不共享的传统 Keychain，避免将应用绑定到开发机器的 Keychain Sharing provisioning profile。Android 关闭应用备份，避免凭据与设备加密密钥分离。
 

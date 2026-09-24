@@ -56,6 +56,21 @@ jobs:
           channel: stable
           cache: true
       - run: flutter pub get
+      - name: Prepare Android release signing
+        if: matrix.target == 'apk'
+        shell: bash
+        env:
+          ANDROID_RELEASE_KEYSTORE_BASE64: ${{ secrets.ANDROID_RELEASE_KEYSTORE_BASE64 }}
+          ANDROID_RELEASE_STORE_PASSWORD: ${{ secrets.ANDROID_RELEASE_STORE_PASSWORD }}
+        run: |
+          set -euo pipefail
+          if [[ -z "$ANDROID_RELEASE_KEYSTORE_BASE64" || -z "$ANDROID_RELEASE_STORE_PASSWORD" ]]; then
+            echo 'Android release signing secrets are missing' >&2
+            exit 1
+          fi
+          printf '%s' "$ANDROID_RELEASE_KEYSTORE_BASE64" | base64 --decode > android/app/harbor-release.jks
+          printf 'storePassword=%s\nkeyPassword=%s\nkeyAlias=harbor\nstoreFile=harbor-release.jks\n' \
+            "$ANDROID_RELEASE_STORE_PASSWORD" "$ANDROID_RELEASE_STORE_PASSWORD" > android/key.properties
       - name: Build with GitHub OAuth client ID
         shell: bash
         env:
@@ -70,6 +85,30 @@ jobs:
             build_args+=(--split-per-abi)
           fi
           flutter build ${{ matrix.target }} --release "${build_args[@]}" "${oauth_args[@]}"
+      - name: Verify Android release certificate
+        if: matrix.target == 'apk'
+        shell: bash
+        run: |
+          set -euo pipefail
+          sdk_root="${ANDROID_HOME:-$ANDROID_SDK_ROOT}"
+          apksigner="$(printf '%s\n' "$sdk_root"/build-tools/*/apksigner | sort -V | tail -n 1)"
+          if [[ ! -x "$apksigner" ]]; then
+            echo 'Android apksigner is unavailable' >&2
+            exit 1
+          fi
+          apks=(build/app/outputs/flutter-apk/app-*-release.apk)
+          if [[ ${#apks[@]} -ne 3 ]]; then
+            echo 'Expected three ABI-specific release APKs' >&2
+            exit 1
+          fi
+          for apk in "${apks[@]}"; do
+            fingerprint="$("$apksigner" verify --print-certs "$apk" | tr -d '\r' | sed -nE 's/^.*certificate SHA-256 digest: ([0-9a-f]+)$/\1/p' | sort -u)"
+            if [[ "$fingerprint" != 'e85b20b3c6cb3d0e2e0fcb63ffd4e3681c85d69bf4203c0908b48371fb4278d7' ]]; then
+              echo "Unexpected release certificate for $apk" >&2
+              exit 1
+            fi
+            echo "Verified release certificate: $apk"
+          done
       - uses: actions/upload-artifact@v4
         with:
           name: harbor-ssh-${{ matrix.target }}
