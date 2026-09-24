@@ -325,7 +325,6 @@ class _AiSettingsPageState extends State<AiSettingsPage> {
     setState(() => _providerNames[_provider] = name);
   }
 
-
   bool _isCustomProvider(String id) =>
       id.startsWith('custom-') &&
       !aiProviderPresets.any((preset) => preset.id == id);
@@ -408,7 +407,6 @@ class _AiSettingsPageState extends State<AiSettingsPage> {
         ),
   ];
 
-
   Future<void> _save() async {
     setState(() => _saving = true);
     try {
@@ -440,9 +438,7 @@ class _AiSettingsPageState extends State<AiSettingsPage> {
     }
   }
 
-  List<String> _modelsFor(String providerId) =>
-      _models[providerId] ?? const [];
-
+  List<String> _modelsFor(String providerId) => _models[providerId] ?? const [];
 
   Widget _providerOverflow() {
     final colors = Theme.of(context).colorScheme;
@@ -530,9 +526,6 @@ class _AiSettingsPageState extends State<AiSettingsPage> {
     );
   }
 
-
-
-
   Widget _field(
     String name,
     TextEditingController controller,
@@ -608,9 +601,7 @@ class _AiSettingsPageState extends State<AiSettingsPage> {
                 return [
                   for (final entry in entries)
                     if ((clearable && entry.value == '__unset__') ||
-                        entry.label.toLowerCase().contains(
-                          query.toLowerCase(),
-                        ))
+                        entry.label.toLowerCase().contains(query.toLowerCase()))
                       entry,
                 ];
               },
@@ -638,8 +629,7 @@ class _AiSettingsPageState extends State<AiSettingsPage> {
                           icon: const Icon(Icons.expand_more_rounded),
                           selectedIcon: const Icon(Icons.expand_less_rounded),
                           onPressed: !_saving
-                              ? () =>
-                                    menu.isOpen ? menu.close() : menu.open()
+                              ? () => menu.isOpen ? menu.close() : menu.open()
                               : null,
                         ),
                         IconButton(
@@ -667,7 +657,6 @@ class _AiSettingsPageState extends State<AiSettingsPage> {
                   ),
                 );
               },
-
 
         alignmentOffset: const Offset(0, 4),
         menuHeight: 320,
@@ -713,7 +702,6 @@ class _AiSettingsPageState extends State<AiSettingsPage> {
       ),
     );
   }
-
 
   @override
   Widget build(BuildContext context) {
@@ -782,6 +770,7 @@ class _AiSettingsPageState extends State<AiSettingsPage> {
             ),
             SettingsRow(
               title: 'API 地址',
+              description: '支持可信内网 HTTP；HTTP 会明文传输 Key 和对话内容',
               control: _field('url', _url, 'https://api.example.com/v1'),
             ),
             SettingsRow(
@@ -840,5 +829,4 @@ class _AiSettingsPageState extends State<AiSettingsPage> {
       ],
     );
   }
-
 }

@@ -116,8 +116,8 @@ class AiTaskController extends ChangeNotifier {
     if (_disposed) return;
     approvalMode = mode;
     if (mode == AiApprovalMode.auto && pending != null) approve(true);
-    if (mode == AiApprovalMode.readOnly && pending != null) {
-      stop(message: '已切换为只读模式，待确认命令未执行');
+    if (mode == AiApprovalMode.readOnly && running) {
+      stop(message: '已切换为只读模式，当前任务已停止');
       return;
     }
     _notify();
@@ -299,11 +299,17 @@ class AiTaskController extends ChangeNotifier {
           )..reason = call.reason;
           entries.add(entry);
           _unresolved[call.id] = entry;
-          if (command == null ||
-              (approvalMode == AiApprovalMode.readOnly &&
-                  call.name == 'run_command')) {
-            entry.interruption = approvalMode == AiApprovalMode.readOnly
-                ? '只读模型未提供 run_command 工具'
+          final blockedByReadOnly =
+              approvalMode == AiApprovalMode.readOnly &&
+              !const [
+                'list_directory',
+                'read_file',
+                'search_text',
+                'system_info',
+              ].contains(call.name);
+          if (command == null || blockedByReadOnly) {
+            entry.interruption = blockedByReadOnly
+                ? '只读模式不允许此工具'
                 : '工具参数无效，未执行';
             entry.finished = true;
             messages.add({
@@ -340,7 +346,9 @@ class AiTaskController extends ChangeNotifier {
           });
           if (!_current(revision)) return;
           entry.output = result.output;
-          if (result.truncated) entry.output += '\n…输出超过 16000 字符，已截断';
+          if (result.truncated && !entry.output.endsWith('已截断')) {
+            entry.output += '\n…输出已截断';
+          }
           entry.exitCode = result.exitCode;
           entry.finished = true;
           messages.add({

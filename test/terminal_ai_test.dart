@@ -385,7 +385,6 @@ void main() {
     expect(AiSettings.fromJson(settings.toJson()).toJson(), settings.toJson());
   });
 
-
   test('Anthropic 完整工具循环：专用鉴权、系统提示、多个结果及原始内容回传', () async {
     final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
     addTearDown(() => server.close(force: true));
@@ -422,6 +421,9 @@ void main() {
         body['tools'][0]['input_schema']['required'],
         contains('requires_approval'),
       );
+      expect((body['tools'] as List).map((tool) => tool['name']), [
+        'run_command',
+      ]);
       expect(
         (body['messages'] as List).any(
           (m) => m['role'] == 'tool' || m['role'] == 'system',
@@ -546,7 +548,7 @@ void main() {
     );
     client.cancel();
   });
-  test('API 地址规范化，允许本机 HTTP，拒绝带凭据和远程明文地址', () {
+  test('API 地址规范化，允许本机和可信内网 HTTP，拒绝带凭据或查询参数', () {
     expect(_settings.endpoint.path, '/v1/chat/completions');
     expect(
       const AiSettings(
@@ -562,10 +564,24 @@ void main() {
       ).endpoint.path,
       '/v1/chat/completions',
     );
+    expect(
+      const AiSettings(
+        baseUrl: 'http://192.168.1.20:11434/v1',
+        model: 'm',
+      ).endpoint.toString(),
+      'http://192.168.1.20:11434/v1/chat/completions',
+    );
+    expect(
+      const AiSettings(
+        baseUrl: 'http://ai.internal.example/v1',
+        model: 'm',
+      ).endpoint.scheme,
+      'http',
+    );
     for (final url in [
-      'http://ai.example.com/v1',
       'https://key@ai.example.com/v1',
       'https://ai.example.com/v1?key=x',
+      'https://ai.example.com/v1#fragment',
     ]) {
       expect(
         () => AiSettings(baseUrl: url, model: 'm').endpoint,
