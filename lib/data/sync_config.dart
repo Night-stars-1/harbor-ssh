@@ -18,12 +18,20 @@ class CloudSyncConfig {
     this.gistId = '',
     this.token = '',
     this.githubLogin = '',
+    this.refreshToken = '',
+    this.expiresAt,
+    this.refreshExpiresAt,
     required this.encryptionPassword,
     this.automatic = false,
   });
   final String url, username, password, encryptionPassword;
   final SyncProvider provider;
   final String gistId, token, githubLogin;
+
+  /// Rotating credential pair for expiring GitHub logins; both are empty for
+  /// non-expiring tokens, which stay valid until the API rejects them.
+  final String refreshToken;
+  final DateTime? expiresAt, refreshExpiresAt;
   final bool automatic;
 
   String get providerName =>
@@ -60,14 +68,41 @@ class CloudSyncConfig {
     automatic: automatic,
     token: token,
     githubLogin: githubLogin,
+    refreshToken: refreshToken,
+    expiresAt: expiresAt,
+    refreshExpiresAt: refreshExpiresAt,
     gistId: id,
   );
 
-  CloudSyncConfig withGitHubAccount(String token, String login) {
+  /// Applies a GitHub login, keeping the Gist binding for the same account.
+  ///
+  /// A login is either non-expiring, or expiring with the whole rotating pair.
+  /// A half pair is rejected because it would be stored as a credential that
+  /// dies unrenewed, which is the failure this metadata exists to prevent.
+  /// Signing out or storing a non-expiring token clears renewal metadata.
+  CloudSyncConfig withGitHubAccount(
+    String token,
+    String login, {
+    String refreshToken = '',
+    DateTime? expiresAt,
+    DateTime? refreshExpiresAt,
+  }) {
     final sameAccount =
         token.isNotEmpty &&
         login.isNotEmpty &&
         login.toLowerCase() == githubLogin.toLowerCase();
+    final claimsExpiry =
+        expiresAt != null ||
+        refreshToken.isNotEmpty ||
+        refreshExpiresAt != null;
+    if (token.isNotEmpty &&
+        claimsExpiry &&
+        (expiresAt == null ||
+            refreshToken.isEmpty ||
+            refreshExpiresAt == null)) {
+      throw const SyncFailure('GitHub 登录凭据不完整，请重新登录');
+    }
+    final renewable = token.isNotEmpty && expiresAt != null;
     return CloudSyncConfig(
       provider: provider,
       url: url,
@@ -79,6 +114,9 @@ class CloudSyncConfig {
           : automatic,
       token: token,
       githubLogin: login,
+      refreshToken: renewable ? refreshToken : '',
+      expiresAt: renewable ? expiresAt : null,
+      refreshExpiresAt: renewable ? refreshExpiresAt : null,
       gistId: sameAccount ? gistId : '',
     );
   }
@@ -127,6 +165,10 @@ class CloudSyncConfig {
     'gistId': gistId,
     'token': token,
     'githubLogin': githubLogin,
+    if (refreshToken.isNotEmpty) 'refreshToken': refreshToken,
+    if (expiresAt != null) 'expiresAt': expiresAt!.toUtc().toIso8601String(),
+    if (refreshExpiresAt != null)
+      'refreshExpiresAt': refreshExpiresAt!.toUtc().toIso8601String(),
     'url': url,
     'username': username,
     'password': password,
@@ -141,6 +183,11 @@ class CloudSyncConfig {
         gistId: json['gistId'] as String? ?? '',
         token: json['token'] as String? ?? '',
         githubLogin: json['githubLogin'] as String? ?? '',
+        // Settings written before expiring tokens existed simply lack these
+        // keys; unusable values degrade to a non-expiring login.
+        refreshToken: json['refreshToken'] as String? ?? '',
+        expiresAt: _decodeDate(json['expiresAt']),
+        refreshExpiresAt: _decodeDate(json['refreshExpiresAt']),
         url: json['url'] as String? ?? '',
         username: json['username'] as String? ?? '',
         password: json['password'] as String? ?? '',
@@ -148,3 +195,6 @@ class CloudSyncConfig {
         automatic: json['automatic'] as bool? ?? false,
       );
 }
+
+DateTime? _decodeDate(Object? value) =>
+    value is String ? DateTime.tryParse(value) : null;

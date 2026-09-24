@@ -11,8 +11,36 @@ const githubOAuthClientId = String.fromEnvironment(
 );
 
 class GitHubAccount {
-  const GitHubAccount({required this.token, required this.login});
+  const GitHubAccount({
+    required this.token,
+    required this.login,
+    this.refreshToken = '',
+    this.expiresAt,
+    this.refreshExpiresAt,
+  });
   final String token, login;
+
+  /// Rotating refresh credential; empty for non-expiring access tokens.
+  final String refreshToken;
+
+  /// Set when [token] expires and must be renewed with [refreshToken].
+  final DateTime? expiresAt, refreshExpiresAt;
+}
+
+/// Rotated credential pair produced by [GitHubDeviceAuth.refresh].
+///
+/// It carries no login on purpose: GitHub invalidates the submitted refresh
+/// token as soon as it answers, so the new pair has to be persisted before any
+/// API request. Callers confirm the account from the API afterwards.
+class GitHubRenewal {
+  const GitHubRenewal({
+    required this.token,
+    required this.refreshToken,
+    required this.expiresAt,
+    required this.refreshExpiresAt,
+  });
+  final String token, refreshToken;
+  final DateTime expiresAt, refreshExpiresAt;
 }
 
 class GitHubDeviceCode {
@@ -31,6 +59,9 @@ class GitHubDeviceCode {
 class GitHubAuthCancelled implements Exception {
   const GitHubAuthCancelled();
 }
+
+/// Longest accepted OAuth lifetime; refresh expires in under six months.
+const _maxTokenLifetime = 366 * Duration.secondsPerDay;
 
 /// OAuth device flow for a public client: no client secret or embedded webview.
 class GitHubDeviceAuth {
@@ -147,25 +178,152 @@ class GitHubDeviceAuth {
         continue;
       }
       _checkError(data);
-      final token = data['access_token'];
-      final scopes = (data['scope'] as String? ?? '').split(RegExp(r'[\s,]+'));
-      if (token is! String ||
-          token.isEmpty ||
-          RegExp(r'\s').hasMatch(token) ||
-          data['token_type']?.toString().toLowerCase() != 'bearer') {
-        throw const SyncFailure('GitHub 未返回有效的登录凭据，请重试');
-      }
-      if (!scopes.contains('gist')) {
-        throw const SyncFailure('未获得 Gist 权限，请重新登录并允许授权');
-      }
-      final profile = await _request(_apiBase.resolve('user'), token: token);
-      _checkCancelled();
-      final login = profile['login'];
-      if (login is! String || login.isEmpty) {
-        throw const SyncFailure('无法读取 GitHub 账号，请重新登录');
-      }
-      return GitHubAccount(token: token, login: login);
+      return _accountFrom(data);
     }
+  }
+
+  /// Exchanges a rotating refresh token for a fresh credential pair.
+  ///
+  /// Public clients refresh without a client secret, and GitHub invalidates the
+  /// submitted refresh token as soon as it answers. The pair is therefore
+  /// parsed straight from the token response and no profile request is made, so
+  /// a failing API cannot lose credentials GitHub has already rotated. Callers
+  /// persist the pair first and confirm the account from the API afterwards.
+  Future<GitHubRenewal> refresh(String refreshToken) async {
+    _checkCancelled();
+    if (clientId.trim().isEmpty) {
+      throw const SyncFailure(
+        '当前版本尚未配置 GitHub 网页登录，请配置 OAuth App Client ID 后重新构建',
+      );
+    }
+    if (refreshToken.isEmpty || RegExp(r'\s').hasMatch(refreshToken)) {
+      throw const SyncFailure('GitHub 登录已过期，请重新登录');
+    }
+    final data = await _request(
+      _loginBase.resolve('login/oauth/access_token'),
+      form: {
+        'client_id': clientId,
+        'grant_type': 'refresh_token',
+        'refresh_token': refreshToken,
+      },
+    );
+    _checkCancelled();
+    _checkError(data);
+    final token = _accessToken(data);
+    final scopes = _scopes(data);
+    if (scopes.isNotEmpty && !scopes.contains('gist')) {
+      throw const SyncFailure('未获得 Gist 权限，请重新登录并允许授权');
+    }
+    final renewal = _renewal(data);
+    final expiresAt = renewal.expiresAt;
+    final refreshExpiresAt = renewal.refreshExpiresAt;
+    if (expiresAt == null ||
+        renewal.refreshToken.isEmpty ||
+        refreshExpiresAt == null) {
+      throw const SyncFailure('GitHub 未返回可续期的登录凭据，请重新登录');
+    }
+    return GitHubRenewal(
+      token: token,
+      refreshToken: renewal.refreshToken,
+      expiresAt: expiresAt,
+      refreshExpiresAt: refreshExpiresAt,
+    );
+  }
+
+  /// Validates a device-flow token response and reads the account profile.
+  Future<GitHubAccount> _accountFrom(Map<String, dynamic> data) async {
+    final token = _accessToken(data);
+    if (!_scopes(data).contains('gist')) {
+      throw const SyncFailure('未获得 Gist 权限，请重新登录并允许授权');
+    }
+    final renewal = _renewal(data);
+    final profile = await _request(_apiBase.resolve('user'), token: token);
+    _checkCancelled();
+    final login = profile['login'];
+    if (login is! String || login.isEmpty) {
+      throw const SyncFailure('无法读取 GitHub 账号，请重新登录');
+    }
+    return GitHubAccount(
+      token: token,
+      login: login,
+      refreshToken: renewal.refreshToken,
+      expiresAt: renewal.expiresAt,
+      refreshExpiresAt: renewal.refreshExpiresAt,
+    );
+  }
+
+  static String _accessToken(Map<String, dynamic> data) {
+    final token = data['access_token'];
+    if (token is! String ||
+        token.isEmpty ||
+        RegExp(r'\s').hasMatch(token) ||
+        data['token_type']?.toString().toLowerCase() != 'bearer') {
+      throw const SyncFailure('GitHub 未返回有效的登录凭据，请重试');
+    }
+    return token;
+  }
+
+  static Set<String> _scopes(Map<String, dynamic> data) =>
+      (data['scope'] as String? ?? '')
+          .split(RegExp(r'[\s,]+'))
+          .where((scope) => scope.isNotEmpty)
+          .toSet();
+
+  /// Parses optional expiry metadata.
+  ///
+  /// An expiring credential without the rotating refresh pair could never be
+  /// renewed, so it is rejected instead of being stored as a dead login.
+  ({String refreshToken, DateTime? expiresAt, DateTime? refreshExpiresAt})
+  _renewal(Map<String, dynamic> data) {
+    final expiresIn = _lifetime(data['expires_in']);
+    if (expiresIn == null) {
+      return (refreshToken: '', expiresAt: null, refreshExpiresAt: null);
+    }
+    final rawRefresh = data['refresh_token'];
+    if (rawRefresh == null) {
+      throw const SyncFailure('GitHub 未返回可续期的登录凭据，请重新登录');
+    }
+    if (rawRefresh is! String ||
+        rawRefresh.isEmpty ||
+        RegExp(r'\s').hasMatch(rawRefresh)) {
+      throw const SyncFailure('GitHub 未返回有效的登录凭据，请重试');
+    }
+    final refreshExpiresIn = _lifetime(data['refresh_token_expires_in']);
+    final now = _now();
+    final expiresAt = now.add(Duration(seconds: expiresIn));
+    final refreshExpiresAt = refreshExpiresIn == null
+        ? null
+        : now.add(Duration(seconds: refreshExpiresIn));
+    if (refreshExpiresAt == null || !refreshExpiresAt.isAfter(expiresAt)) {
+      throw const SyncFailure('GitHub 未返回可续期的登录凭据，请重新登录');
+    }
+    return (
+      refreshToken: rawRefresh,
+      expiresAt: expiresAt,
+      refreshExpiresAt: refreshExpiresAt,
+    );
+  }
+
+  /// OAuth lifetime fields carry integer seconds; anything else is malformed.
+  static int? _lifetime(Object? value) {
+    if (value == null) return null;
+    final int seconds;
+    if (value is int) {
+      seconds = value;
+    } else if (value is num &&
+        value.isFinite &&
+        value == value.truncateToDouble()) {
+      seconds = value.toInt();
+    } else if (value is String &&
+        RegExp(r'^[0-9]{1,9}$').hasMatch(value.trim())) {
+      seconds = int.parse(value.trim());
+    } else {
+      throw const SyncFailure('GitHub 返回了无效的登录凭据，请重试');
+    }
+    if (seconds <= 0 || seconds > _maxTokenLifetime) {
+      throw const SyncFailure('GitHub 返回了无效的登录凭据，请重试');
+    }
+    return seconds;
   }
 
   static void _checkError(Map<String, dynamic> data) {
@@ -176,6 +334,7 @@ class GitHubDeviceAuth {
       'device_flow_disabled' => '请先在 GitHub OAuth App 中启用 Device Flow',
       'incorrect_client_credentials' => 'GitHub OAuth App Client ID 无效',
       'incorrect_device_code' => 'GitHub 验证码无效，请重新登录',
+      'bad_refresh_token' || 'invalid_grant' => 'GitHub 登录已过期，请重新登录',
       _ => 'GitHub 授权失败，请重试',
     });
   }

@@ -124,6 +124,22 @@ void main() {
     expect(client.writes, 0);
   });
 
+  test('刷新令牌所属账号不同则不读取或创建任何 Gist', () async {
+    final client = _Client()..accountLogin = 'bob';
+    await expectLater(
+      GistSyncBackend(_config, client).resolve(),
+      throwsA(
+        isA<SyncFailure>().having(
+          (error) => error.message,
+          'message',
+          contains('账号与已保存账号不一致'),
+        ),
+      ),
+    );
+    expect(client.listedPages, isEmpty);
+    expect(client.writes, 0);
+  });
+
   test('同一账号重新登录保留地址，切换账号与退出清除地址并暂停自动同步', () async {
     final sync = CloudSync(memoryRepository());
     addTearDown(sync.dispose);
@@ -155,6 +171,7 @@ void main() {
 class _Client extends GitHubGistClient {
   _Client([super.settings = _config]);
   List<List<Map<String, Object?>>> pages = [[]];
+  String accountLogin = 'alice';
   final listedPages = <int>[];
   int writes = 0, listStatus = 200;
   Map<String, Object?>? lastWrite;
@@ -166,7 +183,7 @@ class _Client extends GitHubGistClient {
   }) async {
     final uri = Uri.parse(path);
     if (method == 'GET' && path == 'user') {
-      return const GitHubResponse(200, '{"login":"alice"}');
+      return GitHubResponse(200, jsonEncode({'login': accountLogin}));
     }
     if (method == 'GET' && uri.path == 'gists') {
       final page = int.parse(uri.queryParameters['page']!);

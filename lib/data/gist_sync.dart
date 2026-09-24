@@ -144,6 +144,13 @@ class GistSyncBackend implements SyncBackend {
     if (login is! String || login.isEmpty) {
       throw const SyncFailure('无法确认 GitHub 账号，请重新登录');
     }
+    // The refreshed token pair is persisted before this network request, so a
+    // transient profile failure cannot strand a spent refresh token. Never
+    // touch a Gist if GitHub reports a different account than the one saved.
+    if (config.githubLogin.isNotEmpty &&
+        login.toLowerCase() != config.githubLogin.toLowerCase()) {
+      throw const SyncFailure('GitHub 返回的账号与已保存账号不一致，请重新登录');
+    }
     _ownerLogin = login.toLowerCase();
     if (_gistId.isNotEmpty) {
       final response = await client.request('GET', 'gists/$_gistId');
