@@ -143,6 +143,16 @@ class DirectoryFixture(paramiko.SFTPServerInterface):
         entry.st_mode = self.entries[path]
         return entry
 
+    def lstat(self, path):
+        path = self.canonicalize(path)
+        if path not in self.entries:
+            return paramiko.SFTP_NO_SUCH_FILE
+        entry = paramiko.SFTPAttributes()
+        entry.st_mode = self.entries[path]
+        entry.st_size = len(self.files.get(path, b''))
+        entry.st_mtime = 1700000002
+        return entry
+
 class Server(paramiko.ServerInterface):
     def __init__(self):
         self.shell_ready = threading.Event()
