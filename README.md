@@ -12,6 +12,8 @@
 - 首次连接显示服务器 SHA256 指纹；后续指纹变化时拒绝连接，核实后可手动重置。
 - 多会话标签、ANSI 终端、UTF-8、PTY 尺寸同步、保活、断开及手动重连。
 - 终端复制、粘贴、字体大小调整；工具栏/快捷键的多行粘贴先显示内容确认。
+- 在外观设置中关闭终端自动换行后，长行可通过 Shift＋滚轮、水平滚轮、底部滑块或直接在终端内容上左右滑动查看；横向范围只到实际文本末尾，不随远端 PTY 固定列宽延伸到空白区域。手机长按仍用于选字，普通滚轮仍上下滚动。
+- SSH 终端内容上方显示远端 Linux CPU 使用率、内存使用率、根分区占用及默认网卡上下行速率；仅在会话可见且已连接时通过独立 SSH 通道采样，不写入终端输出。刷新间隔可在「设置 → 外观 → 终端」选择 2、5、10 或 30 秒，默认 5 秒且只保存在本机。
 - 手机提供 Esc、Tab、Ctrl C/D/L、方向键辅助栏。
 - 深浅色响应式布局、桌面侧栏、手机底部导航、标签导航与标签筛选。
 - WebDAV / GitHub Gist 加密云同步：连接、标签、收藏及凭证，支持手动/自动同步和冲突选择。
@@ -25,7 +27,7 @@
 
 OpenCode 使用 [Zen API](https://opencode.ai/docs/zen/)（`https://opencode.ai/zen/v1`），CommandCode 使用 [Provider API](https://commandcode.ai/docs/provider)（`https://api.commandcode.ai/provider/v1`）。均可通过模型旁的「获取」读取模型列表，默认使用 OpenAI Chat Completions；使用 Claude 时将接口类型切换为「Anthropic 兼容」。模型须支持所选接口及工具调用：OpenCode 的 GPT 等仅提供 Responses 接口的模型目前不能使用，模型列表中出现不代表应用已支持该模型的接口。
 
-接口类型支持 **OpenAI 兼容（Chat Completions）** 和 **Anthropic 兼容（Messages）**，均支持自主任务所需的工具调用与执行结果回传。地址可填写服务根地址、含 `/v1` 的地址，或完整 `/chat/completions`、`/messages` 地址。本机 Ollama 默认使用 `http://localhost:11434/v1`，Key 可留空。配置保存在当前设备的系统安全存储，不参与云同步；已有配置继续使用 OpenAI 兼容格式。
+接口类型支持 **OpenAI 兼容（Chat Completions）** 和 **Anthropic 兼容（Messages）**，均支持自主任务所需的工具调用与执行结果回传。地址可填写服务根地址、含 `/v1` 的地址，或完整 `/chat/completions`、`/messages` 地址；显式配置的本机或公司内网 AI 服务允许使用 HTTP，但 API Key 和对话内容会明文传输，只应连接可信网络。配置保存在当前设备的系统安全存储，不参与云同步；已有配置继续使用 OpenAI 兼容格式。
 
 填写地址和 API Key 后，点击模型旁的「获取」读取可用模型并展开列表，可输入文字筛选后选择。获取使用当前尚未保存的配置，不需要预先填写模型名称；Anthropic 列表会自动翻页。服务不支持模型列表时仍可手动填写，获取失败不会覆盖原模型。
 
@@ -37,7 +39,7 @@ OpenCode 使用 [Zen API](https://opencode.ai/docs/zen/)（`https://opencode.ai/
 
 同一 SSH 会话内支持连续对话，追问会携带之前的文字、图片、模型回复和命令结果。AI 回复显示独立背景和当轮模型名称；工具记录默认折叠，标题旁以 tag 显示执行状态或退出码，展开可查看命令及输出。关闭再打开 AI 面板仍可续聊；顶部「新对话」按钮会清空当前记录与上下文。对话只保存在内存中，不写入云同步，关闭该 SSH 会话或退出应用后不保留。停止或出错后可继续发送消息，未完成的命令会记录为未执行或执行结果待确认，迟到的响应不会影响新一轮。
 
-每条命令使用独立非交互 shell，从登录目录启动，目录和环境变量不跨命令保留。每轮最多执行 24 条命令，每条最长 60 秒，输出保留最多 16000 字符。处理过程中以紧凑状态行显示思考、执行、整理结果或等待确认，并显示本轮耗时；启用系统减少动画时关闭呼吸动效。
+每条 SSH 命令使用独立非交互 shell，从登录目录启动，目录和环境变量不跨命令保留。需要访问 HTTP API 时，AI 可通过 `run_command` 使用远端服务器已有的 curl、Python 或其他工具，请求从 SSH 服务器网络环境发出并受该账号权限约束。每轮最多执行 24 条命令，每条最长 60 秒，输出最多保留 16000 字符。处理过程中以紧凑状态行显示思考、执行、整理结果或等待确认，并显示本轮耗时；启用系统减少动画时关闭呼吸动效。
 
 ## 云同步
 
@@ -72,7 +74,7 @@ flutter build apk --release --split-per-abi --dart-define=GITHUB_OAUTH_CLIENT_ID
 
 Client ID 是公开的应用标识，可随安装包分发，最终用户无需注册 OAuth App。GitHub Actions 构建从仓库的 Settings → Secrets and variables → Actions → Variables 中读取变量 `HARBOR_GITHUB_CLIENT_ID`，未设置时使用项目默认值（GitHub 不允许仓库变量以 `GITHUB_` 开头）。通过 `--dart-define` 覆盖此编译配置后需要重新启动/构建，不能仅热更新。
 
-授权只请求 `gist` 权限，遵循 GitHub 的轮询间隔与限流退避，设备验证码只保留在内存中。此实现不请求 `offline_access`；如果为 OAuth App 启用了访问令牌过期，令牌失效后需要重新网页登录。旧版已保存的 Token 仍可继续同步，并可通过「重新登录」替换为网页授权。
+授权只请求 `gist` 权限，遵循 GitHub 的轮询间隔与限流退避，设备验证码只保留在内存中。若 OAuth App 返回有期限的访问令牌，应用会在同步前使用刷新令牌自动续期；令牌与到期时间仅保存在系统安全存储。旧版登录未保存刷新令牌，过期后需重新网页登录一次；授权被撤销或刷新令牌过期时也需重新登录。
 
 ### WebDAV
 
@@ -108,6 +110,12 @@ PC 右键，或长按卡片后不移动并松手，可打开管理菜单，进�
 
 桌面布局通过左侧会话列表切换终端，不在主机列表标题处重复显示会话入口。手机／窄屏布局可点击主机列表右侧、隐藏 IP 图标左边的「会话」图标查看连接状态并切换已有终端；手机终端页也可点击标题旁的下拉箭头切换会话。列表中的「管理会话」菜单支持断开连接或关闭会话：断开会保留终端记录，关闭已连接会话前会要求确认。返回首页不会断开会话。
 
+SFTP 工作区可添加“本地文件”标签；默认目录可在「设置 → 文件浏览」修改。Windows 使用系统实际的 Documents 已知目录，旧版保存的 `My Documents` 兼容联接会自动迁移，其他已失效或无权限路径会清除并回退到可访问的默认目录。macOS 保持 App Sandbox：默认使用应用可写的 Documents 目录，访问其他文件夹必须点击目录选择按钮授权；授权以 security-scoped bookmark 持久保存，重启后会自动恢复。
+
+终端状态栏的内存与根分区占用在首次采样后显示；CPU 与网速需要相邻两次采样才能计算。非 Linux 远端、服务器禁用 SSH exec 或监控命令失败时显示“状态不可用”，不会把缺失值显示成零；离开终端或断开连接后停止采样。窄屏可左右滑动状态栏查看全部指标。
+
+悬停或点击状态图标可打开详情浮层：CPU 展示总使用率及每个逻辑核心的使用率；内存展示已用／可用／总量和按 RSS 排序的前 10 个进程（PID、名称、常驻内存，不采集命令参数）；存储显示根分区、EFI、数据卷及网络存储等实际存储挂载，过滤 tmpfs、efivarfs、Docker overlay 等虚拟挂载，并合并同一设备的重复挂载（根目录优先，容器环境仍保留自身根文件系统）。磁盘占用率沿用 `df` 的预留空间语义，不简单以已用除以总量；每项保留容量、已用、可用空间。网速同时显示上下行字节速率。浮层随采样更新，不设关闭按钮；悬停打开后移出会收起，点击打开后可再次点击图标、点击外部或按 Esc 关闭。手机可点击图标查看，长列表可滚动。
+
 没有保存任何主机时，标题下方显示「熟悉的终端。随行的工作空间。」欢迎卡片，桌面端带 QUICK START 步骤；已有主机时不显示欢迎卡片，只保留紧凑标题和操作区。搜索无结果不会触发欢迎卡片。
 
 地址支持域名、IPv4、裸 IPv6；端口单独填写，不输入 ssh:// 前缀。首次信任前请通过服务器管理界面或管理员核对指纹。
@@ -132,6 +140,8 @@ flutter build apk --release --split-per-abi
 Android 正式签名可复制 `android/key.properties.example` 为 `android/key.properties` 并填写自己的密钥信息。此文件与 keystore 不应提交到版本库。
 
 macOS 已配置出站网络权限；凭据采用不共享的传统 Keychain，避免将应用绑定到开发机器的 Keychain Sharing provisioning profile。Android 关闭应用备份，避免凭据与设备加密密钥分离。
+
+图标由 `tool/generate_app_icon.py` 从 `assets/branding/harbor-ssh-icon.png` 导出（需要 Pillow）。`python tool/generate_app_icon.py --macos-only` 仅更新 macOS 资源：1024px 画布内使用居中的 832px 圆角底板，外围透明、底板内部不透明，不添加白色描边；Windows/Android 保持原样。默认运行仍导出所有平台，`--android-only` 只导出 Android。macOS 图标改动需要重新构建安装包；Dock 的系统效果与缓存需在 Mac 上确认，不能通过 Flutter 热重载验证。
 
 `.github/workflows/build.yml` 包含测试及三端构建任务，在发布 GitHub Release 或手动触发时运行。Android 使用 `--split-per-abi`，构建产物包含三个架构的 APK；发布时分别上传 `harbor-ssh-android-arm64-v8a.apk`、`harbor-ssh-android-armeabi-v7a.apk`、`harbor-ssh-android-x86_64.apk`，不再生成通用 APK。
 
