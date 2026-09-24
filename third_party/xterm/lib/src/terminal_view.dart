@@ -238,24 +238,27 @@ class TerminalViewState extends State<TerminalView> {
       key: _scrollableKey,
       controller: _scrollController,
       viewportBuilder: (context, offset) {
-        return _TerminalView(
-          key: _viewportKey,
-          terminal: widget.terminal,
-          controller: _controller,
-          offset: offset,
-          padding: MediaQuery.of(context).padding,
-          autoResize: widget.autoResize,
-          textStyle: widget.textStyle,
-          textScaler: widget.textScaler ?? MediaQuery.textScalerOf(context),
-          theme: widget.theme,
-          focusNode: _focusNode,
-          cursorType: widget.cursorType,
-          alwaysShowCursor: widget.alwaysShowCursor,
-          onEditableRect: _onEditableRect,
-          composingText: _composingText,
-          prepareCellDecoration: widget.onPrepareCellDecoration,
-          cellDecoration: widget.cellDecoration,
-          onHorizontalMetrics: _onHorizontalMetrics,
+        return Listener(
+          onPointerSignal: _onHorizontalPointer,
+          child: _TerminalView(
+            key: _viewportKey,
+            terminal: widget.terminal,
+            controller: _controller,
+            offset: offset,
+            padding: MediaQuery.of(context).padding,
+            autoResize: widget.autoResize,
+            textStyle: widget.textStyle,
+            textScaler: widget.textScaler ?? MediaQuery.textScalerOf(context),
+            theme: widget.theme,
+            focusNode: _focusNode,
+            cursorType: widget.cursorType,
+            alwaysShowCursor: widget.alwaysShowCursor,
+            onEditableRect: _onEditableRect,
+            composingText: _composingText,
+            prepareCellDecoration: widget.onPrepareCellDecoration,
+            cellDecoration: widget.cellDecoration,
+            onHorizontalMetrics: _onHorizontalMetrics,
+          ),
         );
       },
     );
@@ -339,8 +342,17 @@ class TerminalViewState extends State<TerminalView> {
       child: Column(
         children: [
           Expanded(
-            child: Listener(
-              onPointerSignal: _onHorizontalPointer,
+            child: GestureDetector(
+              supportedDevices: const {
+                PointerDeviceKind.touch,
+                PointerDeviceKind.stylus,
+                PointerDeviceKind.invertedStylus,
+              },
+              dragStartBehavior: DragStartBehavior.down,
+              onHorizontalDragUpdate:
+                  !widget.terminal.lineWrap && _horizontalExtent > 0
+                      ? (details) => _scrollHorizontally(-details.delta.dx)
+                      : null,
               child: child,
             ),
           ),
@@ -506,10 +518,27 @@ class TerminalViewState extends State<TerminalView> {
   void _onHorizontalPointer(PointerSignalEvent event) {
     if (widget.terminal.lineWrap ||
         event is! PointerScrollEvent ||
-        event.scrollDelta.dx == 0 ||
-        !_horizontalController.hasClients) return;
+        !_horizontalController.hasClients ||
+        renderTerminal.maxHorizontalExtent <= 0) return;
+    final delta = event.scrollDelta.dx != 0
+        ? event.scrollDelta.dx
+        : HardwareKeyboard.instance.isShiftPressed
+            ? event.scrollDelta.dy
+            : 0.0;
+    if (delta == 0) return;
+    // The viewport receives signals before either vertical Scrollable. Claim
+    // horizontal gestures even at an edge so they cannot scroll rows or send
+    // alternate-screen wheel input as well.
+    GestureBinding.instance.pointerSignalResolver.register(event, (_) {
+      _scrollHorizontally(delta);
+      event.respond(allowPlatformDefault: false);
+    });
+  }
+
+  void _scrollHorizontally(double delta) {
+    if (widget.terminal.lineWrap || !_horizontalController.hasClients) return;
     final position = _horizontalController.position;
-    final next = (position.pixels + event.scrollDelta.dx).clamp(
+    final next = (position.pixels + delta).clamp(
       position.minScrollExtent,
       position.maxScrollExtent,
     );

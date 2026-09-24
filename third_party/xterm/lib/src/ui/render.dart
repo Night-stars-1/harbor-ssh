@@ -189,7 +189,7 @@ class RenderTerminal extends RenderBox with RelayoutWhenSystemFontsChangeMixin {
     _reportHorizontalMetrics();
   }
 
-  /// Pixels of content hidden to the right of the viewport. Zero while wrapping.
+  /// Pixels of actual text hidden to the right of the viewport, not PTY width.
   double get maxHorizontalExtent {
     if (_terminal.lineWrap || !hasSize) return 0;
     final cell = _painter.cellSize.width;
@@ -340,7 +340,7 @@ class RenderTerminal extends RenderBox with RelayoutWhenSystemFontsChangeMixin {
       _contentColumns = _terminal.viewWidth;
       return;
     }
-    var columns = max(_terminal.viewWidth, _terminal.buffer.cursorX + 1);
+    var columns = 0;
     final lines = _terminal.buffer.lines;
     for (var i = 0; i < lines.length; i++) {
       final length = lines[i].getTrimmedLength(lines[i].length);
@@ -434,8 +434,11 @@ class RenderTerminal extends RenderBox with RelayoutWhenSystemFontsChangeMixin {
   }
 
   /// Selects entire words in the terminal that contains [from] and [to].
-  void selectWord(Offset from, [Offset? to]) {
-    final fromOffset = getCellOffset(from);
+  void selectWord(Offset from, [Offset? to]) =>
+      selectWordFrom(getCellOffset(from), to);
+
+  /// Keeps the origin on its buffer cell even if the viewport scrolls during a drag.
+  void selectWordFrom(CellOffset fromOffset, [Offset? to]) {
     final fromBoundary = _terminal.buffer.getWordBoundary(fromOffset);
     if (fromBoundary == null) return;
     if (to == null) {
@@ -459,8 +462,11 @@ class RenderTerminal extends RenderBox with RelayoutWhenSystemFontsChangeMixin {
 
   /// Selects characters in the terminal that starts from [from] to [to]. At
   /// least one cell is selected even if [from] and [to] are same.
-  void selectCharacters(Offset from, [Offset? to]) {
-    final fromPosition = getCellOffset(from);
+  void selectCharacters(Offset from, [Offset? to]) =>
+      selectCharactersFrom(getCellOffset(from), to);
+
+  /// Keeps the origin on its buffer cell even if the viewport scrolls during a drag.
+  void selectCharactersFrom(CellOffset fromPosition, [Offset? to]) {
     if (to == null) {
       _controller.setSelection(
         _terminal.buffer.createAnchorFromOffset(fromPosition),

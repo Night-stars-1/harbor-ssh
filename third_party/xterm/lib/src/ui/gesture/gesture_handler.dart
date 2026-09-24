@@ -1,5 +1,6 @@
 import 'package:flutter/gestures.dart';
 import 'package:flutter/widgets.dart';
+import 'package:xterm/src/core/buffer/line.dart';
 import 'package:xterm/src/core/mouse/button.dart';
 import 'package:xterm/src/core/mouse/button_state.dart';
 import 'package:xterm/src/terminal_view.dart';
@@ -55,9 +56,18 @@ class _TerminalGestureHandlerState extends State<TerminalGestureHandler> {
 
   RenderTerminal get renderTerminal => terminalView.renderTerminal;
 
-  DragStartDetails? _lastDragStartDetails;
+  CellAnchor? _dragStart;
+  CellAnchor? _longPressStart;
 
-  LongPressStartDetails? _lastLongPressStartDetails;
+  CellAnchor _anchorAt(Offset offset) => terminalView.widget.terminal.buffer
+      .createAnchorFromOffset(renderTerminal.getCellOffset(offset));
+
+  @override
+  void dispose() {
+    _dragStart?.dispose();
+    _longPressStart?.dispose();
+    super.dispose();
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -72,9 +82,11 @@ class _TerminalGestureHandlerState extends State<TerminalGestureHandler> {
       onTertiaryTapUp: onSecondaryTapUp,
       onLongPressStart: onLongPressStart,
       onLongPressMoveUpdate: onLongPressMoveUpdate,
-      // onLongPressUp: onLongPressUp,
+      onLongPressUp: onLongPressUp,
       onDragStart: onDragStart,
       onDragUpdate: onDragUpdate,
+      onDragEnd: onDragEnd,
+      onDragCancel: onDragCancel,
       onDoubleTapDown: onDoubleTapDown,
     );
   }
@@ -161,31 +173,44 @@ class _TerminalGestureHandlerState extends State<TerminalGestureHandler> {
   }
 
   void onLongPressStart(LongPressStartDetails details) {
-    _lastLongPressStartDetails = details;
-    renderTerminal.selectWord(details.localPosition);
+    _longPressStart?.dispose();
+    _longPressStart = _anchorAt(details.localPosition);
+    renderTerminal.selectWordFrom(_longPressStart!.offset);
   }
 
   void onLongPressMoveUpdate(LongPressMoveUpdateDetails details) {
-    renderTerminal.selectWord(
-      _lastLongPressStartDetails!.localPosition,
-      details.localPosition,
-    );
+    final start = _longPressStart;
+    if (start != null && start.attached) {
+      renderTerminal.selectWordFrom(start.offset, details.localPosition);
+    }
   }
 
-  // void onLongPressUp() {}
+  void onLongPressUp() {
+    _longPressStart?.dispose();
+    _longPressStart = null;
+  }
 
   void onDragStart(DragStartDetails details) {
-    _lastDragStartDetails = details;
-
-    details.kind == PointerDeviceKind.mouse
-        ? renderTerminal.selectCharacters(details.localPosition)
-        : renderTerminal.selectWord(details.localPosition);
+    _dragStart?.dispose();
+    _dragStart = _anchorAt(details.localPosition);
+    if (details.kind == PointerDeviceKind.mouse) {
+      renderTerminal.selectCharactersFrom(_dragStart!.offset);
+    } else {
+      renderTerminal.selectWordFrom(_dragStart!.offset);
+    }
   }
 
   void onDragUpdate(DragUpdateDetails details) {
-    renderTerminal.selectCharacters(
-      _lastDragStartDetails!.localPosition,
-      details.localPosition,
-    );
+    final start = _dragStart;
+    if (start != null && start.attached) {
+      renderTerminal.selectCharactersFrom(start.offset, details.localPosition);
+    }
+  }
+
+  void onDragEnd(DragEndDetails details) => onDragCancel();
+
+  void onDragCancel() {
+    _dragStart?.dispose();
+    _dragStart = null;
   }
 }

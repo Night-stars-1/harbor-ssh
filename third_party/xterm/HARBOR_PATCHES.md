@@ -63,9 +63,11 @@ width.
 
 `lib/src/ui/render.dart`
 - `horizontalOffset`/`maxHorizontalExtent`, `_contentColumns`,
-  `_measureContentColumns`, `_revealCursor`, `_followHorizontal`: horizontal
-  scrolling of unwrapped content; `_logicalColumns` applies
-  `max(viewport, Terminal.unwrapColumns)` as the applied width.
+  `_measureContentColumns`, `_revealCursor`, `_followHorizontal`: scroll only
+  across the longest trimmed text line. The 512-column PTY floor is not part
+  of the visual extent; short or erased lines have no horizontal scrollbar.
+  `_logicalColumns` still applies `max(viewport, Terminal.unwrapColumns)` to
+  the remote PTY independently, avoiding resize on every long line.
 - `_paint` clips to the viewport and translates by `-horizontalOffset`;
   `getOffset`/`getCellOffset`/`cursorOffset` include the offset, hit testing clamps
   to `max(viewWidth, contentColumns)`, and `_paintSegment` falls back to the line
@@ -76,6 +78,15 @@ width.
   (`ValueKey('terminal-horizontal-scrollbar')`) shown only while content is hidden,
   horizontal wheel translation, and the metrics/offset sync with
   `RenderTerminal.horizontalOffset`.
+- Direct horizontal dragging on the terminal viewport for touch and stylus while
+  wrapping is off and horizontal overflow exists. Finger deltas update the same
+  scroll position as the scrollbar and horizontal wheel, clamped to its bounds.
+  The axis-specific recognizer leaves vertical scrolling and long-press word
+  selection intact; mouse dragging remains character selection.
+- Shift plus a vertical mouse wheel maps the wheel's `dy` to the horizontal
+  controller when wrapping is off. The viewport claims that pointer signal
+  before the vertical scrollable or alternate-screen wheel handler sees it;
+  horizontal `dx` remains supported, and plain vertical wheels are unchanged.
 
 `lib/src/ui/shortcut/actions.dart`
 - Select-all ends at `max(viewWidth, last line content width)`, so the last line of
@@ -94,3 +105,18 @@ Limitations:
   viewport and can be drawn on the wrong row (upstream behaviour).
 - With `reflowEnabled = false`, or in the alternate buffer, a wrapped resize still
   truncates lines wider than the new width (upstream path).
+
+## Selection origin during viewport scrolling
+
+`lib/src/ui/gesture/gesture_handler.dart` and `gesture_detector.dart`
+- Mouse drags and touch long presses now retain a buffer-line `CellAnchor` for
+  the initial cell until the gesture ends or is cancelled. Previously every
+  drag update reused the original *screen* position; after scrolling it was
+  mapped against the new viewport offset and the selected text changed.
+- Dispose gesture anchors at the end of the gesture and on widget disposal.
+
+`lib/src/ui/render.dart`
+- `selectCharactersFrom`/`selectWordFrom` take the original buffer cell while
+  mapping only the moving end through the current viewport. Existing pixel-
+  based selection methods still delegate to them for single-action selection.
+
