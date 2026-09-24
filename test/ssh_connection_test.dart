@@ -350,6 +350,49 @@ void main() {
           onProgress: (_) {},
         );
         expect(emptyBytes, 0);
+        final sourceFolder = '${listing.path}/source-folder';
+        await files.createDirectory(sourceFolder);
+        await files.createDirectory('$sourceFolder/sub');
+        await files.createDirectory('$sourceFolder/empty-dir');
+        await files.upload(
+          '$sourceFolder/root.txt',
+          Stream.value(Uint8List.fromList([1, 2, 3])),
+          cancellation: TransferCancellation(),
+          onProgress: (_) {},
+        );
+        await files.upload(
+          '$sourceFolder/sub/nested.txt',
+          Stream.value(Uint8List.fromList([4, 5])),
+          cancellation: TransferCancellation(),
+          onProgress: (_) {},
+        );
+        DirectoryCopyResult? prepared;
+        final copiedFolder = '${listing.path}/copied-folder';
+        await copyDirectoryBetween(
+          source: files,
+          destination: files,
+          sourcePath: sourceFolder,
+          destinationPath: copiedFolder,
+          cancellation: TransferCancellation(),
+          onPrepared: (value) => prepared = value,
+          onProgress: (_) {},
+        );
+        expect(prepared?.files, 2);
+        expect(prepared?.directories, 3);
+        expect(
+          (await files.browse(copiedFolder)).entries.map((entry) => entry.name),
+          containsAll(['sub', 'empty-dir', 'root.txt']),
+        );
+        expect(
+          (await files.browse('$copiedFolder/sub')).entries.single.name,
+          'nested.txt',
+        );
+        await expectLater(
+          files.deleteDirectory(copiedFolder),
+          throwsA(anything),
+        );
+        await files.deleteDirectory(copiedFolder, recursive: true);
+        await files.deleteDirectory(sourceFolder, recursive: true);
         await files.deleteFile(path);
         await files.deleteFile('${listing.path}/empty');
         final afterDelete = await files.browse('~');

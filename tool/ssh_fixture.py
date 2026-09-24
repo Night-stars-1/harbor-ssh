@@ -85,6 +85,22 @@ class DirectoryFixture(paramiko.SFTPServerInterface):
             return paramiko.SFTP_NO_SUCH_FILE
         return TransferHandle(self.files, path, flags)
 
+    def mkdir(self, path, attr):
+        path = self.canonicalize(path)
+        if path in self.entries or posixpath.dirname(path) not in self.entries:
+            return paramiko.SFTP_FAILURE
+        self.entries[path] = stat.S_IFDIR | 0o755
+        return paramiko.SFTP_OK
+
+    def rmdir(self, path):
+        path = self.canonicalize(path)
+        if path not in self.entries or not stat.S_ISDIR(self.entries[path]):
+            return paramiko.SFTP_NO_SUCH_FILE
+        if any(posixpath.dirname(name) == path for name in self.entries if name != path):
+            return paramiko.SFTP_FAILURE
+        del self.entries[path]
+        return paramiko.SFTP_OK
+
     def remove(self, path):
         path = self.canonicalize(path)
         if path not in self.files:

@@ -47,7 +47,7 @@ class LocalFiles implements RemoteFileSystem {
     } on FileSystemException {
       throw const FileSystemException('无法读取这个目录，请检查访问权限');
     }
-    return directory.absolute.path.replaceAll('\\', '/');
+    return (await directory.resolveSymbolicLinks()).replaceAll('\\', '/');
   }
 
   static Future<String> restoreDefaultPath(String value) async {
@@ -99,7 +99,8 @@ class LocalFiles implements RemoteFileSystem {
 
   @override
   Future<RemoteDirectory> browse(String path) async {
-    final directory = Directory(path == '~' ? root : path).absolute;
+    final requested = Directory(path == '~' ? root : path).absolute;
+    final directory = Directory(await requested.resolveSymbolicLinks());
     final entries = <RemoteFile>[];
     await for (final entity in directory.list(followLinks: false)) {
       final fullPath = entity.path.replaceAll('\\', '/');
@@ -122,6 +123,59 @@ class LocalFiles implements RemoteFileSystem {
           : a.name.toLowerCase().compareTo(b.name.toLowerCase()),
     );
     return RemoteDirectory(directory.path.replaceAll('\\', '/'), entries);
+  }
+
+  @override
+  String childPath(String directory, String name) {
+    if (name.isEmpty ||
+        name == '.' ||
+        name == '..' ||
+        name.contains('/') ||
+        name.contains('\x00') ||
+        (Platform.isWindows &&
+            (RegExp(r'[<>:"/\\|?*\x00-\x1f]').hasMatch(name) ||
+                RegExp(r'[. ]+$').hasMatch(name) ||
+                RegExp(
+                  r'^(CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])($|\.)',
+                  caseSensitive: false,
+                ).hasMatch(name)))) {
+      throw const FormatException('目标系统不支持这个文件名');
+    }
+    final parent = Directory(directory).absolute;
+    final child = File('${parent.path}${Platform.pathSeparator}$name').absolute;
+    final parentPath = parent.path.replaceAll('\\', '/').toLowerCase();
+    final childParent = child.parent.path.replaceAll('\\', '/').toLowerCase();
+    if (Platform.isWindows && childParent != parentPath) {
+      throw const FormatException('目标路径超出所选目录');
+    }
+    return child.path.replaceAll('\\', '/');
+  }
+
+  @override
+  Future<void> createDirectory(String path) =>
+      LocalPathAccess.createDirectoryExclusive(path);
+  @override
+  Future<void> deleteDirectory(String path, {bool recursive = false}) =>
+      Directory(path).delete(recursive: recursive);
+
+  @override
+  Future<void> renameExclusive(String oldPath, String newPath) async {
+    if (await FileSystemEntity.type(newPath, followLinks: false) !=
+        FileSystemEntityType.notFound) {
+      throw FileSystemException('目标项目已存在', newPath);
+    }
+    switch (await FileSystemEntity.type(oldPath, followLinks: false)) {
+      case FileSystemEntityType.directory:
+        await Directory(oldPath).rename(newPath);
+      case FileSystemEntityType.link:
+        await Link(oldPath).rename(newPath);
+      case FileSystemEntityType.file:
+        await File(oldPath).rename(newPath);
+      case FileSystemEntityType.notFound:
+        throw FileSystemException('源项目不存在', oldPath);
+      default:
+        throw FileSystemException('不支持移动这个项目', oldPath);
+    }
   }
 
   @override

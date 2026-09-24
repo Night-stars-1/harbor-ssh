@@ -1,4 +1,6 @@
 import 'dart:async';
+import 'dart:io';
+import 'dart:math';
 
 import 'package:flutter/foundation.dart';
 
@@ -402,13 +404,55 @@ class FileWorkspaceModel extends ChangeNotifier {
             : [file],
       );
 
+  List<RemoteFile> conflicts(FileDragData data, FileLocationTab target) => [
+    for (final existing in target.entries)
+      if (data.files.any(
+        (source) => _sameName(source.name, existing.name, target.isLocal),
+      ))
+        existing,
+  ];
+
+  bool _sameName(String left, String right, bool local) =>
+      local && Platform.isWindows
+      ? left.toLowerCase() == right.toLowerCase()
+      : left == right;
+
+  bool conflictsMatch(
+    FileDragData data,
+    FileLocationTab target,
+    List<RemoteFile> expected,
+  ) {
+    final current = conflicts(data, target);
+    if (current.length != expected.length) return false;
+    return expected.every(
+      (approved) => current.any((item) => _sameEntry(item, approved)),
+    );
+  }
+
+  bool _sameEntry(RemoteFile left, RemoteFile right) =>
+      left.path == right.path &&
+      left.name == right.name &&
+      left.isDirectory == right.isDirectory &&
+      left.isLink == right.isLink &&
+      left.size == right.size &&
+      left.modified == right.modified;
+
+  String _temporaryName(String kind) {
+    final random = Random.secure();
+    final token = List.generate(
+      4,
+      (_) => random.nextInt(0x100000000).toRadixString(16).padLeft(8, '0'),
+    ).join();
+    return '.harbor-$kind-$token';
+  }
+
   bool canDrop(FileDragData data, FileLocationTab? target) {
     bool contains(FileLocationTab tab) =>
         panes.any((pane) => pane.tabs.contains(tab));
     return !_disposed &&
         !busy &&
         target != null &&
-        (target != data.source || target.path != data.sourceDirectory) &&
+        !_sameDirectory(data.source, data.sourceDirectory, target) &&
         contains(data.source) &&
         contains(target) &&
         data.source.connected &&
@@ -418,7 +462,51 @@ class FileWorkspaceModel extends ChangeNotifier {
         data.source.error == null &&
         target.error == null &&
         data.files.isNotEmpty &&
-        data.files.every((file) => !file.isDirectory);
+        data.files.every((file) => !file.isLink) &&
+        !_copiesIntoItself(data, target);
+  }
+
+  bool _sameFileSystem(FileLocationTab source, FileLocationTab target) =>
+      identical(source.files, target.files) ||
+      (source.isLocal && target.isLocal) ||
+      (_sftpIdentity(source) != null &&
+          _sftpIdentity(source) == _sftpIdentity(target));
+
+  String? _sftpIdentity(FileLocationTab tab) {
+    final host = tab.session?.host;
+    if (host == null) return null;
+    return '${host.address.toLowerCase()}:${host.port}\x00${host.username}';
+  }
+
+  bool _sameDirectory(
+    FileLocationTab source,
+    String sourceDirectory,
+    FileLocationTab target,
+  ) =>
+      _sameFileSystem(source, target) &&
+      _normalizedPath(sourceDirectory, source.isLocal) ==
+          _normalizedPath(target.path, target.isLocal);
+
+  bool _copiesIntoItself(FileDragData data, FileLocationTab target) {
+    if (!_sameFileSystem(data.source, target)) return false;
+    for (final file in data.files.where((item) => item.isDirectory)) {
+      final destination = target.files.childPath(target.path, file.name);
+      final sourcePath = _normalizedPath(file.path, data.source.isLocal);
+      final destinationPath = _normalizedPath(destination, target.isLocal);
+      if (destinationPath == sourcePath ||
+          destinationPath.startsWith('$sourcePath/')) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  String _normalizedPath(String path, bool local) {
+    var normalized = path
+        .replaceAll('\\', '/')
+        .replaceFirst(RegExp(r'/(?:\.)?$'), '');
+    if (normalized.isEmpty) normalized = '/';
+    return local && Platform.isWindows ? normalized.toLowerCase() : normalized;
   }
 
   Future<void> copy(int side) async {
@@ -450,17 +538,37 @@ class FileWorkspaceModel extends ChangeNotifier {
   bool canPaste(FileLocationTab? target) =>
       clipboard != null && canDrop(clipboard!, target);
 
-  Future<void> paste(FileLocationTab target) async {
+  Future<void> paste(
+    FileLocationTab target, {
+    List<RemoteFile> overwriteConflicts = const [],
+  }) async {
     final data = clipboard;
     if (data == null) return;
-    if (await drop(data, target)) {
+    if (await drop(data, target, overwriteConflicts: overwriteConflicts)) {
       if (identical(clipboard, data)) clipboard = null;
       _notify();
     }
   }
 
-  Future<bool> drop(FileDragData data, FileLocationTab target) async {
+  Future<bool> drop(
+    FileDragData data,
+    FileLocationTab target, {
+    List<RemoteFile> overwriteConflicts = const [],
+  }) async {
     if (!canDrop(data, target)) return false;
+    final existingConflicts = conflicts(data, target);
+    if (existingConflicts.isNotEmpty && overwriteConflicts.isEmpty) {
+      failed = true;
+      message = '目标目录存在同名项目';
+      _notify();
+      return false;
+    }
+    if (!conflictsMatch(data, target, overwriteConflicts)) {
+      failed = true;
+      message = '目标目录内容已变化，请重新操作';
+      _notify();
+      return false;
+    }
     final source = data.source;
     final selected = data.files;
     final destinationDirectory = target.path;
@@ -468,7 +576,7 @@ class FileWorkspaceModel extends ChangeNotifier {
     transfer = cancellation;
     transferSourceId = source.id;
     transferDestinationId = target.id;
-    transferName = '准备传输 ${selected.length} 个文件';
+    transferName = '准备传输 ${selected.length} 个项目';
     transferred = 0;
     total = null;
     message = null;
@@ -476,42 +584,159 @@ class FileWorkspaceModel extends ChangeNotifier {
     _notify();
     var completed = 0;
     var success = false;
+    var cleanupFailed = false;
+    final conflictsByName = {
+      for (final conflict in existingConflicts)
+        (target.isLocal && Platform.isWindows
+                ? conflict.name.toLowerCase()
+                : conflict.name):
+            conflict,
+    };
     try {
       for (final file in selected) {
         cancellation.check();
-        if (target.entries.any((entry) => entry.name == file.name)) {
-          throw StateError('目标目录已存在「${file.name}」');
-        }
         transferName = '${file.name} · ${completed + 1}/${selected.length}';
         transferred = 0;
-        total = file.size;
+        total = file.isDirectory ? null : file.size;
         _lastProgress = null;
         _notify();
-        await copyFileBetween(
-          source: source.files,
-          destination: target.files,
-          sourcePath: file.path,
-          destinationPath: remoteChild(destinationDirectory, file.name),
-          cancellation: cancellation,
-          onProgress: (bytes) {
-            transferred = bytes;
-            final now = DateTime.now();
-            if (_lastProgress == null ||
-                now.difference(_lastProgress!).inMilliseconds >= 80) {
-              _lastProgress = now;
-              _notify();
-            }
-          },
+        void progress(int bytes) {
+          transferred = bytes;
+          final now = DateTime.now();
+          if (_lastProgress == null ||
+              now.difference(_lastProgress!).inMilliseconds >= 80) {
+            _lastProgress = now;
+            _notify();
+          }
+        }
+
+        Future<void> copyTo(String path) async {
+          if (file.isDirectory) {
+            await copyDirectoryBetween(
+              source: source.files,
+              destination: target.files,
+              sourcePath: file.path,
+              destinationPath: path,
+              cancellation: cancellation,
+              onPrepared: (result) {
+                total = result.totalBytes;
+                transferName =
+                    '${file.name} · ${result.files} 个文件 / ${result.directories} 个目录';
+                _notify();
+              },
+              onProgress: progress,
+            );
+          } else {
+            await copyFileBetween(
+              source: source.files,
+              destination: target.files,
+              sourcePath: file.path,
+              destinationPath: path,
+              cancellation: cancellation,
+              onProgress: progress,
+            );
+          }
+        }
+
+        Future<void> remove(String path, RemoteFile item) =>
+            item.isDirectory && !item.isLink
+            ? target.files.deleteDirectory(path, recursive: true)
+            : target.files.deleteFile(path);
+
+        final destinationPath = target.files.childPath(
+          destinationDirectory,
+          file.name,
         );
+        final key = target.isLocal && Platform.isWindows
+            ? file.name.toLowerCase()
+            : file.name;
+        final conflict = conflictsByName[key];
+        if (conflict == null) {
+          await copyTo(destinationPath);
+        } else {
+          final stagedPath = target.files.childPath(
+            destinationDirectory,
+            _temporaryName('incoming'),
+          );
+          final backupPath = target.files.childPath(
+            destinationDirectory,
+            _temporaryName('backup'),
+          );
+          var backupMoveAttempted = false,
+              backupMoved = false,
+              published = false;
+          try {
+            transferName = '准备覆盖 ${file.name}';
+            _notify();
+            await copyTo(stagedPath);
+            cancellation.check();
+            final latest = await target.files.browse(destinationDirectory);
+            final current = latest.entries
+                .where(
+                  (entry) => _sameName(entry.name, file.name, target.isLocal),
+                )
+                .firstOrNull;
+            if (current == null || !_sameEntry(current, conflict)) {
+              throw StateError('目标目录内容已变化，请重新操作');
+            }
+            backupMoveAttempted = true;
+            await target.files.renameExclusive(conflict.path, backupPath);
+            backupMoved = true;
+            cancellation.check();
+            await target.files.renameExclusive(stagedPath, destinationPath);
+            published = true;
+            try {
+              await remove(backupPath, conflict);
+            } catch (_) {
+              cleanupFailed = true;
+            }
+          } catch (error, stack) {
+            var restoreFailed = false;
+            if (backupMoveAttempted && !published) {
+              try {
+                await target.files.renameExclusive(backupPath, conflict.path);
+              } catch (_) {
+                if (backupMoved) restoreFailed = true;
+              }
+            }
+            var stageCleanupFailed = false;
+            if (!published) {
+              try {
+                await remove(stagedPath, file);
+              } catch (_) {
+                try {
+                  final remaining = await target.files.browse(
+                    destinationDirectory,
+                  );
+                  stageCleanupFailed = remaining.entries.any(
+                    (entry) => entry.path == stagedPath,
+                  );
+                } catch (_) {
+                  stageCleanupFailed = true;
+                }
+              }
+            }
+            if (restoreFailed) {
+              throw StateError('覆盖失败，原项目保留在临时备份中');
+            }
+            if (stageCleanupFailed) {
+              throw StateError('传输失败，临时项目清理失败');
+            }
+            Error.throwWithStackTrace(error, stack);
+          }
+        }
         completed++;
       }
-      message = '已传输 $completed 个文件';
+      message = cleanupFailed
+          ? '已传输 $completed 个项目 · 旧版本清理失败'
+          : '已传输 $completed 个项目';
+      failed = cleanupFailed;
       source.clearSelection();
       success = true;
     } catch (e) {
       failed = e is! TransferCancelled;
       message =
-          '${fileError(e)}${completed > 0 ? ' · 已完成 $completed 个文件' : ''}';
+          '${fileError(e)}${completed > 0 ? ' · 已完成 $completed 个项目' : ''}';
     } finally {
       transfer = null;
       transferSourceId = null;

@@ -164,7 +164,18 @@ class FileTestSession extends SshConnection {
 
 class FakeRemoteFiles implements RemoteFileSystem {
   @override
+  String childPath(String directory, String name) =>
+      remoteChild(directory, name);
+  @override
   Future<void> deleteFile(String path) async => throw UnimplementedError();
+  @override
+  Future<void> createDirectory(String path) async => throw UnimplementedError();
+  @override
+  Future<void> deleteDirectory(String path, {bool recursive = false}) async =>
+      throw UnimplementedError();
+  @override
+  Future<void> renameExclusive(String oldPath, String newPath) async =>
+      throw UnimplementedError();
   final uploads = <String, List<int>>{};
   Completer<void>? gate;
   bool failDownload = false, failBrowse = false;

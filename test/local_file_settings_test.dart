@@ -21,6 +21,14 @@ void main() {
     addTearDown(() => directory.delete(recursive: true));
     final first = await Directory('${directory.path}/first').create();
     final second = await Directory('${directory.path}/second').create();
+    final firstPath = (await first.resolveSymbolicLinks()).replaceAll(
+      '\\',
+      '/',
+    );
+    final secondPath = (await second.resolveSymbolicLinks()).replaceAll(
+      '\\',
+      '/',
+    );
     final repository = memoryRepository();
     final model = WorkspaceModel(repository);
     await model.initialize();
@@ -29,7 +37,7 @@ void main() {
     final restored = WorkspaceModel(repository);
     await restored.initialize();
     addTearDown(restored.dispose);
-    expect(restored.defaultLocalPath, first.path.replaceAll('\\', '/'));
+    expect(restored.defaultLocalPath, firstPath);
     restored.fileWorkspace.initializeDefaultLocal();
     final initial = restored.fileWorkspace.panes[0].active!;
     await initial.browse();
@@ -37,14 +45,14 @@ void main() {
     await restored.saveDefaultLocalPath(second.path);
     final next = (await restored.fileWorkspace.addLocal(1))!;
     await next.browse();
-    expect(next.path, second.path.replaceAll('\\', '/'));
-    expect(initial.path, first.path.replaceAll('\\', '/'));
+    expect(next.path, secondPath);
+    expect(initial.path, firstPath);
     for (final invalid in ['relative/path', '${directory.path}/missing']) {
       await expectLater(
         restored.saveDefaultLocalPath(invalid),
         throwsA(isA<SyncFailure>()),
       );
-      expect(restored.defaultLocalPath, second.path.replaceAll('\\', '/'));
+      expect(restored.defaultLocalPath, secondPath);
     }
     await restored.saveDefaultLocalPath('');
     final reset = WorkspaceModel(repository);
@@ -85,6 +93,10 @@ void main() {
       final directory = await Directory.systemTemp.createTemp(
         'harbor-path-bridge-',
       );
+      final canonicalPath = (await directory.resolveSymbolicLinks()).replaceAll(
+        '\\',
+        '/',
+      );
       final model = WorkspaceModel(memoryRepository());
       await model.initialize();
       final host = SettingsWindowHost(LocalSyncSettingsController(model));
@@ -95,7 +107,7 @@ void main() {
         await remote.initialize();
         await remote.saveDefaultLocalPath(directory.path);
         expect(remote.defaultLocalPath, model.defaultLocalPath);
-        expect(model.defaultLocalPath, directory.path.replaceAll('\\', '/'));
+        expect(model.defaultLocalPath, canonicalPath);
         await expectLater(
           remote.saveDefaultLocalPath('relative'),
           throwsA(isA<SyncFailure>()),

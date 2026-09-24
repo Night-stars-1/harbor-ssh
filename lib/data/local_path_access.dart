@@ -40,6 +40,26 @@ abstract final class LocalPathAccess {
     }
   }
 
+  static Future<void> createDirectoryExclusive(String path) async {
+    if (Platform.isWindows || Platform.isMacOS) {
+      try {
+        await _channel.invokeMethod<void>('createDirectoryExclusive', {
+          'path': path,
+        });
+        return;
+      } on MissingPluginException {
+        // Fall back for tests and unsupported secondary engines.
+      } on PlatformException catch (error) {
+        throw FileSystemException(error.message ?? '无法创建目录', path);
+      }
+    }
+    if (await FileSystemEntity.type(path, followLinks: false) !=
+        FileSystemEntityType.notFound) {
+      throw FileSystemException('目标目录已存在', path);
+    }
+    await Directory(path).create();
+  }
+
   static Future<void> clear() async {
     if (!Platform.isMacOS) return;
     try {

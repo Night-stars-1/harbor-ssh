@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter/gestures.dart';
 import 'package:flutter/services.dart';
@@ -350,7 +352,9 @@ class _FileWorkspaceState extends State<FileWorkspace> {
         key: ValueKey('file-drop-panel-$side'),
         onWillAcceptWithDetails: (details) => model.canDrop(details.data, tab),
         onAcceptWithDetails: (details) {
-          if (tab != null) model.drop(details.data, tab);
+          if (tab != null) {
+            unawaited(_dropWithConfirmation(details.data, tab));
+          }
         },
         builder: (context, candidates, rejected) => Material(
           key: ValueKey('file-panel-$side'),
@@ -399,6 +403,105 @@ class _FileWorkspaceState extends State<FileWorkspace> {
         ),
       ),
     );
+  }
+
+  Future<List<RemoteFile>?> _confirmOverwrite(
+    FileDragData data,
+    FileLocationTab target,
+  ) async {
+    final targetPath = target.path;
+    final conflicts = model.conflicts(data, target);
+    if (conflicts.isEmpty) return const [];
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: Text('覆盖 ${conflicts.length} 个同名项目？'),
+        content: SizedBox(
+          width: 380,
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              const Text('目标中的同名文件或文件夹将被永久替换，此操作无法撤销。'),
+              const SizedBox(height: 12),
+              Flexible(
+                child: SingleChildScrollView(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      for (final item in conflicts)
+                        Padding(
+                          padding: const EdgeInsets.symmetric(vertical: 3),
+                          child: Row(
+                            children: [
+                              Icon(
+                                item.isDirectory
+                                    ? Icons.folder_outlined
+                                    : Icons.insert_drive_file_outlined,
+                                size: 18,
+                              ),
+                              const SizedBox(width: 8),
+                              Expanded(
+                                child: Text(
+                                  item.name,
+                                  maxLines: 1,
+                                  overflow: TextOverflow.ellipsis,
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                    ],
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
+        actions: [
+          TextButton(
+            key: const ValueKey('cancel-overwrite-files'),
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('取消'),
+          ),
+          FilledButton(
+            key: const ValueKey('confirm-overwrite-files'),
+            onPressed: () => Navigator.pop(context, true),
+            child: const Text('覆盖'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true) return null;
+    if (!mounted ||
+        target.path != targetPath ||
+        !model.canDrop(data, target) ||
+        !model.conflictsMatch(data, target, conflicts)) {
+      if (mounted) {
+        ScaffoldMessenger.of(context)
+            .showSnackBar(const SnackBar(content: Text('目标目录内容已变化，请重新操作')));
+      }
+      return null;
+    }
+    return conflicts;
+  }
+
+  Future<void> _dropWithConfirmation(
+    FileDragData data,
+    FileLocationTab target,
+  ) async {
+    if (!model.canDrop(data, target)) return;
+    final overwriteConflicts = await _confirmOverwrite(data, target);
+    if (overwriteConflicts == null || !mounted) return;
+    await model.drop(data, target, overwriteConflicts: overwriteConflicts);
+  }
+
+  Future<void> _pasteWithConfirmation(FileLocationTab target) async {
+    final data = model.clipboard;
+    if (data == null || !model.canPaste(target)) return;
+    final overwriteConflicts = await _confirmOverwrite(data, target);
+    if (overwriteConflicts == null || !mounted) return;
+    await model.paste(target, overwriteConflicts: overwriteConflicts);
   }
 
   Widget _emptyPanel(int side) => Center(
@@ -611,7 +714,9 @@ class _FileWorkspaceState extends State<FileWorkspace> {
                   ? (enabled && !model.busy
                         ? () => model.copySelection(tab)
                         : null)
-                  : (model.canPaste(tab) ? () => model.paste(tab) : null),
+                  : (model.canPaste(tab)
+                        ? () => _pasteWithConfirmation(tab)
+                        : null),
               icon: Icon(
                 copying ? Icons.copy_rounded : Icons.content_paste_rounded,
                 size: 20,
@@ -811,8 +916,9 @@ class _FileWorkspaceState extends State<FileWorkspace> {
         ),
       ),
     );
-    if (file.isDirectory || !enabled || model.busy) return row;
+    if (!enabled || model.busy) return row;
     if (clipboardMode || mobile) {
+      if (file.isDirectory) return row;
       return GestureDetector(
         onLongPressStart: (details) =>
             _fileMenu(tab, file, details.globalPosition),
@@ -837,7 +943,9 @@ class _FileWorkspaceState extends State<FileWorkspace> {
             mainAxisSize: MainAxisSize.min,
             children: [
               Icon(
-                Icons.file_copy_outlined,
+                file.isDirectory
+                    ? Icons.folder_copy_outlined
+                    : Icons.file_copy_outlined,
                 size: 20,
                 color: colors.onPrimaryContainer,
               ),
@@ -847,7 +955,7 @@ class _FileWorkspaceState extends State<FileWorkspace> {
                 child: Text(
                   data.files.length == 1
                       ? file.name
-                      : '${data.files.length} 个文件',
+                      : '${data.files.length} 个项目',
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
                   style: TextStyle(color: colors.onPrimaryContainer),

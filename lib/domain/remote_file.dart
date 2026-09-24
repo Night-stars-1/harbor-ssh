@@ -33,7 +33,11 @@ class TransferCancellation {
 
 abstract interface class RemoteFileSystem {
   Future<RemoteDirectory> browse(String path);
+  String childPath(String directory, String name);
   Future<void> deleteFile(String path);
+  Future<void> createDirectory(String path);
+  Future<void> deleteDirectory(String path, {bool recursive = false});
+  Future<void> renameExclusive(String oldPath, String newPath);
   Future<void> upload(
     String path,
     Stream<Uint8List> source, {

@@ -1,4 +1,5 @@
 #include "flutter_window.h"
+#include <filesystem>
 
 #include <optional>
 #include <flutter/standard_method_codec.h>
@@ -36,6 +37,41 @@ bool FlutterWindow::OnCreate() {
   settings_channel_ = std::make_unique<flutter::MethodChannel<Value>>(
       flutter_controller_->engine()->messenger(), "harbor/settings_window",
       &flutter::StandardMethodCodec::GetInstance());
+  local_paths_channel_ = std::make_unique<flutter::MethodChannel<Value>>(
+      flutter_controller_->engine()->messenger(), "harbor/local_paths",
+      &flutter::StandardMethodCodec::GetInstance());
+  local_paths_channel_->SetMethodCallHandler(
+      [](const flutter::MethodCall<Value>& call,
+         std::unique_ptr<flutter::MethodResult<Value>> result) {
+        if (call.method_name() != "createDirectoryExclusive") {
+          result->NotImplemented();
+          return;
+        }
+        const auto* arguments = std::get_if<flutter::EncodableMap>(call.arguments());
+        if (!arguments) {
+          result->Error("arguments", "Invalid directory arguments");
+          return;
+        }
+        const auto entry = arguments->find(Value("path"));
+        if (entry == arguments->end()) {
+          result->Error("arguments", "Missing directory path");
+          return;
+        }
+        const auto* path = std::get_if<std::string>(&entry->second);
+        if (!path || path->empty()) {
+          result->Error("arguments", "Invalid directory path");
+          return;
+        }
+        std::error_code error;
+        const bool created = std::filesystem::create_directory(
+            std::filesystem::u8path(*path), error);
+        if (created) {
+          result->Success();
+        } else {
+          result->Error("mkdir",
+                        error ? error.message() : "Directory already exists");
+        }
+      });
   settings_channel_->SetMethodCallHandler(
       [this](const flutter::MethodCall<Value>& call,
              std::unique_ptr<flutter::MethodResult<Value>> result) {
@@ -91,6 +127,7 @@ void FlutterWindow::OnDestroy() {
   settings_window_.reset();
   settings_channel_.reset();
   system_color_channel_.reset();
+  local_paths_channel_.reset();
   if (flutter_controller_) {
     flutter_controller_ = nullptr;
   }

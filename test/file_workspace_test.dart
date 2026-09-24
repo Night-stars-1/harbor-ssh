@@ -72,7 +72,7 @@ void main() {
       await operation;
       await tester.pumpAndSettle();
       expect(tester.getRect(bar), initial);
-      expect(find.text('已传输 1 个文件'), findsOneWidget);
+      expect(find.text('已传输 1 个项目'), findsOneWidget);
       expect(find.byType(LinearProgressIndicator), findsNothing);
       await model.drop(data, b);
       await tester.pumpAndSettle();
@@ -82,6 +82,12 @@ void main() {
       await tester.tap(find.byKey(const ValueKey('dismiss-file-result')));
       await tester.pumpAndSettle();
       expect(bar, findsNothing);
+      expect(
+        await model.drop(data, b, overwriteConflicts: model.conflicts(data, b)),
+        isTrue,
+      );
+      expect(model.failed, isFalse);
+      expect(model.message, '已传输 1 个项目');
       expect(tester.takeException(), isNull);
       await tester.pumpWidget(const SizedBox.shrink());
     });
@@ -634,14 +640,28 @@ void main() {
     final left = await Directory('${root.path}/left').create();
     final right = await Directory('${root.path}/right').create();
     await File('${left.path}/文件.bin').writeAsBytes([1, 2, 3, 4]);
+    final folder = await Directory('${left.path}/folder').create();
+    final sub = await Directory('${folder.path}/sub').create();
+    await Directory('${folder.path}/empty').create();
+    await File('${sub.path}/nested.txt').writeAsBytes([5, 6]);
     final source = LocalFiles(left.path), target = LocalFiles(right.path);
     final listing = await source.browse('~');
-    expect(listing.entries.single.name, '文件.bin');
+    if (Platform.isWindows) {
+      expect(
+        () => target.childPath(target.root, r'..\outside'),
+        throwsA(isA<FormatException>()),
+      );
+    }
+    expect(
+      listing.entries.map((entry) => entry.name),
+      containsAll(['folder', '文件.bin']),
+    );
+    final file = listing.entries.singleWhere((entry) => entry.name == '文件.bin');
     final destination = '${target.root}/文件.bin';
     await copyFileBetween(
       source: source,
       destination: target,
-      sourcePath: listing.entries.single.path,
+      sourcePath: file.path,
       destinationPath: destination,
       cancellation: TransferCancellation(),
       onProgress: (_) {},
@@ -651,7 +671,7 @@ void main() {
       copyFileBetween(
         source: source,
         destination: target,
-        sourcePath: listing.entries.single.path,
+        sourcePath: file.path,
         destinationPath: destination,
         cancellation: TransferCancellation(),
         onProgress: (_) {},
@@ -659,6 +679,356 @@ void main() {
       throwsA(isA<FileSystemException>()),
     );
     expect(await File(destination).readAsBytes(), [1, 2, 3, 4]);
+    final folderEntry = listing.entries.singleWhere(
+      (entry) => entry.name == 'folder',
+    );
+    final folderDestination = '${target.root}/folder';
+    await copyDirectoryBetween(
+      source: source,
+      destination: target,
+      sourcePath: folderEntry.path,
+      destinationPath: folderDestination,
+      cancellation: TransferCancellation(),
+      onPrepared: (result) {
+        expect(result.files, 1);
+        expect(result.directories, 3);
+      },
+      onProgress: (_) {},
+    );
+    expect(await Directory('$folderDestination/empty').exists(), isTrue);
+    expect(await File('$folderDestination/sub/nested.txt').readAsBytes(), [
+      5,
+      6,
+    ]);
+    await expectLater(
+      copyDirectoryBetween(
+        source: source,
+        destination: target,
+        sourcePath: folderEntry.path,
+        destinationPath: folderDestination,
+        cancellation: TransferCancellation(),
+        onPrepared: (_) {},
+        onProgress: (_) {},
+      ),
+      throwsA(isA<FileSystemException>()),
+    );
+  });
+
+  test('本地安全重命名不覆盖同时出现的目标', () async {
+    final root = await Directory.systemTemp.createTemp('harbor-rename-');
+    addTearDown(() => root.delete(recursive: true));
+    final files = LocalFiles(root.path);
+    final source = File('${root.path}/source.txt')..writeAsStringSync('new');
+    final target = File('${root.path}/target.txt')..writeAsStringSync('old');
+
+    await expectLater(
+      files.renameExclusive(source.path, target.path),
+      throwsA(isA<FileSystemException>()),
+    );
+    expect(source.readAsStringSync(), 'new');
+    expect(target.readAsStringSync(), 'old');
+
+    final published = '${root.path}/published.txt';
+    await files.renameExclusive(source.path, published);
+    expect(await File(published).readAsString(), 'new');
+    expect(source.existsSync(), isFalse);
+  });
+
+  test('文件夹可在 SFTP 与本地间双向递归拖动，保留空目录并回滚失败目标', () async {
+    final remote = MemoryFiles()
+      ..directories.addAll({'/folder', '/folder/sub', '/folder/empty'})
+      ..data['/folder/root.txt'] = Uint8List.fromList([1, 2])
+      ..data['/folder/sub/nested.txt'] = Uint8List.fromList([3, 4, 5]);
+    final local = MemoryFiles();
+    final model = FileWorkspaceModel();
+    addTearDown(model.dispose);
+    final remoteSource = model.add(0, name: 'sftp', files: remote);
+    final localTarget = model.add(
+      1,
+      name: 'local',
+      files: local,
+      isLocal: true,
+    );
+    await remoteSource.browse('/');
+    await localTarget.browse('/');
+    final folder = remoteSource.entries.singleWhere(
+      (entry) => entry.name == 'folder',
+    );
+    final drag = model.dragData(remoteSource, folder);
+    expect(drag.files.single.isDirectory, isTrue);
+    expect(model.canDrop(drag, localTarget), isTrue);
+    expect(await model.drop(drag, localTarget), isTrue);
+    expect(
+      local.directories,
+      containsAll({'/folder', '/folder/sub', '/folder/empty'}),
+    );
+    expect(local.data['/folder/root.txt'], [1, 2]);
+    expect(local.data['/folder/sub/nested.txt'], [3, 4, 5]);
+    expect(model.message, '已传输 1 个项目');
+
+    await localTarget.browse('/');
+    final secondRemote = MemoryFiles();
+    final remoteTarget = model.add(0, name: 'other-sftp', files: secondRemote);
+    await remoteTarget.browse('/');
+    final localFolder = localTarget.entries.singleWhere(
+      (entry) => entry.name == 'folder',
+    );
+    expect(
+      await model.drop(model.dragData(localTarget, localFolder), remoteTarget),
+      isTrue,
+    );
+    expect(secondRemote.directories, contains('/folder/empty'));
+    expect(secondRemote.data['/folder/sub/nested.txt'], [3, 4, 5]);
+
+    final descendant = model.add(
+      1,
+      name: 'same-server-child',
+      files: remote,
+      initialPath: '/folder/sub',
+    );
+    await descendant.browse('/folder/sub');
+    expect(model.canDrop(drag, descendant), isFalse);
+
+    final failing = MemoryFiles()..failWrite = true;
+    final failingTarget = model.add(1, name: 'failing', files: failing);
+    await failingTarget.browse('/');
+    expect(await model.drop(drag, failingTarget), isFalse);
+    expect(failing.directories, {'/'});
+    expect(failing.data, isEmpty);
+    expect(model.failed, isTrue);
+
+    final cancelTarget = MemoryFiles()
+      ..writeGate = Completer<void>()
+      ..writeGateAfterBytes = 0;
+    final cancellingTab = model.add(1, name: 'cancel', files: cancelTarget);
+    await cancellingTab.browse('/');
+    final cancelling = model.drop(drag, cancellingTab);
+    await Future<void>.delayed(Duration.zero);
+    cancelTarget.data['/folder/external.txt'] = Uint8List.fromList([9]);
+    model.cancel();
+    cancelTarget.writeGate!.complete();
+    expect(await cancelling, isFalse);
+    expect(cancelTarget.directories, containsAll({'/', '/folder'}));
+    expect(cancelTarget.data['/folder/external.txt'], [9]);
+    const duplicateA = Host(
+      id: 'duplicate-a',
+      name: 'same server A',
+      address: 'server.example.com',
+      username: 'deploy',
+    );
+    const duplicateB = Host(
+      id: 'duplicate-b',
+      name: 'same server B',
+      address: 'SERVER.EXAMPLE.COM',
+      username: 'deploy',
+    );
+    final sessionA = SshConnection(id: 'duplicate-a', host: duplicateA)
+      ..status = ConnectionStatus.connected;
+    final sessionB = SshConnection(id: 'duplicate-b', host: duplicateB)
+      ..status = ConnectionStatus.connected;
+    addTearDown(sessionA.dispose);
+    addTearDown(sessionB.dispose);
+    final duplicateSourceFiles = MemoryFiles()
+      ..directories.addAll({'/folder', '/folder/sub'});
+    final duplicateTargetFiles = MemoryFiles()
+      ..directories.addAll({'/folder', '/folder/sub'});
+    final duplicateModel = FileWorkspaceModel();
+    addTearDown(duplicateModel.dispose);
+    final duplicateSource = duplicateModel.add(
+      0,
+      name: 'source',
+      files: duplicateSourceFiles,
+      session: sessionA,
+    );
+    final duplicateTarget = duplicateModel.add(
+      1,
+      name: 'target',
+      files: duplicateTargetFiles,
+      initialPath: '/folder/sub',
+      session: sessionB,
+    );
+    await duplicateSource.browse('/');
+    await duplicateTarget.browse('/folder/sub');
+    final duplicateFolder = duplicateSource.entries.singleWhere(
+      (entry) => entry.name == 'folder',
+    );
+    expect(
+      duplicateModel.canDrop(
+        duplicateModel.dragData(duplicateSource, duplicateFolder),
+        duplicateTarget,
+      ),
+      isFalse,
+    );
+
+    final emptySource = MemoryFiles()..directories.add('/empty');
+    final delayedTarget = MemoryFiles()
+      ..createDirectoryGate = Completer<void>();
+    final mkdirCancellation = TransferCancellation();
+    final emptyCopy = copyDirectoryBetween(
+      source: emptySource,
+      destination: delayedTarget,
+      sourcePath: '/empty',
+      destinationPath: '/empty',
+      cancellation: mkdirCancellation,
+      onPrepared: (_) {},
+      onProgress: (_) {},
+    );
+    final cancelledCopy = expectLater(
+      emptyCopy,
+      throwsA(isA<TransferCancelled>()),
+    );
+    await Future<void>.delayed(Duration.zero);
+    mkdirCancellation.cancel();
+    delayedTarget.createDirectoryGate!.complete();
+    await cancelledCopy;
+    expect(delayedTarget.directories, {'/'});
+  });
+
+  test('覆盖传输失败或取消时保留原项目', () async {
+    final source = MemoryFiles()
+      ..data['/same.txt'] = Uint8List.fromList([2, 3])
+      ..failRead = true;
+    final target = MemoryFiles()..data['/same.txt'] = Uint8List.fromList([1]);
+    final model = FileWorkspaceModel();
+    addTearDown(model.dispose);
+    final sourceTab = model.add(0, name: 'source', files: source);
+    final targetTab = model.add(1, name: 'target', files: target);
+    await Future.wait([sourceTab.browse('/'), targetTab.browse('/')]);
+    final drag = model.dragData(sourceTab, sourceTab.entries.single);
+
+    expect(
+      await model.drop(
+        drag,
+        targetTab,
+        overwriteConflicts: model.conflicts(drag, targetTab),
+      ),
+      isFalse,
+    );
+    expect(target.data, {
+      '/same.txt': [1],
+    });
+    expect(target.directories, {'/'});
+
+    source.failRead = false;
+    target.writeGate = Completer<void>();
+    final cancelled = model.drop(
+      drag,
+      targetTab,
+      overwriteConflicts: model.conflicts(drag, targetTab),
+    );
+    await Future<void>.delayed(Duration.zero);
+    model.cancel();
+    target.writeGate!.complete();
+    expect(await cancelled, isFalse);
+    expect(target.data, {
+      '/same.txt': [1],
+    });
+    expect(target.directories, {'/'});
+
+    target.writeGate = null;
+    target.failPublish = true;
+    expect(
+      await model.drop(
+        drag,
+        targetTab,
+        overwriteConflicts: model.conflicts(drag, targetTab),
+      ),
+      isFalse,
+    );
+    expect(target.data, {
+      '/same.txt': [1],
+    });
+    expect(target.directories, {'/'});
+
+    target.failPublish = false;
+    target.failBackupAfterMove = true;
+    expect(
+      await model.drop(
+        drag,
+        targetTab,
+        overwriteConflicts: model.conflicts(drag, targetTab),
+      ),
+      isFalse,
+    );
+    expect(target.data, {
+      '/same.txt': [1],
+    });
+    expect(target.directories, {'/'});
+  });
+
+  testWidgets('拖动同名文件夹先确认，取消不修改，覆盖后替换目标', (tester) async {
+    tester.view.physicalSize = const Size(1100, 700);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    final source = MemoryFiles()
+      ..directories.add('/folder')
+      ..data['/folder/new.txt'] = Uint8List.fromList([2]);
+    final target = MemoryFiles()
+      ..directories.add('/folder')
+      ..data['/folder/old.txt'] = Uint8List.fromList([1]);
+    final model = FileWorkspaceModel();
+    addTearDown(model.dispose);
+    final sourceTab = model.add(0, name: 'source', files: source);
+    final targetTab = model.add(1, name: 'target', files: target);
+    await Future.wait([sourceTab.browse('/'), targetTab.browse('/')]);
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: harborTheme().copyWith(platform: TargetPlatform.windows),
+        home: Scaffold(
+          body: FileWorkspace(
+            model: model,
+            hosts: const [],
+            sessions: const [],
+            onConnect: (_) async => null,
+            initializeLocal: false,
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    Future<void> dragFolder() async {
+      final row = find.byKey(ValueKey('entry-${sourceTab.id}-/folder'));
+      final drag = await tester.startGesture(
+        tester.getCenter(row),
+        kind: PointerDeviceKind.mouse,
+      );
+      await drag.moveBy(const Offset(24, 0));
+      await tester.pump();
+      await drag.moveTo(
+        tester.getCenter(find.byKey(const ValueKey('file-drop-panel-1'))),
+      );
+      await tester.pump();
+      await drag.up();
+      await tester.pumpAndSettle();
+    }
+
+    await dragFolder();
+    expect(find.text('覆盖 1 个同名项目？'), findsOneWidget);
+    expect(find.text('folder'), findsWidgets);
+    await tester.tap(find.byKey(const ValueKey('cancel-overwrite-files')));
+    await tester.pumpAndSettle();
+    expect(target.data['/folder/old.txt'], [1]);
+    expect(target.data.containsKey('/folder/new.txt'), isFalse);
+
+    await dragFolder();
+    target.directories.add('/other');
+    await targetTab.browse('/other');
+    await tester.tap(find.byKey(const ValueKey('confirm-overwrite-files')));
+    await tester.pumpAndSettle();
+    expect(find.text('目标目录内容已变化，请重新操作'), findsOneWidget);
+    expect(target.data['/folder/old.txt'], [1]);
+    expect(target.data.containsKey('/folder/new.txt'), isFalse);
+    await targetTab.browse('/');
+    await tester.pumpAndSettle();
+
+    await dragFolder();
+    await tester.tap(find.byKey(const ValueKey('confirm-overwrite-files')));
+    await tester.pumpAndSettle();
+    expect(target.data.containsKey('/folder/old.txt'), isFalse);
+    expect(target.data['/folder/new.txt'], [2]);
+    expect(tester.takeException(), isNull);
   });
 
   test('多标签独立目录与选择，复制固定目标，关闭不影响借用 SSH', () async {
@@ -742,7 +1112,10 @@ void main() {
       addTearDown(tester.view.resetDevicePixelRatio);
       final model = FileWorkspaceModel();
       addTearDown(model.dispose);
-      final source = MemoryFiles()..data['/file.txt'] = Uint8List.fromList([1]);
+      final source = MemoryFiles()
+        ..directories.add('/folder')
+        ..data['/folder/nested.txt'] = Uint8List.fromList([2])
+        ..data['/file.txt'] = Uint8List.fromList([1]);
       final a = model.add(0, name: '本地文件夹', files: source, isLocal: true);
       final second = model.add(0, name: '开发服务器', files: MemoryFiles());
       model.activate(0, a.id);
@@ -847,8 +1220,31 @@ void main() {
         await tester.pump();
         await drag.up();
         await tester.pumpAndSettle();
+        final folderRow = find.byKey(ValueKey('entry-${a.id}-/folder'));
+        expect(
+          find.ancestor(
+            of: folderRow,
+            matching: find.byType(Draggable<FileDragData>),
+          ),
+          findsOneWidget,
+        );
+        final folderDrag = await tester.startGesture(
+          tester.getCenter(folderRow),
+          kind: PointerDeviceKind.mouse,
+        );
+        await folderDrag.moveBy(const Offset(24, 0));
+        await tester.pump();
+        await folderDrag.moveTo(
+          tester.getCenter(find.byKey(const ValueKey('file-drop-panel-1'))),
+        );
+        await tester.pump();
+        await folderDrag.up();
+        await tester.pumpAndSettle();
       }
-      expect(b.entries.single.name, 'file.txt');
+      expect(b.entries.map((entry) => entry.name), contains('file.txt'));
+      if (!mobile) {
+        expect(b.entries.map((entry) => entry.name), contains('folder'));
+      }
       await tester.ensureVisible(find.byKey(ValueKey('file-tab-${second.id}')));
       await tester.pumpAndSettle();
       await tester.tap(find.byKey(ValueKey('file-tab-${second.id}')));
@@ -947,8 +1343,13 @@ void main() {
 }
 
 class MemoryFiles implements RemoteFileSystem {
+  @override
+  String childPath(String directory, String name) =>
+      remoteChild(directory, name);
   String? failDeletePath;
   Completer<void>? deleteGate;
+  Completer<void>? createDirectoryGate;
+  bool failPublish = false;
   @override
   Future<void> deleteFile(String path) async {
     if (deleteGate != null) await deleteGate!.future;
@@ -956,21 +1357,90 @@ class MemoryFiles implements RemoteFileSystem {
     if (data.remove(path) == null) throw StateError('missing file');
   }
 
+  final directories = <String>{'/'};
+
+  @override
+  Future<void> createDirectory(String path) async {
+    if (createDirectoryGate != null) await createDirectoryGate!.future;
+    if (directories.contains(path) || data.containsKey(path)) {
+      throw StateError('already exists');
+    }
+    directories.add(path);
+  }
+
+  @override
+  Future<void> deleteDirectory(String path, {bool recursive = false}) async {
+    if (!directories.contains(path)) throw StateError('missing directory');
+    final prefix = path.endsWith('/') ? path : '$path/';
+    final children =
+        directories.any((item) => item.startsWith(prefix)) ||
+        data.keys.any((item) => item.startsWith(prefix));
+    if (children && !recursive) throw StateError('directory not empty');
+    directories.removeWhere((item) => item == path || item.startsWith(prefix));
+    data.removeWhere((item, _) => item.startsWith(prefix));
+  }
+
+  @override
+  Future<void> renameExclusive(String oldPath, String newPath) async {
+    if (failPublish &&
+        oldPath.split('/').last.startsWith('.harbor-incoming-')) {
+      throw StateError('publish failed');
+    }
+    if (directories.contains(newPath) || data.containsKey(newPath)) {
+      throw StateError('already exists');
+    }
+    final file = data.remove(oldPath);
+    if (file != null) {
+      data[newPath] = file;
+      if (failBackupAfterMove &&
+          !oldPath.split('/').last.startsWith('.harbor-')) {
+        failBackupAfterMove = false;
+        throw StateError('rename reply lost');
+      }
+      return;
+    }
+    if (!directories.contains(oldPath)) throw StateError('missing entry');
+    final prefix = '$oldPath/';
+    final movedDirectories = [
+      for (final item in directories)
+        if (item == oldPath || item.startsWith(prefix)) item,
+    ];
+    final movedFiles = {
+      for (final entry in data.entries)
+        if (entry.key.startsWith(prefix)) entry.key: entry.value,
+    };
+    directories.removeAll(movedDirectories);
+    data.removeWhere((path, _) => movedFiles.containsKey(path));
+    for (final path in movedDirectories) {
+      directories.add('$newPath${path.substring(oldPath.length)}');
+    }
+    for (final entry in movedFiles.entries) {
+      data['$newPath${entry.key.substring(oldPath.length)}'] = entry.value;
+    }
+  }
+
   final data = <String, Uint8List>{};
-  bool failRead = false, failWrite = false;
+  bool failRead = false, failWrite = false, failBackupAfterMove = false;
   int readBytes = 0;
   Completer<void>? writeGate;
   int writeGateAfterBytes = 0;
   @override
-  Future<RemoteDirectory> browse(String path) async =>
-      RemoteDirectory(path == '~' ? '/' : path, [
-        for (final entry in data.entries)
+  Future<RemoteDirectory> browse(String path) async {
+    final directory = path == '~' ? '/' : path;
+    return RemoteDirectory(directory, [
+      for (final item in directories)
+        if (item != directory && remoteParent(item) == directory)
+          RemoteFile(name: item.split('/').last, path: item, isDirectory: true),
+      for (final entry in data.entries)
+        if (remoteParent(entry.key) == directory)
           RemoteFile(
             name: entry.key.split('/').last,
             path: entry.key,
             size: entry.value.length,
           ),
-      ]);
+    ]);
+  }
+
   @override
   Future<void> download(
     String path,
@@ -1001,7 +1471,9 @@ class MemoryFiles implements RemoteFileSystem {
     required TransferCancellation cancellation,
     required void Function(int) onProgress,
   }) async {
-    if (data.containsKey(path)) throw StateError('already exists');
+    if (data.containsKey(path) || directories.contains(path)) {
+      throw StateError('already exists');
+    }
     final bytes = BytesBuilder();
     await for (final chunk in source) {
       if (writeGate != null && bytes.length >= writeGateAfterBytes) {

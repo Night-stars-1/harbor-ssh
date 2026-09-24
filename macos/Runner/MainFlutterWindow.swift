@@ -1,4 +1,5 @@
 import Cocoa
+import Darwin
 import FlutterMacOS
 import window_manager
 
@@ -79,6 +80,20 @@ class MainFlutterWindow: NSWindow {
           code: "bookmark",
           message: "无法保存目录访问权限",
           details: nil))
+      }
+    case "createDirectoryExclusive":
+      guard let arguments = call.arguments as? [String: Any],
+            let path = arguments["path"] as? String else {
+        result(FlutterError(code: "arguments", message: "目录参数无效", details: nil))
+        return
+      }
+      if Darwin.mkdir(path, mode_t(0o755)) == 0 {
+        result(nil)
+      } else {
+        result(FlutterError(
+          code: "mkdir",
+          message: String(cString: strerror(errno)),
+          details: errno))
       }
     case "restoreDirectory":
       guard let arguments = call.arguments as? [String: Any],

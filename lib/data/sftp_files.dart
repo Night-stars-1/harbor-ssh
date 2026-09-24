@@ -77,6 +77,91 @@ class SftpFiles implements RemoteFileSystem {
   });
 
   @override
+  String childPath(String directory, String name) =>
+      remoteChild(directory, name);
+
+  @override
+  Future<void> createDirectory(String path) =>
+      _run((client) => client.mkdir(path).timeout(_timeout));
+
+  @override
+  Future<void> deleteDirectory(String path, {bool recursive = false}) =>
+      _run((client) => _deleteDirectory(client, path, recursive: recursive));
+
+  Future<void> _deleteDirectory(
+    SftpClient client,
+    String path, {
+    required bool recursive,
+  }) async {
+    final current = await client
+        .stat(path, followLink: false)
+        .timeout(_timeout);
+    if (current.isSymbolicLink || !current.isDirectory) {
+      await client.remove(path).timeout(_timeout);
+      return;
+    }
+    if (recursive) {
+      final entries = await client.listdir(path).timeout(_timeout);
+      for (final entry in entries) {
+        if (entry.filename == '.' || entry.filename == '..') continue;
+        if (entry.filename.contains('/') || entry.filename.contains('\x00')) {
+          throw const FormatException('服务器返回了无效文件名');
+        }
+        final child = remoteChild(path, entry.filename);
+        final childAttrs = await client
+            .stat(child, followLink: false)
+            .timeout(_timeout);
+        if (childAttrs.isDirectory && !childAttrs.isSymbolicLink) {
+          await _deleteDirectory(client, child, recursive: true);
+        } else {
+          await client.remove(child).timeout(_timeout);
+        }
+      }
+    }
+    await client.rmdir(path).timeout(_timeout);
+  }
+
+  @override
+  Future<void> renameExclusive(String oldPath, String newPath) async {
+    try {
+      await _run((client) async {
+        final handshake = await client.handshake.timeout(_timeout);
+        final posixRename = handshake.extensions.remove(
+          'posix-rename@openssh.com',
+        );
+        try {
+          await client.rename(oldPath, newPath).timeout(_timeout);
+        } finally {
+          if (posixRename != null) {
+            handshake.extensions['posix-rename@openssh.com'] = posixRename;
+          }
+        }
+      });
+    } catch (error, stack) {
+      if (error is! TimeoutException && error is! SftpAbortError) {
+        Error.throwWithStackTrace(error, stack);
+      }
+      try {
+        final state = await _run((client) async {
+          Future<bool> exists(String path) async {
+            try {
+              await client.stat(path, followLink: false).timeout(_timeout);
+              return true;
+            } on SftpStatusError catch (status) {
+              if (status.code == SftpStatusCode.noSuchFile) return false;
+              rethrow;
+            }
+          }
+
+          return (old: await exists(oldPath), next: await exists(newPath));
+        });
+        if (!state.old && state.next) return;
+      } catch (_) {}
+      Error.throwWithStackTrace(error, stack);
+    }
+  }
+
+  @override
   Future<void> upload(
     String path,
     Stream<Uint8List> source, {
