@@ -102,7 +102,13 @@ class _GitHubSignInState extends State<GitHubSignIn> {
       await _openPage(code);
       final account = await auth.waitForAuthorization(code);
       if (!mounted || _cancelRequested) return;
-      await widget.controller.saveGitHubAccount(account.token, account.login);
+      await widget.controller.saveGitHubAccount(
+        account.token,
+        account.login,
+        refreshToken: account.refreshToken,
+        expiresAt: account.expiresAt,
+        refreshExpiresAt: account.refreshExpiresAt,
+      );
       if (mounted) showSettingsNotice(context, '已登录 GitHub：${account.login}');
     } on GitHubAuthCancelled {
       // Cancellation and leaving the page never replace existing credentials.
@@ -156,6 +162,7 @@ class _GitHubSignInState extends State<GitHubSignIn> {
       final config = widget.controller.settings;
       final signedIn = config?.token.isNotEmpty == true;
       final login = config?.githubLogin ?? '';
+      final needsRenewableLogin = signedIn && config!.refreshToken.isEmpty;
       final code = _code;
       final busy = _auth != null || _signingOut || !widget.enabled;
       if (code != null) return _authorizationPanel(context, code);
@@ -189,6 +196,18 @@ class _GitHubSignInState extends State<GitHubSignIn> {
               ],
             ),
           ),
+          if (needsRenewableLogin)
+            Padding(
+              padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
+              child: Align(
+                alignment: Alignment.centerLeft,
+                child: Text(
+                  '当前登录无法自动续期，请重新登录一次',
+                  style: Theme.of(context).textTheme.bodySmall
+                      ?.copyWith(color: Theme.of(context).colorScheme.tertiary),
+                ),
+              ),
+            ),
           if (_auth != null)
             Align(
               alignment: Alignment.centerRight,

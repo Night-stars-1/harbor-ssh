@@ -65,6 +65,11 @@ class SettingsWindowHost {
           await controller.saveGitHubAccount(
             account['token'] as String,
             account['login'] as String,
+            refreshToken: account['refreshToken'] as String? ?? '',
+            expiresAt: DateTime.tryParse(account['expiresAt'] as String? ?? ''),
+            refreshExpiresAt: DateTime.tryParse(
+              account['refreshExpiresAt'] as String? ?? '',
+            ),
           );
         case 'test':
           await controller.test(
@@ -176,8 +181,19 @@ class RemoteSyncSettingsController extends SyncSettingsController {
   Future<void> save(CloudSyncConfig settings) =>
       _request('save', settings.toJson());
   @override
-  Future<void> saveGitHubAccount(String token, String login) =>
-      _request('saveGitHubAccount', {'token': token, 'login': login});
+  Future<void> saveGitHubAccount(
+    String token,
+    String login, {
+    String refreshToken = '',
+    DateTime? expiresAt,
+    DateTime? refreshExpiresAt,
+  }) => _request('saveGitHubAccount', {
+    'token': token,
+    'login': login,
+    'refreshToken': refreshToken,
+    'expiresAt': expiresAt?.toUtc().toIso8601String(),
+    'refreshExpiresAt': refreshExpiresAt?.toUtc().toIso8601String(),
+  });
   @override
   Future<void> sync({SyncConflictChoice? choice}) =>
       _request('sync', choice?.name);

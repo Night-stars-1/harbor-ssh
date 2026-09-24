@@ -79,7 +79,13 @@ void main() {
       expect(field('目录地址'), findsNothing);
       expect(field('GitHub Token'), findsNothing);
       expect(find.text('网页登录'), findsOneWidget);
-      await controller.saveGitHubAccount('github-test-token', 'harbor-user');
+      await controller.saveGitHubAccount(
+        'github-test-token',
+        'harbor-user',
+        refreshToken: 'rotating-refresh',
+        expiresAt: DateTime.utc(2026, 9, 25, 8),
+        refreshExpiresAt: DateTime.utc(2027, 3, 25),
+      );
       await tester.pumpAndSettle();
       expect(find.text('@harbor-user'), findsOneWidget);
       await tester.ensureVisible(field('加密密码'));
@@ -97,11 +103,14 @@ void main() {
       expect(model.cloudSync.settings!.provider, SyncProvider.gist);
       expect(field('Gist ID'), findsNothing);
       expect(model.cloudSync.settings!.gistId, '0123456789abcdef');
+      expect(model.cloudSync.settings!.refreshToken, 'rotating-refresh');
+      expect(model.cloudSync.settings!.expiresAt, DateTime.utc(2026, 9, 25, 8));
       await tester.pumpWidget(page(1));
       await tester.pumpAndSettle();
       expect(field('Gist ID'), findsNothing);
       expect(field('GitHub Token'), findsNothing);
       expect(find.text('@harbor-user'), findsOneWidget);
+      expect(model.cloudSync.settings!.refreshToken, 'rotating-refresh');
       expect(tester.takeException(), isNull);
       await tester.pumpWidget(const SizedBox.shrink());
     });

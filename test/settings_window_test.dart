@@ -113,13 +113,24 @@ void main() {
     expect(remote.settings!.toJson(), gist.toJson());
     await remote.initialize();
     expect(remote.settings!.toJson(), gist.toJson());
-    await remote.saveGitHubAccount('oauth-test-token', 'harbor-user');
+    await remote.saveGitHubAccount(
+      'oauth-test-token',
+      'harbor-user',
+      refreshToken: 'rotating-refresh',
+      expiresAt: DateTime.utc(2026, 9, 25, 8),
+      refreshExpiresAt: DateTime.utc(2027, 3, 25),
+    );
     expect(model.cloudSync.settings!.token, 'oauth-test-token');
     expect(remote.settings!.githubLogin, 'harbor-user');
+    expect(remote.settings!.refreshToken, 'rotating-refresh');
+    expect(remote.settings!.expiresAt, DateTime.utc(2026, 9, 25, 8));
+    expect(remote.settings!.refreshExpiresAt, DateTime.utc(2027, 3, 25));
     expect(remote.settings!.gistId, isEmpty);
     await remote.saveGitHubAccount('', '');
     expect(remote.settings!.token, isEmpty);
     expect(remote.settings!.githubLogin, isEmpty);
+    expect(remote.settings!.refreshToken, isEmpty);
+    expect(remote.settings!.expiresAt, isNull);
     expect(remote.settings!.automatic, isFalse);
   });
 }

@@ -95,6 +95,9 @@ class _CloudSyncSettingsState extends State<CloudSyncSettings> {
     gistId: widget.controller.settings?.gistId ?? '',
     token: widget.controller.settings?.token ?? '',
     githubLogin: widget.controller.settings?.githubLogin ?? '',
+    refreshToken: widget.controller.settings?.refreshToken ?? '',
+    expiresAt: widget.controller.settings?.expiresAt,
+    refreshExpiresAt: widget.controller.settings?.refreshExpiresAt,
     url: _url.text.trim(),
     username: _username.text.trim(),
     password: _password.text,
@@ -265,9 +268,10 @@ class _CloudSyncSettingsState extends State<CloudSyncSettings> {
                       ),
                     ),
                     dropdownMenuEntries: [
-                      for (final provider in preferGitHubSync
-                          ? const [SyncProvider.gist, SyncProvider.webdav]
-                          : SyncProvider.values)
+                      for (final provider
+                          in preferGitHubSync
+                              ? const [SyncProvider.gist, SyncProvider.webdav]
+                              : SyncProvider.values)
                         DropdownMenuEntry(
                           value: provider,
                           label: provider == SyncProvider.webdav

@@ -21,7 +21,13 @@ abstract class SyncSettingsController extends ChangeNotifier {
   Future<void> saveDefaultLocalPath(String path);
   Future<void> test(CloudSyncConfig settings);
   Future<void> save(CloudSyncConfig settings);
-  Future<void> saveGitHubAccount(String token, String login);
+  Future<void> saveGitHubAccount(
+    String token,
+    String login, {
+    String refreshToken = '',
+    DateTime? expiresAt,
+    DateTime? refreshExpiresAt,
+  });
   Future<void> sync({SyncConflictChoice? choice});
 }
 
@@ -62,8 +68,19 @@ class LocalSyncSettingsController extends SyncSettingsController {
   @override
   Future<void> save(CloudSyncConfig settings) => model.configureSync(settings);
   @override
-  Future<void> saveGitHubAccount(String token, String login) =>
-      model.saveGitHubAccount(token, login);
+  Future<void> saveGitHubAccount(
+    String token,
+    String login, {
+    String refreshToken = '',
+    DateTime? expiresAt,
+    DateTime? refreshExpiresAt,
+  }) => model.saveGitHubAccount(
+    token,
+    login,
+    refreshToken: refreshToken,
+    expiresAt: expiresAt,
+    refreshExpiresAt: refreshExpiresAt,
+  );
   @override
   Future<void> sync({SyncConflictChoice? choice}) =>
       model.syncNow(choice: choice);

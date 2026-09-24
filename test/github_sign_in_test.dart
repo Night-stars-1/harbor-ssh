@@ -85,18 +85,29 @@ void main() {
       expect(copies, ['ABCD-EFGH', 'ABCD-EFGH']);
       expect(tester.takeException(), isNull);
       auth.result.complete(
-        const GitHubAccount(token: 'oauth-token', login: 'harbor-user'),
+        GitHubAccount(
+          token: 'oauth-token',
+          login: 'harbor-user',
+          refreshToken: 'rotating-refresh',
+          expiresAt: DateTime.utc(2026, 9, 25, 8),
+          refreshExpiresAt: DateTime.utc(2027, 3, 25),
+        ),
       );
       await tester.pumpAndSettle();
       expect(find.text('@harbor-user'), findsOneWidget);
       expect(find.text('ABCD-EFGH'), findsNothing);
       expect(model.cloudSync.settings!.token, 'oauth-token');
+      expect(model.cloudSync.settings!.refreshToken, 'rotating-refresh');
+      expect(model.cloudSync.settings!.expiresAt, DateTime.utc(2026, 9, 25, 8));
+      expect(find.text('当前登录无法自动续期，请重新登录一次'), findsNothing);
       expect(busy, [true, false]);
       expect(tester.takeException(), isNull);
       await tester.tap(find.text('退出登录'));
       await tester.pumpAndSettle();
       expect(find.text('未登录'), findsOneWidget);
       expect(model.cloudSync.settings!.token, isEmpty);
+      expect(model.cloudSync.settings!.refreshToken, isEmpty);
+      expect(model.cloudSync.settings!.expiresAt, isNull);
       await tester.pumpWidget(const SizedBox.shrink());
     });
   }
@@ -231,6 +242,7 @@ void main() {
         ),
       ),
     );
+    expect(find.text('当前登录无法自动续期，请重新登录一次'), findsOneWidget);
     await tester.tap(find.text('重新登录'));
     await tester.pumpAndSettle();
     expect(find.text('ABCD-EFGH'), findsOneWidget);
