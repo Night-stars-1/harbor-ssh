@@ -172,6 +172,37 @@ class _AppearanceSettingsState extends State<AppearanceSettings> {
                             _save(appearance.copyWith(terminalWrap: enabled)),
                 ),
               ),
+              SettingsRow(
+                title: '状态刷新间隔',
+                description: 'CPU、内存、存储和网络状态。只保存在本机',
+                inline: true,
+                control: DropdownButtonHideUnderline(
+                  child: DropdownButton<int>(
+                    key: const ValueKey('status-refresh-interval'),
+                    value: appearance.statusRefreshSeconds,
+                    borderRadius: BorderRadius.circular(16),
+                    onChanged: _saving
+                        ? null
+                        : (seconds) {
+                            if (seconds != null &&
+                                seconds != appearance.statusRefreshSeconds) {
+                              _save(
+                                appearance.copyWith(
+                                  statusRefreshSeconds: seconds,
+                                ),
+                              );
+                            }
+                          },
+                    items: [
+                      for (final seconds in statusRefreshIntervalOptions)
+                        DropdownMenuItem(
+                          value: seconds,
+                          child: Text('$seconds 秒'),
+                        ),
+                    ],
+                  ),
+                ),
+              ),
             ],
           ),
         ],

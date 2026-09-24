@@ -13,6 +13,7 @@ import 'host_repository.dart';
 import 'terminal_ai.dart';
 import 'ssh_ai_executor.dart';
 import 'remote_commands.dart';
+import 'remote_metrics.dart';
 import 'sftp_files.dart';
 import '../domain/remote_file.dart';
 
@@ -244,6 +245,58 @@ class SshConnection extends ChangeNotifier {
     } catch (_) {
       // Restricted servers may reject exec requests. History stays available.
       return const [];
+    } finally {
+      query?.close();
+    }
+  }
+
+  /// Read host load through a separate exec channel; never writes to the
+  /// user's PTY and never interpolates user input.
+  ///
+  /// Returns null whenever the probe cannot be trusted: no live connection, a
+  /// non-Linux host, a non-zero exit status, a timeout, or output that fails
+  /// strict validation.
+  Future<RemoteMetricsSample?> readRemoteMetrics() async {
+    final client = _client;
+    if (client == null || _closed || status != ConnectionStatus.connected) {
+      return null;
+    }
+    SSHSession? query;
+    try {
+      final opening = client.execute(remoteMetricsQuery);
+      try {
+        query = await opening.timeout(const Duration(seconds: 5));
+      } on TimeoutException {
+        unawaited(
+          opening
+              .then((lateSession) => lateSession.close())
+              .catchError((Object _) {}),
+        );
+        rethrow;
+      }
+      if (_closed) return null;
+      unawaited(query.stdin.close().catchError((Object _) {}));
+      final bytes = BytesBuilder(copy: false);
+      await Future.wait<void>([
+        query.stdout.forEach((chunk) {
+          // Per-core, per-process and per-mount rows are all legitimate, so the
+          // cap only has to stop a runaway probe; the probe itself is bounded.
+          if (bytes.length + chunk.length > 262144) {
+            throw StateError('Remote metrics output is too large');
+          }
+          bytes.add(chunk);
+        }),
+        query.stderr.drain<void>(),
+        query.done.then((_) {}),
+      ]).timeout(const Duration(seconds: 5));
+      if (_closed || query.exitCode != 0) return null;
+      return parseRemoteMetrics(
+        utf8.decode(bytes.takeBytes(), allowMalformed: true),
+      );
+    } catch (_) {
+      // Restricted servers may reject exec requests; the status bar simply
+      // reports that metrics are unavailable.
+      return null;
     } finally {
       query?.close();
     }

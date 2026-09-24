@@ -1,12 +1,16 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter/gestures.dart';
 import 'package:flutter/services.dart';
 import 'package:xterm/xterm.dart';
 
 import '../data/ssh_connection.dart';
+import '../data/remote_metrics.dart';
 import '../data/web_link.dart';
 import '../data/terminal_ai.dart';
 import 'ai_task_controller.dart';
+import 'remote_status_bar.dart';
 import 'terminal_ai_panel.dart';
 import 'terminal_links.dart';
 import 'terminal_completion.dart';
@@ -30,6 +34,8 @@ class TerminalPane extends StatefulWidget {
     this.maxErrorHeight = 180,
     this.fontSize = 14,
     this.terminalWrap = true,
+    this.statusRefreshSeconds = 5,
+    this.statusVisible = true,
     this.aiSettings,
     this.onAiSettings,
   });
@@ -47,6 +53,11 @@ class TerminalPane extends StatefulWidget {
   final double maxErrorHeight;
   final double fontSize;
   final bool terminalWrap;
+  final int statusRefreshSeconds;
+
+  /// Whether this pane is actually on screen; hidden panes stop sampling and
+  /// hide the status strip without losing the terminal buffer.
+  final bool statusVisible;
   final AiSettings Function()? aiSettings;
   final VoidCallback? onAiSettings;
   @override
@@ -93,6 +104,73 @@ class _TerminalPaneState extends State<TerminalPane> {
   final _completionStackKey = GlobalKey();
   Rect? _completionCaret;
   bool _completionGeometryPending = false;
+
+  // Remote metrics use a configurable single-flight timer that runs only
+  // while this pane is visible and connected. Results carry a generation so
+  // a rebind, disconnect or hide discards anything that lands late instead
+  // of painting stale values into the status strip.
+  Timer? _metricsTimer;
+  RemoteMetricsSample? _metricsSample;
+  RemoteHostMetrics? _metrics;
+  bool _metricsLoading = false;
+  bool _metricsInFlight = false;
+  int _metricsGeneration = 0;
+
+  bool get _metricsEligible =>
+      widget.statusVisible &&
+      widget.session.status == ConnectionStatus.connected;
+
+  void _syncMetrics() {
+    if (!mounted || !_metricsEligible) {
+      _stopMetrics();
+      return;
+    }
+    _metricsTimer ??= Timer.periodic(
+      Duration(seconds: widget.statusRefreshSeconds),
+      (_) => _sampleMetrics(),
+    );
+    if (_metrics == null && !_metricsInFlight) unawaited(_sampleMetrics());
+  }
+
+  void _stopMetrics({bool notify = true}) {
+    _metricsTimer?.cancel();
+    _metricsTimer = null;
+    // Invalidate any in-flight probe so its result is dropped.
+    _metricsGeneration++;
+    final wasVisible = _metrics != null || _metricsLoading;
+    _metrics = null;
+    _metricsSample = null;
+    _metricsLoading = false;
+    if (notify && wasVisible && mounted) setState(() {});
+  }
+
+  Future<void> _sampleMetrics() async {
+    if (_metricsInFlight) return;
+    if (!mounted || !_metricsEligible) return;
+    _metricsInFlight = true;
+    final generation = _metricsGeneration;
+    final session = widget.session;
+    setState(() => _metricsLoading = true);
+    RemoteMetricsSample? sample;
+    try {
+      sample = await session.readRemoteMetrics();
+    } catch (_) {
+      sample = null;
+    }
+    _metricsInFlight = false;
+    if (!mounted || generation != _metricsGeneration) return;
+    setState(() {
+      _metricsLoading = false;
+      if (sample == null) {
+        // Never fabricate zeros: drop the strip back to "unavailable".
+        _metrics = null;
+        _metricsSample = null;
+      } else {
+        _metrics = RemoteHostMetrics.fromSamples(sample, _metricsSample);
+        _metricsSample = sample;
+      }
+    });
+  }
 
   void _queueCompletionGeometry() {
     if (_completionGeometryPending || _completion?.entries.isNotEmpty != true) {
@@ -161,12 +239,15 @@ class _TerminalPaneState extends State<TerminalPane> {
         constraints: BoxConstraints(
           maxHeight: (constraints.maxHeight - top - 4).clamp(0.0, height),
         ),
-        child: TerminalCompletionList(
-          completion: completion,
-          onAccept: (index) {
-            completion.accept(index);
-            _focus.requestFocus();
-          },
+        child: TapRegion(
+          onTapOutside: (_) => completion.dismiss(),
+          child: TerminalCompletionList(
+            completion: completion,
+            onAccept: (index) {
+              completion.accept(index);
+              _focus.requestFocus();
+            },
+          ),
         ),
       ),
     );
@@ -179,6 +260,7 @@ class _TerminalPaneState extends State<TerminalPane> {
     _focus.addListener(_reportFocus);
     _listenForLinkHover();
     _applyLineWrap();
+    _syncMetrics();
   }
 
   void _reportFocus() {
@@ -201,6 +283,7 @@ class _TerminalPaneState extends State<TerminalPane> {
     if (widget.session.status != ConnectionStatus.connected) {
       _ai?.stop(message: 'SSH 已断开，AI 任务已停止');
     }
+    _syncMetrics();
   }
 
   @override
@@ -213,6 +296,9 @@ class _TerminalPaneState extends State<TerminalPane> {
     _completionCaret = null;
     widget.controller?._state = this;
     _listenForLinkHover();
+    // Samples retained by hot reload may predate added metric fields.
+    _stopMetrics(notify: false);
+    _syncMetrics();
   }
 
   @override
@@ -235,6 +321,16 @@ class _TerminalPaneState extends State<TerminalPane> {
       oldWidget.session.terminal.removeListener(_scheduleHoverRefresh);
       widget.session.terminal.addListener(_scheduleHoverRefresh);
       _hoverPosition = null;
+      // A different session invalidates the previous counters entirely.
+      _stopMetrics();
+      _syncMetrics();
+    } else if (oldWidget.statusVisible != widget.statusVisible ||
+        oldWidget.statusRefreshSeconds != widget.statusRefreshSeconds) {
+      if (oldWidget.statusRefreshSeconds != widget.statusRefreshSeconds) {
+        _metricsTimer?.cancel();
+        _metricsTimer = null;
+      }
+      _syncMetrics();
     }
   }
 
@@ -262,6 +358,7 @@ class _TerminalPaneState extends State<TerminalPane> {
 
   @override
   void dispose() {
+    _stopMetrics(notify: false);
     widget.session.removeListener(_connectionChanged);
     _ai?.dispose();
     _focus.removeListener(_completionChanged);
@@ -521,6 +618,14 @@ class _TerminalPaneState extends State<TerminalPane> {
               ),
             ),
           ),
+        Offstage(
+          offstage: !widget.statusVisible,
+          child: RemoteStatusBar(
+            metrics: _metrics,
+            connected: connected,
+            loading: _metricsLoading,
+          ),
+        ),
         if (session.status == ConnectionStatus.connecting)
           const LinearProgressIndicator(minHeight: 2),
         if (session.error != null)

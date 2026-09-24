@@ -136,6 +136,46 @@ void main() {
     });
   }
 
+  for (final size in [const Size(1200, 700), const Size(320, 650)]) {
+    testWidgets('点击命令面板外收起，当前输入不反复弹出 ${size.width}', (tester) async {
+      tester.view.physicalSize = size;
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+      final session = _SpecSession();
+      addTearDown(session.dispose);
+      final output = <String>[];
+      session.terminal.onOutput = output.add;
+      await tester.pumpWidget(
+        MaterialApp(
+          theme: harborTheme(),
+          home: Scaffold(
+            body: TerminalPane(session: session, onReconnect: () {}),
+          ),
+        ),
+      );
+      session.terminal.write('root@host:~# docker ');
+      await tester.pumpAndSettle(const Duration(milliseconds: 200));
+      final popup = find.byType(TerminalCompletionList);
+      expect(popup, findsOneWidget);
+      final outside = Offset(size.width - 12, size.height - 110);
+      expect(tester.getRect(popup).contains(outside), isFalse);
+      await tester.tapAt(outside);
+      await tester.pumpAndSettle(const Duration(milliseconds: 200));
+      expect(popup, findsNothing);
+      expect(output, isEmpty);
+
+      session.terminal.write('\x1b[0m');
+      await tester.pumpAndSettle(const Duration(milliseconds: 200));
+      expect(popup, findsNothing);
+      session.terminal.write('att');
+      await tester.pumpAndSettle(const Duration(milliseconds: 200));
+      expect(popup, findsOneWidget);
+      expect(tester.takeException(), isNull);
+      await tester.pumpWidget(const SizedBox.shrink());
+    });
+  }
+
   testWidgets('快速滚轮与悬停不跳底，方向键只滚动到候选可见', (tester) async {
     final session = _SpecSession();
     addTearDown(session.dispose);

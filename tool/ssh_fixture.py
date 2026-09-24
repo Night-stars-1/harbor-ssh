@@ -133,6 +133,7 @@ class Server(paramiko.ServerInterface):
         self.shell_channel = None
         self.width, self.height = 80, 24
         self.catalog_queries = 0
+        self.metrics_queries = 0
     def get_allowed_auths(self, username):
         return "password,publickey"
     def check_auth_password(self, username, password):
@@ -168,6 +169,36 @@ class Server(paramiko.ServerInterface):
                 except (EOFError, OSError, paramiko.SSHException):
                     pass
             threading.Timer(0.02, ai_reply).start()
+            return True
+        if command.startswith(b"sh -c ") and b"__HARBOR_REMOTE_METRICS_BEGIN__" in command:
+            self.metrics_queries += 1
+            count = self.metrics_queries - 1
+            def metrics_reply():
+                try:
+                    # Fixed virtual Linux procfs results; never run a client command.
+                    channel.sendall((
+                        "login banner\n__HARBOR_REMOTE_METRICS_BEGIN__\n"
+                        "os Linux\n"
+                        f"cpu {100 + 50 * count} 0 {50 + 25 * count} {1000 + 10 * count} 10 0 0 0\n"
+                        f"core cpu0 {100 + 50 * count} 0 {50 + 25 * count} {1000 + 10 * count} 10 0 0 0\n"
+                        f"core cpu1 {100 + 25 * count} 0 {50 + 10 * count} {1000 + 50 * count} 10 0 0 0\n"
+                        f"uptime {12345.67 + 5 * count}\n"
+                        "memtotal 16316420 kB\nmemavail 8000000 kB\n"
+                        "iface eth0\n"
+                        f"net {1000000 + 500000 * count} {2000000 + 250000 * count}\n"
+                        "processes-ok\nprocess 123 65536 postgres\nprocess 456 32768 node worker\n"
+                        "disks-ok\n"
+                        "df tmpfs tmpfs 4096 128 3968 4% /run\n"
+                        "df overlay overlay 10240000 4096000 6144000 40% /var/lib/docker/overlay2/test/merged\n"
+                        "df /dev/sdb1 ext4 20480000 10240000 9216000 53% /data volume\n"
+                        "df /dev/sda1 ext4 10240000 4096000 6144000 40% /\n"
+                        "__HARBOR_REMOTE_METRICS_END__\n"
+                    ).encode())
+                    channel.send_exit_status(0)
+                    channel.close()
+                except (EOFError, OSError, paramiko.SSHException):
+                    pass
+            threading.Timer(0.02, metrics_reply).start()
             return True
         if not command.startswith(b"sh -c ") or b"__HARBOR_COMMANDS_BEGIN__" not in command:
             return False

@@ -748,6 +748,10 @@ class _WorkspaceState extends State<Workspace> {
                                                 .appearance
                                                 .value
                                                 .terminalWrap,
+                                            statusRefreshSeconds: model
+                                                .appearance
+                                                .value
+                                                .statusRefreshSeconds,
                                             desktop: wide,
                                             visible:
                                                 !model.showingSettings &&

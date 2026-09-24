@@ -6,7 +6,9 @@ import 'expressive_widgets.dart';
 import 'reorderable_host_collection.dart';
 import 'theme.dart';
 import '../domain/remote_file.dart';
+import '../data/remote_metrics.dart';
 import 'remote_file_tile.dart';
+import 'remote_status_bar.dart';
 
 @Preview(
   name: 'SFTP file list',
@@ -305,4 +307,198 @@ Widget harborLargeTextPreview() => MaterialApp(
       ),
     ),
   ),
+);
+
+/// Deterministic sample used by the remote status bar previews: eight unevenly
+/// loaded cores, a top process list and several mounts, so every detail panel
+/// has real content to show.
+const _remoteCpuCores = <RemoteCpuCore>[
+  RemoteCpuCore(id: 'cpu0', percent: 18),
+  RemoteCpuCore(id: 'cpu1', percent: 4),
+  RemoteCpuCore(id: 'cpu2', percent: 42),
+  RemoteCpuCore(id: 'cpu3', percent: 76),
+  RemoteCpuCore(id: 'cpu4', percent: 93),
+  RemoteCpuCore(id: 'cpu5', percent: 27),
+  RemoteCpuCore(id: 'cpu6', percent: 61),
+  RemoteCpuCore(id: 'cpu7', percent: 8),
+];
+
+const _remoteProcesses = <RemoteMemoryProcess>[
+  RemoteMemoryProcess(pid: 1123, name: 'postgres', residentBytes: 812582912),
+  RemoteMemoryProcess(pid: 948, name: 'node', residentBytes: 431226880),
+  RemoteMemoryProcess(
+    pid: 41,
+    name: 'systemd-journald',
+    residentBytes: 201326592,
+  ),
+  RemoteMemoryProcess(pid: 1502, name: 'python3', residentBytes: 178257920),
+  RemoteMemoryProcess(pid: 733, name: 'sshd', residentBytes: 96468992),
+  RemoteMemoryProcess(
+    pid: 2044,
+    name: 'containerd-shim-runc-v2',
+    residentBytes: 74448896,
+  ),
+  RemoteMemoryProcess(pid: 611, name: 'dockerd', residentBytes: 62914560),
+  RemoteMemoryProcess(
+    pid: 12,
+    name: 'kworker/0:1H-events_highpri',
+    residentBytes: 31457280,
+  ),
+];
+
+const _remoteDisks = <RemoteDiskUsage>[
+  RemoteDiskUsage(
+    device: '/dev/nvme0n1p2',
+    mountPoint: '/',
+    totalBytes: 53687091200,
+    usedBytes: 44501510144,
+    availableBytes: 9185582080,
+  ),
+  RemoteDiskUsage(
+    device: '/dev/nvme0n1p1',
+    mountPoint: '/boot/efi',
+    totalBytes: 536870912,
+    usedBytes: 62914560,
+    availableBytes: 473956352,
+  ),
+  RemoteDiskUsage(
+    device: '/dev/sdb1',
+    mountPoint: '/data',
+    totalBytes: 2199023255552,
+    usedBytes: 1469755596800,
+    availableBytes: 729267658752,
+  ),
+  RemoteDiskUsage(
+    device: '192.168.1.20:/export/media',
+    mountPoint: '/mnt/media archive',
+    totalBytes: 1099511627776,
+    usedBytes: 989560465000,
+    availableBytes: 109951162776,
+  ),
+];
+
+const _remoteMetricsSample = RemoteHostMetrics(
+  cpuPercent: 41.1,
+  memoryPercent: 61.2,
+  diskPercent: 82.9,
+  downloadBytesPerSecond: 1433600,
+  uploadBytesPerSecond: 93184,
+  memoryUsedBytes: 2453667840,
+  memoryTotalBytes: 4026531840,
+  diskUsedBytes: 44501510144,
+  diskTotalBytes: 53687091200,
+  cpuCores: _remoteCpuCores,
+  processes: _remoteProcesses,
+  processesAvailable: true,
+  disks: _remoteDisks,
+  disksAvailable: true,
+);
+
+Widget _remoteStatusPreview({
+  required Brightness brightness,
+  required double width,
+  RemoteHostMetrics? metrics = _remoteMetricsSample,
+  bool connected = true,
+  bool loading = false,
+}) => MaterialApp(
+  theme: harborTheme(brightness: brightness),
+  home: Scaffold(
+    body: Align(
+      alignment: Alignment.topCenter,
+      child: SizedBox(
+        width: width,
+        child: RemoteStatusBar(
+          metrics: metrics,
+          connected: connected,
+          loading: loading,
+        ),
+      ),
+    ),
+  ),
+);
+
+@Preview(
+  name: 'Remote status bar · 390',
+  group: 'Harbor SSH · MD3E',
+  size: Size(390, 360),
+)
+Widget harborRemoteStatusPreview() =>
+    _remoteStatusPreview(brightness: Brightness.light, width: 390);
+
+@Preview(
+  name: 'Remote status bar · 900',
+  group: 'Harbor SSH · MD3E',
+  size: Size(900, 360),
+)
+Widget harborRemoteStatusWidePreview() =>
+    _remoteStatusPreview(brightness: Brightness.light, width: 900);
+
+@Preview(
+  name: 'Remote status bar · dark 390',
+  group: 'Harbor SSH · MD3E',
+  size: Size(390, 360),
+)
+Widget harborRemoteStatusDarkPreview() =>
+    _remoteStatusPreview(brightness: Brightness.dark, width: 390);
+
+@Preview(
+  name: 'Remote status bar · dark 900',
+  group: 'Harbor SSH · MD3E',
+  size: Size(900, 360),
+)
+Widget harborRemoteStatusDarkWidePreview() =>
+    _remoteStatusPreview(brightness: Brightness.dark, width: 900);
+
+@Preview(
+  name: 'Remote status bar · narrow 320',
+  group: 'Harbor SSH · MD3E',
+  size: Size(320, 360),
+)
+Widget harborRemoteStatusNarrowPreview() =>
+    _remoteStatusPreview(brightness: Brightness.light, width: 320);
+
+@Preview(
+  name: 'Remote status bar · dark narrow 320',
+  group: 'Harbor SSH · MD3E',
+  size: Size(320, 360),
+)
+Widget harborRemoteStatusDarkNarrowPreview() =>
+    _remoteStatusPreview(brightness: Brightness.dark, width: 320);
+
+@Preview(
+  name: 'Remote status bar · first sample',
+  group: 'Harbor SSH · MD3E',
+  size: Size(390, 360),
+)
+Widget harborRemoteStatusFirstSamplePreview() => _remoteStatusPreview(
+  brightness: Brightness.light,
+  width: 390,
+  // CPU and network need two samples, so the first read shows placeholders and
+  // the per-core grid stays empty; process and mount lists are not reported yet.
+  metrics: const RemoteHostMetrics(
+    memoryPercent: 61.2,
+    diskPercent: 82.9,
+    memoryUsedBytes: 2453667840,
+    memoryTotalBytes: 4026531840,
+    diskUsedBytes: 44501510144,
+    diskTotalBytes: 53687091200,
+    cpuCores: [
+      RemoteCpuCore(id: 'cpu0'),
+      RemoteCpuCore(id: 'cpu1'),
+      RemoteCpuCore(id: 'cpu2'),
+      RemoteCpuCore(id: 'cpu3'),
+    ],
+  ),
+);
+
+@Preview(
+  name: 'Remote status bar · unavailable',
+  group: 'Harbor SSH · MD3E',
+  size: Size(390, 36),
+)
+Widget harborRemoteStatusUnavailablePreview() => _remoteStatusPreview(
+  brightness: Brightness.dark,
+  width: 390,
+  metrics: null,
+  connected: false,
 );

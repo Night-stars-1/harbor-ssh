@@ -5,6 +5,7 @@ import 'dart:typed_data';
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:harbor_ssh/data/ssh_connection.dart';
+import 'package:harbor_ssh/data/remote_metrics.dart';
 import 'package:harbor_ssh/data/terminal_ai.dart';
 import 'package:harbor_ssh/domain/host.dart';
 import 'package:harbor_ssh/domain/remote_file.dart';
@@ -142,6 +143,53 @@ void main() {
         await eventually(
           () => connection.terminal.buffer.getText().contains('ECHO=after-ai'),
         );
+      });
+      test('远端状态经独立 exec 通道采样，交互终端不收到监控命令', () async {
+        final connection = SshConnection(id: 'metrics-exec', host: host());
+        addTearDown(connection.dispose);
+        await connection.connect(
+          const Credentials(password: 'fixture-password'),
+          memoryRepository(),
+          (_, _) async => true,
+        );
+        expect(connection.status, ConnectionStatus.connected);
+        await eventually(
+          () => connection.terminal.buffer.getText().contains('测试 connected'),
+        );
+        final before = connection.terminal.buffer.getText();
+        final first = await connection.readRemoteMetrics();
+        final second = await connection.readRemoteMetrics();
+        expect(first, isNotNull);
+        expect(second, isNotNull);
+        final metrics = RemoteHostMetrics.fromSamples(second!, first);
+        expect(metrics.cpuPercent, greaterThan(0));
+        expect(metrics.memoryPercent, greaterThan(0));
+        expect(metrics.diskPercent, closeTo(40, 0.01));
+        expect(metrics.downloadBytesPerSecond, closeTo(100000, 0.01));
+        expect(metrics.uploadBytesPerSecond, closeTo(50000, 0.01));
+        expect(metrics.cpuCores.map((core) => core.id), ['cpu0', 'cpu1']);
+        expect(metrics.cpuCores.first.percent, closeTo(75 / 85 * 100, 0.01));
+        expect(metrics.cpuCores.last.percent, closeTo(35 / 85 * 100, 0.01));
+        expect(metrics.processesAvailable, isTrue);
+        expect(metrics.processes.first.pid, 123);
+        expect(metrics.processes.first.residentBytes, 65536 * 1024);
+        expect(metrics.processes.last.name, 'node worker');
+        expect(metrics.disksAvailable, isTrue);
+        expect(metrics.disks.map((disk) => disk.mountPoint), [
+          '/data volume',
+          '/',
+        ]);
+        expect(metrics.disks.first.totalBytes, 20480000 * 1024);
+        expect(metrics.disks.first.availableBytes, 9216000 * 1024);
+        expect(connection.terminal.buffer.getText(), before);
+        connection.send('still-interactive\r');
+        await eventually(
+          () => connection.terminal.buffer.getText().contains(
+            'ECHO=still-interactive',
+          ),
+        );
+        connection.close();
+        expect(await connection.readRemoteMetrics(), isNull);
       });
       test('SFTP 读取远端目录与目录软链接，不污染交互终端', () async {
         final connection = SshConnection(id: 'completion-sftp', host: host());

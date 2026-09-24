@@ -92,6 +92,34 @@ void main() {
     restored.dispose();
   });
 
+  test('状态刷新间隔默认五秒并本地保存，非法值回退且不进云同步', () async {
+    final repository = memoryRepository();
+    final model = WorkspaceModel(repository);
+    await model.initialize();
+    expect(model.appearance.value.statusRefreshSeconds, 5);
+    expect(AppearancePreferences.fromJson({}).statusRefreshSeconds, 5);
+    expect(
+      AppearancePreferences.fromJson({'statusRefreshSeconds': 10})
+          .statusRefreshSeconds,
+      10,
+    );
+    expect(
+      AppearancePreferences.fromJson({'statusRefreshSeconds': 3})
+          .statusRefreshSeconds,
+      5,
+    );
+    await model.saveAppearance(
+      const AppearancePreferences(statusRefreshSeconds: 30),
+    );
+    final restored = WorkspaceModel(repository);
+    await restored.initialize();
+    expect(restored.appearance.value.statusRefreshSeconds, 30);
+    final snapshot = await SyncStorage(repository).capture();
+    expect(snapshot.encode(), isNot(contains('statusRefreshSeconds')));
+    model.dispose();
+    restored.dispose();
+  });
+
   testWidgets('设置窗口修改主题同步到主窗口，主窗口设置可回读', (tester) async {
     final model = WorkspaceModel(memoryRepository());
     await model.initialize();
@@ -128,6 +156,7 @@ void main() {
       'color': 'green',
       'terminalFontSize': 14,
       'terminalWrap': true,
+      'statusRefreshSeconds': 5,
     });
     await remote.saveAppearance(
       const AppearancePreferences(
@@ -205,7 +234,7 @@ void main() {
     });
   }
 
-  testWidgets('外观设置的自动换行开关关闭后写入工作区偏好', (tester) async {
+  testWidgets('外观设置可修改自动换行和状态刷新间隔', (tester) async {
     tester.view.physicalSize = const Size(1280, 900);
     tester.view.devicePixelRatio = 1;
     addTearDown(tester.view.resetPhysicalSize);
@@ -225,6 +254,14 @@ void main() {
     await tester.pumpAndSettle();
     expect(model.appearance.value.terminalWrap, isFalse);
     expect(tester.widget<Switch>(wrap).value, isFalse);
+    final refresh = find.byKey(const ValueKey('status-refresh-interval'));
+    await tester.ensureVisible(refresh);
+    await tester.tap(refresh);
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('10 秒').last);
+    await tester.pumpAndSettle();
+    expect(model.appearance.value.statusRefreshSeconds, 10);
+    expect(tester.widget<DropdownButton<int>>(refresh).value, 10);
     expect(tester.takeException(), isNull);
     await tester.pumpWidget(const SizedBox.shrink());
   });
