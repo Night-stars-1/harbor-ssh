@@ -3,6 +3,7 @@ import 'dart:typed_data';
 
 import 'package:path_provider/path_provider.dart';
 
+import 'local_path_access.dart';
 import '../domain/remote_file.dart';
 import 'local_transfer.dart';
 
@@ -10,6 +11,23 @@ import 'local_transfer.dart';
 class LocalFiles implements RemoteFileSystem {
   LocalFiles(String root)
     : root = Directory(root).absolute.path.replaceAll('\\', '/');
+  static String? _preparedHomePath;
+
+  static Future<void> prepareDefaultHome({
+    Future<Directory> Function()? directoryProvider,
+  }) async {
+    if (!Platform.isWindows && !Platform.isMacOS) return;
+    if (directoryProvider == null) {
+      _preparedHomePath = null;
+      return;
+    }
+    try {
+      _preparedHomePath = (await directoryProvider()).path;
+    } catch (_) {
+      _preparedHomePath = null;
+    }
+  }
+
   final String root;
 
   static Future<String> validateDefaultPath(String value) async {
@@ -32,10 +50,41 @@ class LocalFiles implements RemoteFileSystem {
     return directory.absolute.path.replaceAll('\\', '/');
   }
 
-  static LocalFiles? userHome() {
-    if (!Platform.isWindows && !Platform.isMacOS && !Platform.isLinux) {
-      return null;
+  static Future<String> restoreDefaultPath(String value) async {
+    final saved = value.trim();
+    if (saved.isEmpty) return '';
+    if (Platform.isMacOS) {
+      try {
+        final restored = await LocalPathAccess.restore(saved);
+        if (restored != null) return await validateDefaultPath(restored);
+      } on FileSystemException {
+        // A stale bookmark is cleared by the platform and falls back below.
+      }
     }
+    final candidates = <String>{
+      ...localDefaultPathCandidates(saved),
+      if (Platform.isWindows &&
+          saved.replaceAll('\\', '/').toLowerCase().endsWith('/my documents') &&
+          _preparedHomePath?.isNotEmpty == true)
+        _preparedHomePath!,
+    };
+    for (final candidate in candidates) {
+      try {
+        return await validateDefaultPath(candidate);
+      } on FileSystemException {
+        // Try the next migration candidate, then fall back to a safe default.
+      }
+    }
+    return '';
+  }
+
+  static LocalFiles? userHome() {
+    if (Platform.isWindows || Platform.isMacOS) {
+      final prepared = _preparedHomePath;
+      if (prepared != null && prepared.isNotEmpty) return LocalFiles(prepared);
+      if (Platform.isMacOS) return null;
+    }
+    if (!Platform.isWindows && !Platform.isLinux) return null;
     final path =
         Platform.environment[Platform.isWindows ? 'USERPROFILE' : 'HOME'];
     return path == null || path.isEmpty ? null : LocalFiles(path);
@@ -133,4 +182,22 @@ class LocalFiles implements RemoteFileSystem {
       if (!finished) await target.abort();
     }
   }
+}
+
+List<String> localDefaultPathCandidates(String value, {bool? windows}) {
+  var normalized = value.trim().replaceAll('\\', '/');
+  if (RegExp(r'^/+$').hasMatch(normalized)) {
+    normalized = '/';
+  } else {
+    final driveRoot = RegExp(r'^([A-Za-z]:)/+$').firstMatch(normalized);
+    normalized = driveRoot != null
+        ? '${driveRoot.group(1)}/'
+        : normalized.replaceFirst(RegExp(r'/+$'), '');
+  }
+  if (!(windows ?? Platform.isWindows)) return [normalized];
+  final slash = normalized.lastIndexOf('/');
+  final name = slash < 0 ? normalized : normalized.substring(slash + 1);
+  if (name.toLowerCase() != 'my documents') return [normalized];
+  final parent = slash < 0 ? '' : normalized.substring(0, slash);
+  return ['${parent.isEmpty ? '' : '$parent/'}Documents', normalized];
 }

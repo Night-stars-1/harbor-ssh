@@ -3,10 +3,12 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'package:flutter/foundation.dart';
+import 'package:flutter/services.dart';
 
 import '../data/host_repository.dart';
 import '../data/terminal_ai.dart';
 import '../data/local_files.dart';
+import '../data/local_path_access.dart';
 import '../data/ssh_connection.dart';
 import '../data/sync_storage.dart';
 import '../data/webdav_sync.dart';
@@ -16,8 +18,9 @@ import '../domain/appearance.dart';
 import 'file_workspace_model.dart';
 
 class WorkspaceModel extends ChangeNotifier {
-  WorkspaceModel(this.repository);
+  WorkspaceModel(this.repository, {this.localDocumentsDirectory});
   final HostRepository repository;
+  final Future<Directory> Function()? localDocumentsDirectory;
   AiSettings aiSettings = const AiSettings();
   static const _aiKey = 'harbor.ai.v1';
   Future<void> _aiWrite = Future.value();
@@ -159,9 +162,20 @@ class WorkspaceModel extends ChangeNotifier {
   String get defaultLocalPath => fileWorkspace.defaultLocalPath;
 
   Future<void> saveDefaultLocalPath(String value) async {
+    final previous = fileWorkspace.defaultLocalPath;
     try {
       final path = await LocalFiles.validateDefaultPath(value);
       await repository.preferences.write(_localPathKey, path);
+      try {
+        if (path.isEmpty) {
+          await LocalPathAccess.clear();
+        } else {
+          await LocalPathAccess.commit(path);
+        }
+      } on PlatformException catch (error) {
+        await repository.preferences.write(_localPathKey, previous);
+        throw SyncFailure(error.message ?? '无法保存目录访问权限');
+      }
       fileWorkspace.defaultLocalPath = path;
       _notify();
     } on FileSystemException catch (error) {
@@ -212,11 +226,35 @@ class WorkspaceModel extends ChangeNotifier {
     await _loadAiSettings();
     await _loadHostOrder();
     try {
+      await LocalFiles.prepareDefaultHome(
+        directoryProvider: localDocumentsDirectory,
+      );
       await SyncStorage(repository).recover();
       _hosts = await repository.loadHosts();
       _users = await repository.loadUsers();
-      fileWorkspace.defaultLocalPath =
+      final savedLocalPath =
           await repository.preferences.read(_localPathKey) ?? '';
+      final restoredLocalPath = await LocalFiles.restoreDefaultPath(
+        savedLocalPath,
+      );
+      final normalizedSavedPath = savedLocalPath.replaceAll('\\', '/');
+      final pathChanged = restoredLocalPath != normalizedSavedPath;
+      if (pathChanged) {
+        await repository.preferences.write(_localPathKey, restoredLocalPath);
+      }
+      try {
+        if (restoredLocalPath.isEmpty) {
+          await LocalPathAccess.clear();
+        } else {
+          await LocalPathAccess.commit(restoredLocalPath);
+        }
+      } on PlatformException {
+        if (pathChanged) {
+          await repository.preferences.write(_localPathKey, savedLocalPath);
+        }
+        rethrow;
+      }
+      fileWorkspace.defaultLocalPath = restoredLocalPath;
     } catch (_) {
       loadError = '无法读取本地连接配置，请检查存储权限后重试。';
     }
@@ -231,8 +269,20 @@ class WorkspaceModel extends ChangeNotifier {
     _configureAutoSync();
   }
 
-  Future<void> saveGitHubAccount(String token, String login) async {
-    await cloudSync.saveGitHubAccount(token, login);
+  Future<void> saveGitHubAccount(
+    String token,
+    String login, {
+    String refreshToken = '',
+    DateTime? expiresAt,
+    DateTime? refreshExpiresAt,
+  }) async {
+    await cloudSync.saveGitHubAccount(
+      token,
+      login,
+      refreshToken: refreshToken,
+      expiresAt: expiresAt,
+      refreshExpiresAt: refreshExpiresAt,
+    );
     _configureAutoSync();
   }
 

@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:path_provider/path_provider.dart';
 
 import 'data/host_repository.dart';
 import 'ui/app.dart';
@@ -17,7 +18,10 @@ Future<void> main(List<String> arguments) async {
     runApp(const SettingsWindowApp());
     return;
   }
-  final model = WorkspaceModel(HostRepository.platform());
+  final model = WorkspaceModel(
+    HostRepository.platform(),
+    localDocumentsDirectory: getApplicationDocumentsDirectory,
+  );
   final host = usesWindowsTitleBar
       ? (SettingsWindowHost(LocalSyncSettingsController(model))..attach())
       : null;

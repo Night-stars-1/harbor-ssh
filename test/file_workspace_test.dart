@@ -366,11 +366,24 @@ void main() {
     });
   }
 
-  test('默认本地标签使用系统用户目录，仅初始化一次且保留已有标签', () async {
+  test('默认本地标签使用平台安全目录，仅初始化一次且保留已有标签', () async {
+    Directory? macDocuments;
+    if (Platform.isMacOS) {
+      macDocuments = await Directory.systemTemp.createTemp(
+        'harbor-macos-documents-',
+      );
+      addTearDown(() => macDocuments!.delete(recursive: true));
+      await LocalFiles.prepareDefaultHome(
+        directoryProvider: () async => macDocuments!,
+      );
+    } else {
+      await LocalFiles.prepareDefaultHome();
+    }
     final local = LocalFiles.userHome();
     if (Platform.isWindows || Platform.isLinux || Platform.isMacOS) {
-      final expected =
-          Platform.environment[Platform.isWindows ? 'USERPROFILE' : 'HOME'];
+      final expected = Platform.isMacOS
+          ? macDocuments!.path
+          : Platform.environment[Platform.isWindows ? 'USERPROFILE' : 'HOME'];
       expect(
         local!.root,
         Directory(expected!).absolute.path.replaceAll('\\', '/'),

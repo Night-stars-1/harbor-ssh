@@ -3,6 +3,7 @@ import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:harbor_ssh/data/webdav_sync.dart';
+import 'package:harbor_ssh/data/local_files.dart';
 import 'package:harbor_ssh/ui/local_file_settings.dart';
 import 'package:harbor_ssh/ui/settings_page.dart';
 import 'package:harbor_ssh/ui/settings_window_bridge.dart';
@@ -50,6 +51,33 @@ void main() {
     await reset.initialize();
     expect(reset.defaultLocalPath, isEmpty);
     reset.dispose();
+  });
+
+  test('Windows My Documents 迁移到真实 Documents，失效保存路径自动清除', () async {
+    expect(
+      localDefaultPathCandidates(
+        r'C:\Users\tester\My Documents',
+        windows: true,
+      ),
+      ['C:/Users/tester/Documents', 'C:/Users/tester/My Documents'],
+    );
+    final root = await Directory.systemTemp.createTemp('harbor-missing-path-');
+    addTearDown(() => root.delete(recursive: true));
+    expect(localDefaultPathCandidates('/', windows: false), ['/']);
+    expect(localDefaultPathCandidates('C:/', windows: true), ['C:/']);
+    expect(localDefaultPathCandidates('////', windows: false), ['/']);
+    expect(localDefaultPathCandidates('C:////', windows: true), ['C:/']);
+    final repository = memoryRepository();
+    final preferences = repository.preferences as MemoryStore;
+    await preferences.write(
+      'harbor.files.default-local-path.v1',
+      '${root.path}/missing',
+    );
+    final model = WorkspaceModel(repository);
+    await model.initialize();
+    addTearDown(model.dispose);
+    expect(model.defaultLocalPath, isEmpty);
+    expect(preferences.values['harbor.files.default-local-path.v1'], isEmpty);
   });
 
   testWidgets('独立设置窗口保存路径后主窗口立即生效', (tester) async {

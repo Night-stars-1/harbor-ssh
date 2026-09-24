@@ -1,7 +1,11 @@
+import 'dart:io';
+
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 
 import '../data/webdav_sync.dart';
+import '../data/local_files.dart';
+import '../data/local_path_access.dart';
 import 'sync_settings_controller.dart';
 import 'settings_widgets.dart';
 
@@ -28,10 +32,22 @@ class _LocalFileSettingsState extends State<LocalFileSettings> {
     setState(() => _working = true);
     try {
       final saved = widget.controller.defaultLocalPath;
-      final path = await FilePicker.getDirectoryPath(
-        dialogTitle: '选择默认本地文件夹',
-        initialDirectory: saved.isEmpty ? null : saved,
-      );
+      String? initialDirectory;
+      if (saved.isNotEmpty) {
+        try {
+          initialDirectory = await LocalFiles.validateDefaultPath(saved);
+        } on FileSystemException {
+          initialDirectory = null;
+        }
+      }
+      final path = Platform.isMacOS
+          ? await LocalPathAccess.pickDirectory(
+              initialDirectory: initialDirectory,
+            )
+          : await FilePicker.getDirectoryPath(
+              dialogTitle: '选择默认本地文件夹',
+              initialDirectory: initialDirectory,
+            );
       if (mounted && path != null) {
         setState(() {
           _path.text = path;
@@ -85,7 +101,9 @@ class _LocalFileSettingsState extends State<LocalFileSettings> {
           children: [
             SettingsRow(
               title: '默认本地文件路径',
-              description: '打开 SFTP 或新建本地标签时使用',
+              description: Platform.isMacOS
+                  ? '打开 SFTP 或新建本地标签时使用；macOS 请通过按钮授权目录'
+                  : '打开 SFTP 或新建本地标签时使用',
               control: TextField(
                 key: const ValueKey('default-local-path'),
                 controller: _path,
