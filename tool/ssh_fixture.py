@@ -109,6 +109,20 @@ class DirectoryFixture(paramiko.SFTPServerInterface):
         self.entries.pop(path, None)
         return paramiko.SFTP_OK
 
+    def rename(self, oldpath, newpath):
+        oldpath = self.canonicalize(oldpath)
+        newpath = self.canonicalize(newpath)
+        if oldpath not in self.entries:
+            return paramiko.SFTP_NO_SUCH_FILE
+        if newpath in self.entries or posixpath.dirname(newpath) not in self.entries:
+            return paramiko.SFTP_FAILURE
+        if stat.S_ISDIR(self.entries[oldpath]):
+            return paramiko.SFTP_FAILURE
+        self.entries[newpath] = self.entries.pop(oldpath)
+        self.files[newpath] = self.files.pop(oldpath)
+        return paramiko.SFTP_OK
+
+
     def canonicalize(self, path):
         return posixpath.normpath(path if path.startswith("/") else "/home/tester/" + path)
 

@@ -11,9 +11,14 @@ class RemoteFileTile extends StatelessWidget {
     required this.onDownload,
     required this.slot,
     this.enabled = true,
+    this.onEdit,
   });
   final RemoteFile file;
   final VoidCallback onOpen, onDownload;
+
+  /// Opens a remote text editor for a regular remote file. Directories and
+  /// symbolic links are never editable, even when a callback is supplied.
+  final VoidCallback? onEdit;
   final HarborListSlot slot;
   final bool enabled;
 
@@ -98,6 +103,16 @@ class RemoteFileTile extends StatelessWidget {
                       ),
                     ),
                   ],
+                  if (onEdit != null && !file.isDirectory && !file.isLink)
+                    IconButton(
+                      key: ValueKey('edit-remote-file-${file.path}'),
+                      onPressed: enabled ? onEdit : null,
+                      icon: Icon(
+                        Icons.edit_outlined,
+                        semanticLabel: '编辑 ${file.name}',
+                        size: 20,
+                      ),
+                    ),
                   IconButton(
                     onPressed: enabled
                         ? (file.isDirectory ? onOpen : onDownload)

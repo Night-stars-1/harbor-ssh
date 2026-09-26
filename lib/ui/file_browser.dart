@@ -7,6 +7,7 @@ import '../data/local_transfer.dart';
 import '../data/ssh_connection.dart';
 import '../domain/remote_file.dart';
 import 'remote_file_tile.dart';
+import 'remote_text_editor_dialog.dart';
 import 'theme.dart';
 
 class FileBrowser extends StatefulWidget {
@@ -235,6 +236,19 @@ class _FileBrowserState extends State<FileBrowser> {
     }
   });
 
+  /// Opens the remote text editor for a regular file. The directory listing is
+  /// only refreshed after a successful save, so a cancelled or failed edit
+  /// leaves the current view untouched.
+  Future<void> _edit(RemoteFile file) async {
+    if (_busy || !_connected) return;
+    final saved = await showRemoteTextEditor(
+      context,
+      files: _files,
+      file: file,
+    );
+    if (saved && mounted && _connected) await _browse(_path);
+  }
+
   Future<void> _leave() async {
     if (!_busy) {
       Navigator.of(context).pop();
@@ -451,6 +465,7 @@ class _FileBrowserState extends State<FileBrowser> {
                             slot: HarborShapes.listSlot(index, entries.length),
                             onOpen: () => _browse(entries[index].path),
                             onDownload: () => _download(entries[index]),
+                            onEdit: () => _edit(entries[index]),
                           ),
                         ),
                 ),

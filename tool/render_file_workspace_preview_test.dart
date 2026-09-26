@@ -2,6 +2,7 @@ import 'dart:io';
 import 'dart:ui' as ui;
 
 import 'package:flutter/material.dart';
+import 'package:flutter/gestures.dart';
 import 'package:flutter/rendering.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -101,6 +102,17 @@ void main() {
           await tester.pumpAndSettle();
         }
         if (!mobile) {
+          final row = find.byKey(
+            ValueKey('entry-${remote.id}-${remote.path}/README.md'),
+          );
+          await tester.tapAt(
+            tester.getCenter(row),
+            buttons: kSecondaryMouseButton,
+          );
+          await tester.pumpAndSettle();
+          await capture('sftp-workspace-menu-${brightness.name}');
+          await tester.sendKeyEvent(LogicalKeyboardKey.escape);
+          await tester.pumpAndSettle();
           files.message = '已删除 1 个文件';
           files.resize(files.split);
           await tester.pumpAndSettle();

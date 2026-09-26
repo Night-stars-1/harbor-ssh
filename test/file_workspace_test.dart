@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
 
@@ -16,6 +17,7 @@ import 'package:harbor_ssh/ui/file_workspace.dart';
 import 'package:harbor_ssh/ui/file_workspace_model.dart';
 import 'package:harbor_ssh/ui/theme.dart';
 import 'package:harbor_ssh/ui/workspace_model.dart';
+import 'package:re_editor/re_editor.dart';
 import 'package:xterm/xterm.dart';
 
 import 'file_browser_test.dart' show FileTestSession;
@@ -147,6 +149,167 @@ void main() {
     await tester.pumpWidget(const SizedBox.shrink());
   });
 
+  testWidgets('SFTP 编辑用代码编辑器保存内容，未保存离开不覆盖远端', (tester) async {
+    tester.view.physicalSize = const Size(320, 500);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    final files = MemoryFiles()
+      ..data['/note.json'] = Uint8List.fromList(utf8.encode('旧内容\n第二行'));
+    final model = FileWorkspaceModel();
+    addTearDown(model.dispose);
+    final tab = model.add(0, name: 'SFTP', files: files);
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: harborTheme().copyWith(platform: TargetPlatform.android),
+        home: Scaffold(
+          body: FileWorkspace(
+            model: model,
+            hosts: const [],
+            sessions: const [],
+            onConnect: (_) async => null,
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+    final row = find.byKey(ValueKey('entry-${tab.id}-/note.json'));
+    final content = find.byKey(const ValueKey('remote-text-content'));
+
+    await openRemoteEditor(tester, row);
+    final dialog = tester.getRect(
+      find.byKey(const ValueKey('remote-text-dialog')),
+    );
+    expect(dialog.left, greaterThanOrEqualTo(0));
+    expect(dialog.right, lessThanOrEqualTo(320));
+    expect(dialog.bottom, lessThanOrEqualTo(500));
+    expect(
+      tester.getBottomRight(find.byKey(const ValueKey('save-remote-text'))).dy,
+      lessThanOrEqualTo(500),
+    );
+    // 代码编辑器接管内容：语言标签按文件路径推断，行号来自内容行数。
+    expect(remoteEditorController(tester).text, '旧内容\n第二行');
+    expect(find.byType(CodeEditor), findsOneWidget);
+    expect(remoteLanguageLabel(tester).toLowerCase(), contains('json'));
+    expect(remoteLineNumberCount(tester), 2);
+
+    // 内容未修改时保存只关闭对话框，不写回远端。
+    await tester.tap(find.byKey(const ValueKey('save-remote-text')));
+    await tester.pumpAndSettle();
+    expect(content, findsNothing);
+    expect(utf8.decode(files.data['/note.json']!), '旧内容\n第二行');
+
+    // Esc 走对话框原有的放弃确认：继续编辑时草稿与远端都不变。
+    await openRemoteEditor(tester, row);
+    await tester.tap(content);
+    await tester.pump();
+    expect(tester.widget<CodeEditor>(content).focusNode!.hasFocus, isTrue);
+    await tester.longPressAt(tester.getTopLeft(content) + const Offset(70, 24));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 300));
+    expect(find.text('复制'), findsOneWidget);
+    await tester.tap(find.text('复制'));
+    await tester.pump();
+    replaceRemoteText(tester, '暂存内容');
+    await tester.pump();
+    expect(find.text('未保存的修改'), findsOneWidget);
+    await tester.sendKeyEvent(LogicalKeyboardKey.escape);
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 300));
+    expect(find.text('放弃未保存的修改？'), findsOneWidget);
+    await tester.tap(find.byKey(const ValueKey('keep-editing-remote-text')));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 300));
+    expect(remoteEditorController(tester).text, '暂存内容');
+    await tester.tap(find.text('取消'));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 300));
+    await tester.tap(find.byKey(const ValueKey('discard-remote-text')));
+    await tester.pumpAndSettle();
+    expect(utf8.decode(files.data['/note.json']!), '旧内容\n第二行');
+
+    // Ctrl+S 与保存按钮走同一条路径，键盘保存同样写回远端。
+    await openRemoteEditor(tester, row);
+    await tester.tap(content);
+    await tester.pump();
+    replaceRemoteText(tester, '已保存的内容\n第二行');
+    await tester.pump();
+    await tester.sendKeyDownEvent(LogicalKeyboardKey.controlLeft);
+    await tester.sendKeyEvent(LogicalKeyboardKey.keyS);
+    await tester.sendKeyUpEvent(LogicalKeyboardKey.controlLeft);
+    await tester.pumpAndSettle();
+    expect(content, findsNothing);
+    expect(utf8.decode(files.data['/note.json']!), '已保存的内容\n第二行');
+    expect(files.data.keys, ['/note.json']);
+    expect(tester.takeException(), isNull);
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
+
+  testWidgets('远程代码编辑器保持 CRLF，未改动的混合换行不被覆盖', (tester) async {
+    tester.view.physicalSize = const Size(390, 740);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    final files = MemoryFiles()
+      ..data['/settings.json'] = Uint8List.fromList(
+        utf8.encode('{\r\n  "name": "harbor"\r\n}\r\n'),
+      );
+    files.data['/mixed.json'] = Uint8List.fromList(
+      utf8.encode('{\r\n  "name": "harbor"\n}\r\n'),
+    );
+    final model = FileWorkspaceModel();
+    addTearDown(model.dispose);
+    final tab = model.add(0, name: 'SFTP', files: files);
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: harborTheme().copyWith(platform: TargetPlatform.android),
+        home: Scaffold(
+          body: FileWorkspace(
+            model: model,
+            hosts: const [],
+            sessions: const [],
+            onConnect: (_) async => null,
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+    final row = find.byKey(ValueKey('entry-${tab.id}-/settings.json'));
+
+    await openRemoteEditor(tester, row);
+    // 载入不把 CRLF 改写成 LF，编辑区按 CRLF 拼接新行。
+    expect(
+      remoteEditorController(tester).text,
+      '{\r\n  "name": "harbor"\r\n}\r\n',
+    );
+    expect(
+      remoteEditorController(tester).options.lineBreak,
+      TextLineBreak.crlf,
+    );
+    expect(remoteLineNumberCount(tester), 4);
+    expect(remoteLanguageLabel(tester).toLowerCase(), contains('json'));
+
+    replaceRemoteText(tester, '{\n  "name": "harbor"\n}');
+    await tester.pump();
+    expect(remoteEditorController(tester).text, '{\r\n  "name": "harbor"\r\n}');
+    await tester.tap(find.byKey(const ValueKey('save-remote-text')));
+    await tester.pumpAndSettle();
+    expect(
+      utf8.decode(files.data['/settings.json']!),
+      '{\r\n  "name": "harbor"\r\n}',
+    );
+    final mixedRow = find.byKey(ValueKey('entry-${tab.id}-/mixed.json'));
+    await openRemoteEditor(tester, mixedRow);
+    await tester.tap(find.byKey(const ValueKey('save-remote-text')));
+    await tester.pumpAndSettle();
+    expect(
+      utf8.decode(files.data['/mixed.json']!),
+      '{\r\n  "name": "harbor"\n}\r\n',
+    );
+    expect(tester.takeException(), isNull);
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
+
   test('本地删除只移除指定文件并拒绝递归删除目录', () async {
     final root = await Directory.systemTemp.createTemp('harbor-delete-test-');
     addTearDown(() => root.delete(recursive: true));
@@ -243,6 +406,10 @@ void main() {
     final click = tester.getTopLeft(rightRow) + const Offset(32, 24);
     await tester.tapAt(click, buttons: kSecondaryMouseButton);
     await tester.pumpAndSettle();
+    expect(
+      tester.getSize(find.byKey(const ValueKey('delete-selected-files'))).width,
+      lessThan(240),
+    );
     expect(
       tester.getTopLeft(find.byKey(const ValueKey('delete-selected-files'))).dx,
       greaterThanOrEqualTo(click.dx),
@@ -1341,6 +1508,47 @@ void main() {
     expect(model.canDrop(single, targetTab), isFalse);
   });
 }
+
+/// 打开远端文件菜单里的代码编辑器，并等待内容读取完成。
+///
+/// 编辑器获得焦点后光标会周期性闪烁，因此打开期间只能显式 `pump`。
+Future<void> openRemoteEditor(WidgetTester tester, Finder row) async {
+  await tester.longPress(row);
+  await tester.pumpAndSettle();
+  await tester.tap(find.byKey(const ValueKey('edit-remote-file')));
+  await tester.pump();
+  await tester.pump(const Duration(milliseconds: 300));
+}
+
+/// 远端代码编辑器的内容控制器。
+CodeLineEditingController remoteEditorController(WidgetTester tester) => tester
+    .widget<CodeEditor>(find.byKey(const ValueKey('remote-text-content')))
+    .controller!;
+
+/// 模拟用户在编辑器里整段替换输入（IME 之外的控制器交互）。
+void replaceRemoteText(WidgetTester tester, String text) {
+  final controller = remoteEditorController(tester);
+  controller.selectAll();
+  controller.replaceSelection(text);
+}
+
+/// 行号栏实际渲染出的行数。
+int remoteLineNumberCount(WidgetTester tester) => tester
+    .widget<DefaultCodeLineNumber>(find.byType(DefaultCodeLineNumber))
+    .notifier
+    .value!
+    .paragraphs
+    .length;
+
+/// 头部展示的语法高亮语言标签。
+String remoteLanguageLabel(WidgetTester tester) => tester
+    .widget<Text>(
+      find.descendant(
+        of: find.byKey(const ValueKey('remote-text-language')),
+        matching: find.byType(Text),
+      ),
+    )
+    .data!;
 
 class MemoryFiles implements RemoteFileSystem {
   @override

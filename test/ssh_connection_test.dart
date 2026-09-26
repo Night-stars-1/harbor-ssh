@@ -4,6 +4,7 @@ import 'dart:io';
 import 'dart:typed_data';
 
 import 'package:flutter_test/flutter_test.dart';
+import 'package:harbor_ssh/data/remote_text_editor.dart';
 import 'package:harbor_ssh/data/ssh_connection.dart';
 import 'package:harbor_ssh/data/remote_metrics.dart';
 import 'package:harbor_ssh/data/terminal_ai.dart';
@@ -413,6 +414,39 @@ void main() {
           () => connection.terminal.buffer.getText().contains(
             'ECHO=after-transfer',
           ),
+        );
+      });
+      test('SFTP 文本编辑保留原件直至新内容发布', () async {
+        final connection = SshConnection(id: 'edit-sftp', host: host());
+        addTearDown(connection.dispose);
+        await connection.connect(
+          const Credentials(password: 'fixture-password'),
+          memoryRepository(),
+          (_, _) async => true,
+          openShell: false,
+        );
+        expect(connection.status, ConnectionStatus.connected);
+        final files = connection.files;
+        final directory = await files.browse('~');
+        final path = files.childPath(directory.path, 'edit-测试.txt');
+        await files.upload(
+          path,
+          Stream.value(Uint8List.fromList(utf8.encode('第一版\n'))),
+          cancellation: TransferCancellation(),
+          onProgress: (_) {},
+        );
+        addTearDown(() => files.deleteFile(path));
+        final entry = (await files.browse(directory.path)).entries
+            .singleWhere((item) => item.path == path);
+        final editor = RemoteTextEditor(files);
+        final original = await editor.load(entry);
+        expect(original, '第一版\n');
+        await editor.save(entry, original, '第二版\n新的一行');
+        expect(await editor.load(entry), '第二版\n新的一行');
+        expect(
+          (await files.browse(directory.path)).entries
+              .where((item) => item.name.startsWith('.harbor-')),
+          isEmpty,
         );
       });
       test('独立 SFTP 连接无需打开终端，两个远端标签可流式复制', () async {

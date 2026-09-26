@@ -8,6 +8,7 @@ import '../data/ssh_connection.dart';
 import '../domain/host.dart';
 import '../domain/remote_file.dart';
 import 'file_workspace_model.dart';
+import 'remote_text_editor_dialog.dart';
 import 'theme.dart';
 
 class FileWorkspace extends StatefulWidget {
@@ -32,6 +33,7 @@ class FileWorkspace extends StatefulWidget {
 
 class _FileWorkspaceState extends State<FileWorkspace> {
   bool _adding = false;
+  bool _editing = false;
   final _searching = <String>{};
   final _tabKeys = <String, GlobalKey>{};
   final _activeStrips = <int, String?>{};
@@ -271,7 +273,7 @@ class _FileWorkspaceState extends State<FileWorkspace> {
                 ],
               ),
             ),
-          if (_adding) const LinearProgressIndicator(minHeight: 2),
+          if (_adding || _editing) const LinearProgressIndicator(minHeight: 2),
           Expanded(
             child: LayoutBuilder(
               builder: (context, constraints) {
@@ -732,52 +734,103 @@ class _FileWorkspaceState extends State<FileWorkspace> {
     );
   }
 
+  bool _canEditRemoteText(FileLocationTab tab, RemoteFile file) =>
+      !tab.isLocal && !file.isDirectory && !file.isLink;
+
+  Future<void> _editFile(FileLocationTab tab, RemoteFile file) async {
+    if (_editing ||
+        !mounted ||
+        !model.tabs.contains(tab) ||
+        model.busy ||
+        tab.loading ||
+        tab.error != null ||
+        !tab.connected) {
+      return;
+    }
+    setState(() => _editing = true);
+    try {
+      final saved = await showRemoteTextEditor(
+        context,
+        files: tab.files,
+        file: file,
+      );
+      if (!saved || !mounted || !model.tabs.contains(tab)) return;
+      await tab.browse();
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context)
+            .showSnackBar(SnackBar(content: Text(fileError(e))));
+      }
+    } finally {
+      if (mounted) setState(() => _editing = false);
+    }
+  }
+
   Future<void> _fileMenu(
     FileLocationTab tab,
     RemoteFile file,
     Offset position,
   ) async {
+    if (_editing) return;
     if (!tab.selected.contains(file.path)) tab.select(file);
     final data = model.dragData(tab, file);
-    if (!model.canDelete(data)) return;
+    final deletable = model.canDelete(data);
+    final editable =
+        deletable && data.files.length == 1 && _canEditRemoteText(tab, file);
+    if (!deletable && !editable) return;
     final overlay =
         Overlay.of(context).context.findRenderObject()! as RenderBox;
     final point = overlay.globalToLocal(position);
-    final menuWidth = (overlay.size.width - 16).clamp(0.0, 240.0);
-    final menuLeft = (point.dx + 4).clamp(
-      8.0,
-      overlay.size.width - menuWidth - 8,
-    );
+    final anchorX = point.dx + 4;
     final colors = Theme.of(context).colorScheme;
     final action = await showMenu<Object>(
       context: context,
-      constraints: BoxConstraints.tightFor(width: menuWidth),
-      position: RelativeRect.fromLTRB(
-        menuLeft,
-        point.dy,
-        overlay.size.width - menuLeft - menuWidth,
-        0,
-      ),
+      // 相等的左右锚距让菜单按阅读方向从鼠标右侧展开；
+      // 空间不足时 Flutter 仍会将自适应宽度的菜单限制在屏幕内。
+      position: RelativeRect.fromLTRB(anchorX, point.dy, anchorX, 0),
       color: colors.surfaceContainerHigh,
       elevation: 0,
       shape: HarborShapes.superellipse(),
       items: [
-        _FileMenuItem(
-          key: const ValueKey('delete-selected-files'),
-          value: 'delete',
-          child: Row(
-            children: [
-              Icon(Icons.delete_outline_rounded, size: 20, color: colors.error),
-              const SizedBox(width: 10),
-              Text(
-                '删除 ${data.files.length} 个文件',
-                style: TextStyle(color: colors.error),
-              ),
-            ],
+        if (editable)
+          _FileMenuItem(
+            key: const ValueKey('edit-remote-file'),
+            value: 'edit',
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Icon(Icons.edit_outlined, size: 20, color: colors.primary),
+                const SizedBox(width: 10),
+                const Text('编辑文件'),
+              ],
+            ),
           ),
-        ),
+        if (deletable)
+          _FileMenuItem(
+            key: const ValueKey('delete-selected-files'),
+            value: 'delete',
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Icon(
+                  Icons.delete_outline_rounded,
+                  size: 20,
+                  color: colors.error,
+                ),
+                const SizedBox(width: 10),
+                Text(
+                  '删除 ${data.files.length} 个文件',
+                  style: TextStyle(color: colors.error),
+                ),
+              ],
+            ),
+          ),
       ],
     );
+    if (action == 'edit') {
+      await _editFile(tab, file);
+      return;
+    }
     if (action != 'delete' || !mounted || !model.canDelete(data)) return;
     final confirmed = await showDialog<bool>(
       context: context,
@@ -838,6 +891,7 @@ class _FileWorkspaceState extends State<FileWorkspace> {
     final shape = HarborShapes.superellipse(
       HarborShapes.listItem(HarborShapes.listSlot(index, count)),
     );
+    final canOpenMenu = enabled && !model.busy && !_editing;
     void action() {
       if (file.isDirectory) {
         tab.browse(file.path);
@@ -867,7 +921,7 @@ class _FileWorkspaceState extends State<FileWorkspace> {
           child: InkWell(
             key: ValueKey('entry-${tab.id}-${file.path}'),
             onTap: enabled ? action : null,
-            onSecondaryTapUp: enabled && !model.busy && !file.isDirectory
+            onSecondaryTapUp: canOpenMenu && !file.isDirectory
                 ? (details) => _fileMenu(tab, file, details.globalPosition)
                 : null,
             child: ConstrainedBox(
@@ -920,8 +974,9 @@ class _FileWorkspaceState extends State<FileWorkspace> {
     if (clipboardMode || mobile) {
       if (file.isDirectory) return row;
       return GestureDetector(
-        onLongPressStart: (details) =>
-            _fileMenu(tab, file, details.globalPosition),
+        onLongPressStart: _editing
+            ? null
+            : (details) => _fileMenu(tab, file, details.globalPosition),
         child: _SwipeSelect(
           key: ValueKey('swipe-${tab.id}-${file.path}'),
           shape: shape,
