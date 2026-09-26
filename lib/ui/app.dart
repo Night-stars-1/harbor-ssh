@@ -153,7 +153,10 @@ class _WorkspaceState extends State<Workspace> {
 
   void _message(String text) =>
       ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(text)));
-  Future<void> _edit([Host? host]) async {
+
+  /// [initialCredential] 仅用于从凭证卡片发起的新建连接：给出该私钥凭证，
+  /// 让 [HostEditor] 预先选中，Host 只保留对它的 userId 引用。
+  Future<void> _edit({Host? host, SshUser? initialCredential}) async {
     if (_opening) return;
     _opening = true;
     try {
@@ -166,6 +169,7 @@ class _WorkspaceState extends State<Workspace> {
         if (value != null) userCredentials[user.id] = value;
       }
       if (!mounted) return;
+      var saved = false;
       await showDialog<void>(
         context: context,
         barrierDismissible: false,
@@ -174,10 +178,17 @@ class _WorkspaceState extends State<Workspace> {
           credentials: credentials,
           users: model.users,
           userCredentials: userCredentials,
-          onSave: model.saveHost,
+          initialCredential: initialCredential,
+          onSave: (host, stored) async {
+            await model.saveHost(host, stored);
+            saved = true;
+          },
           onTest: _testConnection,
         ),
       );
+      // 从凭证卡片发起的新建：保存成功后切回连接列表。其它入口保持原有
+      // 视图与筛选不变，取消或保存失败一律留在原页面。
+      if (saved && initialCredential != null && mounted) model.filter();
     } catch (_) {
       if (mounted) _message('无法读取安全存储，请检查系统权限。');
     } finally {
@@ -235,7 +246,7 @@ class _WorkspaceState extends State<Workspace> {
               : '请为连接选择已保存的私钥凭证。',
         );
         _opening = false;
-        await _edit(host);
+        await _edit(host: host);
       } else if (mounted) {
         _start(host, credentials);
       }
@@ -300,7 +311,7 @@ class _WorkspaceState extends State<Workspace> {
     if (!mounted) return null;
     if (credentials == null) {
       _message('请先为连接保存密码或选择私钥凭证');
-      await _edit(host);
+      await _edit(host: host);
       return null;
     }
     final session = SshConnection(
@@ -358,7 +369,7 @@ class _WorkspaceState extends State<Workspace> {
   Future<void> _hostAction(Host host, String action) async {
     switch (action) {
       case 'edit':
-        await _edit(host);
+        await _edit(host: host);
       case 'delete':
         if (await _confirm(
           '删除连接？',
@@ -383,6 +394,8 @@ class _WorkspaceState extends State<Workspace> {
 
   Future<void> _userAction(SshUser user, String action) async {
     switch (action) {
+      case 'createHost':
+        await _edit(initialCredential: user);
       case 'edit':
         await _editUser(user);
       case 'delete':

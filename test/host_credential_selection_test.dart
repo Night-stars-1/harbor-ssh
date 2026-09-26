@@ -264,4 +264,214 @@ void main() {
     expect(model.hosts.single.userId, isEmpty);
     await tester.pumpWidget(const SizedBox.shrink());
   });
+
+  testWidgets('凭证预选新建连接：测试与保存都引用该用户的凭证', (tester) async {
+    tester.view.physicalSize = const Size(1280, 900);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    Host? saved;
+    Host? tested;
+    Credentials? connected;
+    Credentials? stored = credentials;
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: Builder(
+            builder: (context) => TextButton(
+              onPressed: () => showDialog<void>(
+                context: context,
+                builder: (_) => HostEditor(
+                  initialCredential: user,
+                  users: const [user],
+                  userCredentials: const {'key-user': credentials},
+                  onSave: (host, secret) async {
+                    saved = host;
+                    stored = secret;
+                  },
+                  onTest: (host, creds) async {
+                    tested = host;
+                    connected = creds;
+                  },
+                ),
+              ),
+              child: const Text('打开'),
+            ),
+          ),
+        ),
+      ),
+    );
+    await tester.tap(find.text('打开'));
+    await tester.pumpAndSettle();
+    expect(find.text('新建连接'), findsOneWidget);
+    // 打开即预选该密钥凭证：下拉已选中它，且不显示密码输入。
+    expect(
+      tester
+          .widget<EditableText>(
+            find.descendant(
+              of: find.byType(DropdownMenuFormField<String>),
+              matching: find.byType(EditableText),
+            ),
+          )
+          .controller
+          .text,
+      user.name,
+    );
+    expect(find.widgetWithText(TextFormField, '密码'), findsNothing);
+    // 用户名优先继承凭证的非空用户名。
+    expect(
+      tester
+          .widget<TextFormField>(find.widgetWithText(TextFormField, '用户名'))
+          .controller
+          ?.text,
+      user.username,
+    );
+    await tester.enterText(
+      find.widgetWithText(TextFormField, '连接名称'),
+      'Key server',
+    );
+    await tester.enterText(
+      find.widgetWithText(TextFormField, '主机地址'),
+      'localhost',
+    );
+    // 不碰下拉即可测试：使用该用户安全存储里的凭证，而不是表单里的口令。
+    await tester.ensureVisible(find.text('测试连接'));
+    await tester.tap(find.text('测试连接'));
+    await tester.pumpAndSettle();
+    expect(tested?.userId, user.id);
+    expect(tested?.authMethod, AuthMethod.privateKey);
+    expect(connected, same(credentials));
+    await tester.pump(const Duration(seconds: 4));
+    await tester.ensureVisible(find.text('保存连接'));
+    await tester.tap(find.text('保存连接'));
+    await tester.pumpAndSettle();
+    expect(saved?.userId, user.id);
+    expect(saved?.authMethod, AuthMethod.privateKey);
+    expect(saved?.username, user.username);
+    // 私钥留在用户安全存储，Host 不自带任何口令或私钥。
+    expect(stored, isNull);
+    expect(find.byType(HostEditor), findsNothing);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('预选凭证不在用户列表时不生效，回退密码认证', (tester) async {
+    const stale = SshUser(
+      id: 'missing',
+      name: 'Gone',
+      username: 'ghost',
+      authMethod: AuthMethod.privateKey,
+    );
+    await tester.pumpWidget(
+      MaterialApp(
+        home: HostEditor(
+          initialCredential: stale,
+          users: const [user],
+          userCredentials: const {'key-user': credentials},
+          onSave: (_, _) async {},
+          onTest: (_, _) async => fail('没有可用凭证时不能测试连接'),
+        ),
+      ),
+    );
+    expect(find.widgetWithText(TextFormField, '密码'), findsOneWidget);
+    expect(
+      tester
+          .widget<TextFormField>(find.widgetWithText(TextFormField, '用户名'))
+          .controller
+          ?.text,
+      'root',
+    );
+    await tester.enterText(
+      find.widgetWithText(TextFormField, '连接名称'),
+      'Fallback',
+    );
+    await tester.enterText(
+      find.widgetWithText(TextFormField, '主机地址'),
+      'localhost',
+    );
+    await tester.ensureVisible(find.text('测试连接'));
+    await tester.tap(find.text('测试连接'));
+    await tester.pumpAndSettle();
+    expect(find.text('请输入密码后测试连接。'), findsOneWidget);
+  });
+
+  testWidgets('编辑已有主机时初始凭证不覆盖其认证方式', (tester) async {
+    Host? saved;
+    await tester.pumpWidget(
+      MaterialApp(
+        home: HostEditor(
+          host: Host(
+            id: 'host',
+            name: 'Server',
+            address: 'localhost',
+            username: 'admin',
+            authMethod: AuthMethod.password,
+          ),
+          initialCredential: user,
+          users: const [user],
+          userCredentials: const {'key-user': credentials},
+          onSave: (host, _) async {
+            saved = host;
+          },
+          onTest: (_, _) async {},
+        ),
+      ),
+    );
+    // 已有主机的密码认证、用户名与空 userId 都保持不变。
+    expect(find.widgetWithText(TextFormField, '密码'), findsOneWidget);
+    expect(
+      tester
+          .widget<TextFormField>(find.widgetWithText(TextFormField, '用户名'))
+          .controller
+          ?.text,
+      'admin',
+    );
+    await tester.enterText(
+      find.widgetWithText(TextFormField, '密码'),
+      'host-secret',
+    );
+    await tester.ensureVisible(find.text('保存连接'));
+    await tester.tap(find.text('保存连接'));
+    await tester.pumpAndSettle();
+    expect(saved?.authMethod, AuthMethod.password);
+    expect(saved?.username, 'admin');
+    expect(saved?.userId, isEmpty);
+  });
+
+  testWidgets('预选凭证用户名为空时保持默认 root', (tester) async {
+    const anonymous = SshUser(
+      id: 'key-plain',
+      name: 'Plain',
+      username: '',
+      authMethod: AuthMethod.privateKey,
+    );
+    await tester.pumpWidget(
+      MaterialApp(
+        home: HostEditor(
+          initialCredential: anonymous,
+          users: const [anonymous],
+          onSave: (_, _) async {},
+          onTest: (_, _) async {},
+        ),
+      ),
+    );
+    expect(
+      tester
+          .widget<TextFormField>(find.widgetWithText(TextFormField, '用户名'))
+          .controller
+          ?.text,
+      'root',
+    );
+    expect(
+      tester
+          .widget<EditableText>(
+            find.descendant(
+              of: find.byType(DropdownMenuFormField<String>),
+              matching: find.byType(EditableText),
+            ),
+          )
+          .controller
+          .text,
+      anonymous.name,
+    );
+  });
 }

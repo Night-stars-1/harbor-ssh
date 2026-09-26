@@ -160,9 +160,12 @@ class ExpressiveUserCard extends StatelessWidget {
     asCard: asCard,
     onTap: onOpen,
     onAction: onAction,
-    menuItems: const [
-      PopupMenuItem(value: 'edit', child: Text('编辑凭证')),
-      PopupMenuItem(value: 'delete', child: Text('删除凭证')),
+    menuItems: [
+      // 旧版密码凭证没有可引用的私钥，无法据此新建连接。
+      if (user.authMethod == AuthMethod.privateKey)
+        const PopupMenuItem(value: 'createHost', child: Text('用此凭证新建连接')),
+      const PopupMenuItem(value: 'edit', child: Text('编辑凭证')),
+      const PopupMenuItem(value: 'delete', child: Text('删除凭证')),
     ],
   );
 }

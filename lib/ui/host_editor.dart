@@ -2,6 +2,7 @@ import 'dart:async';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:flutter/widget_previews.dart';
 
 import '../data/key_file.dart';
 import '../data/ssh_keys.dart';
@@ -18,6 +19,7 @@ class HostEditor extends StatefulWidget {
     super.key,
     this.host,
     this.credentials,
+    this.initialCredential,
     this.users = const [],
     this.userCredentials = const {},
     required this.onSave,
@@ -25,6 +27,12 @@ class HostEditor extends StatefulWidget {
   });
   final Host? host;
   final Credentials? credentials;
+
+  /// 新建连接时预选的密钥凭证（来自凭证页的卡片菜单）。
+  ///
+  /// 仅在 [host] 为空且该用户确实出现在 [users] 中时生效；私钥始终保留在
+  /// 该用户的安全存储里，这里只记住 [SshUser.id]，不复制任何口令或私钥。
+  final SshUser? initialCredential;
   final List<SshUser> users;
   final Map<String, Credentials> userCredentials;
   final SaveHost onSave;
@@ -41,20 +49,38 @@ class _HostEditorState extends State<HostEditor> {
   final _tags = <String>[];
   final _tagInput = TextEditingController();
   late final _username = TextEditingController(
-    text: widget.host?.username ?? 'root',
+    text: widget.host?.username ?? _initialUsername,
   );
   late final _password = TextEditingController(
     text:
         widget.credentials?.password ??
         widget.userCredentials[widget.host?.userId]?.password,
   );
-  late AuthMethod _auth = widget.host?.authMethod ?? AuthMethod.password;
-  bool _passwordVisible = false;
   late final _users = widget.users
       .where((user) => user.authMethod == AuthMethod.privateKey)
       .toList();
+
+  /// 待预选的密钥凭证：编辑已有主机时不生效，且必须真的是当前列表中的
+  /// 密钥用户（[_users] 已只保留 privateKey），避免陈旧引用凭空改出认证方式。
+  late final SshUser? _initialCredential = widget.host != null
+      ? null
+      : _users
+            .where((user) => user.id == widget.initialCredential?.id)
+            .firstOrNull;
+
+  /// 新建连接时的默认用户名：凭证带非空用户名则继承，否则保持 root。
+  String get _initialUsername {
+    final username = _initialCredential?.username.trim() ?? '';
+    return username.isEmpty ? 'root' : username;
+  }
+
+  late AuthMethod _auth =
+      _initialCredential?.authMethod ??
+      widget.host?.authMethod ??
+      AuthMethod.password;
+  bool _passwordVisible = false;
   late final _userCredentials = {...widget.userCredentials};
-  late String _userId = widget.host?.userId ?? '';
+  late String _userId = _initialCredential?.id ?? widget.host?.userId ?? '';
   late final String _id =
       widget.host?.id ?? DateTime.now().microsecondsSinceEpoch.toString();
   bool _saving = false, _testing = false;
@@ -364,9 +390,7 @@ class _HostEditorState extends State<HostEditor> {
                           for (final tag in _tags)
                             _TagPill(
                               tag: tag,
-                              onDeleted: _busy
-                                  ? null
-                                  : () => _removeTag(tag),
+                              onDeleted: _busy ? null : () => _removeTag(tag),
                             ),
                         ],
                       ),
@@ -560,37 +584,38 @@ class _TagPill extends StatelessWidget {
       constraints: const BoxConstraints(maxWidth: double.infinity),
       child: DecoratedBox(
         decoration: ShapeDecoration(
-          color: chip.backgroundColor ?? theme.colorScheme.surfaceContainerHighest,
+          color:
+              chip.backgroundColor ?? theme.colorScheme.surfaceContainerHighest,
           shape: chip.shape ?? const StadiumBorder(),
         ),
-      child: Padding(
-        padding: const EdgeInsetsDirectional.fromSTEB(12, 4, 4, 4),
-        child: Row(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Flexible(
-              child: Padding(
-                padding: const EdgeInsets.symmetric(vertical: 4),
-                child: Text(tag, style: labelStyle),
+        child: Padding(
+          padding: const EdgeInsetsDirectional.fromSTEB(12, 4, 4, 4),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Flexible(
+                child: Padding(
+                  padding: const EdgeInsets.symmetric(vertical: 4),
+                  child: Text(tag, style: labelStyle),
+                ),
               ),
-            ),
-            IconButton(
-              tooltip: '删除标签 $tag',
-              onPressed: onDeleted,
-              icon: const Icon(Icons.close_rounded, size: 18),
-              // 主题把 IconButton 的最小尺寸定为 48，这里收回到胶囊尺寸。
-              style: IconButton.styleFrom(
-                minimumSize: const Size(32, 32),
-                visualDensity: VisualDensity.standard,
-                tapTargetSize: MaterialTapTargetSize.shrinkWrap,
-                padding: EdgeInsets.zero,
-                shape: const CircleBorder(),
+              IconButton(
+                tooltip: '删除标签 $tag',
+                onPressed: onDeleted,
+                icon: const Icon(Icons.close_rounded, size: 18),
+                // 主题把 IconButton 的最小尺寸定为 48，这里收回到胶囊尺寸。
+                style: IconButton.styleFrom(
+                  minimumSize: const Size(32, 32),
+                  visualDensity: VisualDensity.standard,
+                  tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                  padding: EdgeInsets.zero,
+                  shape: const CircleBorder(),
+                ),
               ),
-            ),
-          ],
+            ],
+          ),
         ),
       ),
-    ),
     );
   }
 }
@@ -899,3 +924,34 @@ class _UserEditorState extends State<UserEditor> {
     ),
   );
 }
+
+const _previewCredential = SshUser(
+  id: 'preview-deploy',
+  name: '生产部署',
+  username: 'deploy',
+  authMethod: AuthMethod.privateKey,
+);
+
+Widget _credentialImportPreview(Brightness brightness) => MaterialApp(
+  theme: harborTheme(brightness: brightness),
+  home: Scaffold(
+    body: HostEditor(
+      initialCredential: _previewCredential,
+      users: const [_previewCredential],
+      onSave: (_, _) async {},
+      onTest: (_, _) async {},
+    ),
+  ),
+);
+
+@Preview(name: 'SSH 凭证导入', group: 'Harbor SSH', size: Size(660, 800))
+Widget sshCredentialImportPreview() =>
+    _credentialImportPreview(Brightness.light);
+
+@Preview(name: 'SSH 凭证导入 · 暗色', group: 'Harbor SSH', size: Size(660, 800))
+Widget sshCredentialImportDarkPreview() =>
+    _credentialImportPreview(Brightness.dark);
+
+@Preview(name: 'SSH 凭证导入 · 手机', group: 'Harbor SSH', size: Size(390, 844))
+Widget sshCredentialImportPhonePreview() =>
+    _credentialImportPreview(Brightness.light);

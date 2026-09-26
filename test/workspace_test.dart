@@ -621,6 +621,69 @@ void main() {
     expect(tester.takeException(), isNull);
     await tester.pumpWidget(const SizedBox.shrink());
   });
+  testWidgets('从私钥凭证卡片菜单新建主机，引用该凭证且不复制私钥', (tester) async {
+    tester.view.physicalSize = const Size(1280, 800);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    const user = SshUser(
+      id: 'user-key',
+      name: '生产部署',
+      username: 'deploy',
+      authMethod: AuthMethod.privateKey,
+      publicKey: 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5 生产部署',
+    );
+    const secret = Credentials(
+      privateKey: 'PRIVATE-KEY-MATERIAL',
+      passphrase: '',
+    );
+    final repository = memoryRepository();
+    await repository.saveUsers([user]);
+    await repository.saveUserCredentials(user.id, secret);
+    final model = WorkspaceModel(repository);
+    await tester.pumpWidget(HarborApp(model: model));
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.text('凭证'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byTooltip('管理凭证：生产部署'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('用此凭证新建连接'));
+    await tester.pumpAndSettle();
+
+    // 预选该私钥凭证：没有密码输入，用户名沿用凭证里的 deploy。
+    expect(find.widgetWithText(TextFormField, '密码'), findsNothing);
+    expect(
+      tester
+          .widget<TextFormField>(find.widgetWithText(TextFormField, '用户名'))
+          .controller!
+          .text,
+      'deploy',
+    );
+    await tester.enterText(find.widgetWithText(TextFormField, '连接名称'), '生产跳板');
+    await tester.enterText(
+      find.widgetWithText(TextFormField, '主机地址'),
+      'bastion.example.com',
+    );
+    await tester.ensureVisible(find.text('保存连接'));
+    await tester.tap(find.text('保存连接'));
+    await tester.pumpAndSettle();
+
+    // 保存成功后回到连接列表，卡片可见。
+    expect(model.showingUsers, isFalse);
+    expect(find.text('生产跳板'), findsOneWidget);
+    final host = model.hosts.singleWhere((h) => h.name == '生产跳板');
+    expect(host.userId, user.id);
+    expect(host.authMethod, AuthMethod.privateKey);
+    // Host 只保留 userId 引用：自身没有 secret，凭证原样留在用户安全存储。
+    expect(await repository.credentials(host.id), isNull);
+    expect(
+      (await repository.userCredentials(user.id))!.privateKey,
+      'PRIVATE-KEY-MATERIAL',
+    );
+    expect(tester.takeException(), isNull);
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
 }
 
 class _TerminalWorkspaceModel extends WorkspaceModel {
