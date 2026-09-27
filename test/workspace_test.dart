@@ -2,7 +2,10 @@ import 'package:flutter/material.dart';
 import 'package:flutter/gestures.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:harbor_ssh/ui/app.dart';
+import 'package:harbor_ssh/data/host_repository.dart';
+import 'package:harbor_ssh/data/public_key_install.dart';
 import 'package:harbor_ssh/data/ssh_connection.dart';
+import 'package:harbor_ssh/data/ssh_keys.dart';
 import 'package:xterm/xterm.dart';
 import 'package:harbor_ssh/domain/host.dart';
 import 'package:harbor_ssh/ui/workspace_model.dart';
@@ -621,69 +624,389 @@ void main() {
     expect(tester.takeException(), isNull);
     await tester.pumpWidget(const SizedBox.shrink());
   });
-  testWidgets('从私钥凭证卡片菜单新建主机，引用该凭证且不复制私钥', (tester) async {
+
+  testWidgets('从私钥凭证卡片把公钥安装到选定的服务器，凭证与主机配置不变', (tester) async {
     tester.view.physicalSize = const Size(1280, 800);
     tester.view.devicePixelRatio = 1;
     addTearDown(tester.view.resetPhysicalSize);
     addTearDown(tester.view.resetDevicePixelRatio);
-    const user = SshUser(
-      id: 'user-key',
-      name: '生产部署',
-      username: 'deploy',
-      authMethod: AuthMethod.privateKey,
-      publicKey: 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5 生产部署',
+    final credential = _installCredential();
+    final preferences = MemoryStore();
+    final repository = HostRepository(
+      preferences: preferences,
+      secrets: MemoryStore(),
     );
-    const secret = Credentials(
-      privateKey: 'PRIVATE-KEY-MATERIAL',
-      passphrase: '',
-    );
-    final repository = memoryRepository();
-    await repository.saveUsers([user]);
-    await repository.saveUserCredentials(user.id, secret);
-    final model = WorkspaceModel(repository);
+    await repository.saveHosts([testHost]);
+    await repository.saveUsers([credential]);
+    final session = _FakeInstallSession(host: testHost);
+    final model = _InstallWorkspaceModel([session], repository);
     await tester.pumpWidget(HarborApp(model: model));
     await tester.pumpAndSettle();
+    final stored = Map<String, String>.of(preferences.values);
 
-    await tester.tap(find.text('凭证'));
+    await _openInstallDialog(tester, credential.name);
+    expect(find.text('安装公钥到服务器'), findsOneWidget);
+    // 目标身份写在服务器条目上；安装前没有任何请求发出。
+    expect(find.text('deploy@dev.example.com:22'), findsOneWidget);
+    expect(find.textContaining('~/.ssh/authorized_keys'), findsOneWidget);
+    expect(find.textContaining('不会复制私钥'), findsOneWidget);
+    expect(session.installed, isEmpty);
+
+    await tester.ensureVisible(
+      find.byKey(const ValueKey('public-key-target-host-1')),
+    );
+    await tester.tap(find.byKey(const ValueKey('public-key-target-host-1')));
     await tester.pumpAndSettle();
-    await tester.tap(find.byTooltip('管理凭证：生产部署'));
-    await tester.pumpAndSettle();
-    await tester.tap(find.text('用此凭证新建连接'));
+    await tester.tap(find.byKey(const ValueKey('public-key-install-confirm')));
     await tester.pumpAndSettle();
 
-    // 预选该私钥凭证：没有密码输入，用户名沿用凭证里的 deploy。
-    expect(find.widgetWithText(TextFormField, '密码'), findsNothing);
+    expect(session.installed, [credential.publicKey]);
     expect(
-      tester
-          .widget<TextFormField>(find.widgetWithText(TextFormField, '用户名'))
-          .controller!
-          .text,
-      'deploy',
+      find.textContaining('已把「生产部署」的公钥安装到 deploy@dev.example.com:22'),
+      findsOneWidget,
     );
-    await tester.enterText(find.widgetWithText(TextFormField, '连接名称'), '生产跳板');
-    await tester.enterText(
-      find.widgetWithText(TextFormField, '主机地址'),
-      'bastion.example.com',
-    );
-    await tester.ensureVisible(find.text('保存连接'));
-    await tester.tap(find.text('保存连接'));
-    await tester.pumpAndSettle();
-
-    // 保存成功后回到连接列表，卡片可见。
-    expect(model.showingUsers, isFalse);
-    expect(find.text('生产跳板'), findsOneWidget);
-    final host = model.hosts.singleWhere((h) => h.name == '生产跳板');
-    expect(host.userId, user.id);
-    expect(host.authMethod, AuthMethod.privateKey);
-    // Host 只保留 userId 引用：自身没有 secret，凭证原样留在用户安全存储。
-    expect(await repository.credentials(host.id), isNull);
-    expect(
-      (await repository.userCredentials(user.id))!.privateKey,
-      'PRIVATE-KEY-MATERIAL',
-    );
+    // 源凭证、目标主机与保存的密文都保持原样。
+    expect(model.users.single.publicKey, credential.publicKey);
+    expect(model.users.single.username, 'deploy');
+    expect(model.hosts.single.address, 'dev.example.com');
+    expect(model.hosts.single.username, 'deploy');
+    expect(preferences.values, stored);
+    // 复用的会话没有被关闭或改动。
+    expect(session.status, ConnectionStatus.connected);
     expect(tester.takeException(), isNull);
     await tester.pumpWidget(const SizedBox.shrink());
   });
+
+  testWidgets('公钥已存在时不重复追加，重复安装仍复用同一会话', (tester) async {
+    final credential = _installCredential();
+    final session = await _installPublicKey(tester, credential, result: false);
+    expect(session.installed, [credential.publicKey]);
+    expect(
+      find.textContaining('该公钥已存在于 deploy@dev.example.com:22'),
+      findsOneWidget,
+    );
+    expect(find.textContaining('无需重复安装'), findsOneWidget);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('确定失败时告知失败原因，不宣称成功', (tester) async {
+    final credential = _installCredential();
+    final failed = await _installPublicKey(
+      tester,
+      credential,
+      failure: const PublicKeyInstallFailure('权限被拒绝，无法写入 authorized_keys'),
+    );
+    expect(failed.installed, isEmpty);
+    expect(
+      find.textContaining('安装公钥失败：权限被拒绝，无法写入 authorized_keys'),
+      findsOneWidget,
+    );
+    expect(find.textContaining('无法确认安装结果'), findsNothing);
+    expect(find.textContaining('已把「生产部署」的公钥安装到'), findsNothing);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('结果无法确认时提示用户去服务器核对', (tester) async {
+    final credential = _installCredential();
+    final unknown = await _installPublicKey(
+      tester,
+      credential,
+      failure: const PublicKeyInstallFailure('连接已断开', unknown: true),
+    );
+    expect(unknown.installed, isEmpty);
+    expect(find.textContaining('安装公钥失败'), findsNothing);
+    expect(find.textContaining('无法确认安装结果：连接已断开'), findsOneWidget);
+    expect(find.textContaining('请稍后在服务器上核对'), findsOneWidget);
+    expect(tester.takeException(), isNull);
+  });
+
+  for (final stale in const [
+    Host(
+      id: 'host-1',
+      name: '开发服务器',
+      address: 'old.example.com',
+      username: 'deploy',
+    ),
+    Host(
+      id: 'host-1',
+      name: '开发服务器',
+      address: 'dev.example.com',
+      username: 'someone',
+    ),
+  ]) {
+    testWidgets('同 id 的旧会话连的是 ${stale.address}/${stale.username} 时不复用', (
+      tester,
+    ) async {
+      tester.view.physicalSize = const Size(1280, 800);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+      final credential = _installCredential();
+      final repository = memoryRepository();
+      await repository.saveHosts([testHost]);
+      await repository.saveUsers([credential]);
+      // 该主机条目改过地址或账户后，旧会话连的已不是同一台服务器。
+      final session = _FakeInstallSession(host: stale);
+      final model = _InstallWorkspaceModel([session], repository);
+      await tester.pumpWidget(HarborApp(model: model));
+      await tester.pumpAndSettle();
+      await _openInstallDialog(tester, credential.name);
+      // 弹窗也不得宣称会复用这条会话。
+      expect(find.textContaining('复用已连接的会话'), findsNothing);
+      await tester.tap(find.byKey(const ValueKey('public-key-target-host-1')));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const ValueKey('public-key-install-confirm')));
+      await tester.pumpAndSettle();
+      // 没有可用的登录凭证，于是要求先配置，绝不把公钥交给旧会话。
+      expect(session.installed, isEmpty);
+      expect(find.textContaining('还没有可用的登录凭证'), findsOneWidget);
+      expect(session.status, ConnectionStatus.connected);
+      expect(tester.takeException(), isNull);
+      await tester.pumpWidget(const SizedBox.shrink());
+    });
+  }
+
+  testWidgets('目标服务器没有可用登录凭证时先要求配置，不发起安装', (tester) async {
+    tester.view.physicalSize = const Size(1280, 800);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    final credential = _installCredential();
+    final repository = memoryRepository();
+    await repository.saveHosts([testHost]);
+    await repository.saveUsers([credential]);
+    // 没有任何已连接会话，该主机也没有保存过密码或私钥。
+    final model = _InstallWorkspaceModel(const [], repository);
+    await tester.pumpWidget(HarborApp(model: model));
+    await tester.pumpAndSettle();
+    await _openInstallDialog(tester, credential.name);
+    await tester.ensureVisible(
+      find.byKey(const ValueKey('public-key-target-host-1')),
+    );
+    await tester.tap(find.byKey(const ValueKey('public-key-target-host-1')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const ValueKey('public-key-install-confirm')));
+    await tester.pumpAndSettle();
+    expect(
+      find.textContaining('还没有可用的登录凭证，请先编辑该连接保存密码或选择私钥凭证'),
+      findsOneWidget,
+    );
+    expect(find.textContaining('已把「生产部署」的公钥安装到'), findsNothing);
+    expect(tester.takeException(), isNull);
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
+
+  testWidgets('没有已连接会话时用本机端口临时连接，连不上只提示且不改配置', (tester) async {
+    tester.view.physicalSize = const Size(1280, 800);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    // 回环地址上没有 SSH 服务：只验证临时连接这条路，不访问任何外部网络。
+    const host = Host(
+      id: 'host-loopback',
+      name: '本机测试',
+      address: '127.0.0.1',
+      port: 1,
+      username: 'deploy',
+    );
+    final credential = _installCredential();
+    final preferences = MemoryStore();
+    final secrets = MemoryStore();
+    final repository = HostRepository(
+      preferences: preferences,
+      secrets: secrets,
+    );
+    await repository.saveHosts([host]);
+    await repository.saveUsers([credential]);
+    // 目标主机自己的登录凭证：临时连接用它，而不是被安装的那份公钥。
+    await repository.saveCredentials(
+      host.id,
+      const Credentials(password: 'stored'),
+    );
+    final model = _InstallWorkspaceModel(const [], repository);
+    await tester.pumpWidget(HarborApp(model: model));
+    await tester.pumpAndSettle();
+    final storedPreferences = Map<String, String>.of(preferences.values);
+    final storedSecrets = Map<String, String>.of(secrets.values);
+    await _openInstallDialog(tester, credential.name);
+    await tester.tap(
+      find.byKey(const ValueKey('public-key-target-host-loopback')),
+    );
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const ValueKey('public-key-install-confirm')));
+    await tester.pumpAndSettle();
+    // 连不上就如实报告，不能谎称已安装或已存在。
+    expect(
+      find.textContaining('未能连接 deploy@127.0.0.1:1，公钥未安装'),
+      findsOneWidget,
+    );
+    expect(find.textContaining('已把「生产部署」的公钥安装到'), findsNothing);
+    expect(find.textContaining('该公钥已存在于'), findsNothing);
+    expect(preferences.values, storedPreferences);
+    expect(secrets.values, storedSecrets);
+    expect(model.hosts.single.address, '127.0.0.1');
+    expect(model.users.single.publicKey, credential.publicKey);
+    expect(tester.takeException(), isNull);
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
+
+  testWidgets('多台服务器时必须先选定目标才能安装', (tester) async {
+    tester.view.physicalSize = const Size(1280, 800);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    final credential = _installCredential();
+    final repository = memoryRepository();
+    await repository.saveHosts([
+      testHost,
+      const Host(
+        id: 'host-2',
+        name: '测试环境',
+        address: '10.0.0.24',
+        username: 'tester',
+        port: 2222,
+      ),
+    ]);
+    await repository.saveUsers([credential]);
+    final model = _InstallWorkspaceModel(const [], repository);
+    await tester.pumpWidget(HarborApp(model: model));
+    await tester.pumpAndSettle();
+    await _openInstallDialog(tester, credential.name);
+    expect(
+      tester
+          .widget<FilledButton>(
+            find.byKey(const ValueKey('public-key-install-confirm')),
+          )
+          .onPressed,
+      isNull,
+    );
+    await tester.ensureVisible(
+      find.byKey(const ValueKey('public-key-target-host-2')),
+    );
+    await tester.tap(find.byKey(const ValueKey('public-key-target-host-2')));
+    await tester.pumpAndSettle();
+    expect(find.text('tester@10.0.0.24:2222'), findsOneWidget);
+    expect(
+      tester
+          .widget<FilledButton>(
+            find.byKey(const ValueKey('public-key-install-confirm')),
+          )
+          .onPressed,
+      isNotNull,
+    );
+    await tester.tap(find.byKey(const ValueKey('public-key-install-cancel')));
+    await tester.pumpAndSettle();
+    expect(find.text('安装公钥到服务器'), findsNothing);
+    expect(tester.takeException(), isNull);
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
+
+  testWidgets('旧版密码凭证没有安装公钥入口，其它菜单项不变', (tester) async {
+    tester.view.physicalSize = const Size(1280, 800);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    final credential = SshUser(
+      id: 'legacy-user',
+      name: '旧版密码凭证',
+      username: 'root',
+    );
+    final repository = memoryRepository();
+    await repository.saveUsers([credential]);
+    final model = _InstallWorkspaceModel(const [], repository);
+    await tester.pumpWidget(HarborApp(model: model));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('凭证'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byTooltip('管理凭证：${credential.name}'));
+    await tester.pumpAndSettle();
+    expect(find.text('将公钥安装到服务器'), findsNothing);
+    expect(find.text('编辑凭证'), findsOneWidget);
+    expect(find.text('删除凭证'), findsOneWidget);
+    expect(tester.takeException(), isNull);
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
+}
+
+/// 生成一份真实的 Ed25519 公钥凭证，避免把手写字符串当作合法公钥。
+SshUser _installCredential() {
+  final keys = generateEd25519Key(comment: 'deploy@laptop');
+  return SshUser(
+    id: 'user-install',
+    name: '生产部署',
+    username: 'deploy',
+    authMethod: AuthMethod.privateKey,
+    publicKey: keys.publicOpenSsh,
+  );
+}
+
+/// 打开凭证卡片的更多菜单，并点进「将公钥安装到服务器」的目标弹窗。
+Future<void> _openInstallDialog(WidgetTester tester, String name) async {
+  await tester.tap(find.text('凭证'));
+  await tester.pumpAndSettle();
+  await tester.tap(find.byTooltip('管理凭证：$name'));
+  await tester.pumpAndSettle();
+  await tester.tap(find.text('将公钥安装到服务器'));
+  await tester.pumpAndSettle();
+}
+
+/// 走完「已连接会话复用」的安装流程：只依赖假会话，不连接任何网络。
+Future<_FakeInstallSession> _installPublicKey(
+  WidgetTester tester,
+  SshUser credential, {
+  bool result = true,
+  Object? failure,
+}) async {
+  tester.view.physicalSize = const Size(1280, 800);
+  tester.view.devicePixelRatio = 1;
+  addTearDown(tester.view.resetPhysicalSize);
+  addTearDown(tester.view.resetDevicePixelRatio);
+  final repository = memoryRepository();
+  await repository.saveHosts([testHost]);
+  await repository.saveUsers([credential]);
+  final session = _FakeInstallSession(
+    host: testHost,
+    result: result,
+    failure: failure,
+  );
+  final model = _InstallWorkspaceModel([session], repository);
+  await tester.pumpWidget(HarborApp(model: model));
+  await tester.pumpAndSettle();
+  await _openInstallDialog(tester, credential.name);
+  await tester.ensureVisible(
+    find.byKey(const ValueKey('public-key-target-host-1')),
+  );
+  await tester.tap(find.byKey(const ValueKey('public-key-target-host-1')));
+  await tester.pumpAndSettle();
+  await tester.tap(find.byKey(const ValueKey('public-key-install-confirm')));
+  await tester.pumpAndSettle();
+  return session;
+}
+
+/// 该主机已有一条已连接的会话时，安装公钥复用它而不是新建连接。
+class _InstallWorkspaceModel extends WorkspaceModel {
+  _InstallWorkspaceModel(this.items, super.repository);
+  final List<SshConnection> items;
+  @override
+  List<SshConnection> get sessions => List.unmodifiable(items);
+}
+
+/// 假会话记录被安装的公钥，并按需抛出数据层的安装错误。
+class _FakeInstallSession extends SshConnection {
+  _FakeInstallSession({required super.host, this.result = true, this.failure})
+    : super(id: 'install-session') {
+    status = ConnectionStatus.connected;
+  }
+  final bool result;
+  final Object? failure;
+  final List<String> installed = [];
+  @override
+  Future<bool> installPublicKey(String publicKey) async {
+    final error = failure;
+    if (error != null) throw error;
+    installed.add(publicKey);
+    return result;
+  }
 }
 
 class _TerminalWorkspaceModel extends WorkspaceModel {

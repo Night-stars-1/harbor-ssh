@@ -98,6 +98,27 @@ class _TerminalPaneState extends State<TerminalPane> {
   late double _fontSize = widget.fontSize.clamp(10, 24).toDouble();
   PointerDownEvent? _linkDown;
   Uri? _pressedLink;
+  int? _secondaryPointer;
+
+  void _syncPointerInput() {
+    final suspend =
+        _secondaryPointer != null || HardwareKeyboard.instance.isControlPressed;
+    if (_controller.suspendedPointerInputs != suspend) {
+      _controller.setSuspendPointerInput(suspend);
+    }
+  }
+
+  void _releaseSecondaryPointer(PointerEvent event) {
+    if (_secondaryPointer != event.pointer) return;
+    // TapUp callbacks run during this pointer dispatch. Keep remote mouse
+    // reporting suspended until the local copy/paste action has won the tap.
+    scheduleMicrotask(() {
+      if (!mounted || _secondaryPointer != event.pointer) return;
+      _secondaryPointer = null;
+      _syncPointerInput();
+    });
+  }
+
   Offset? _hoverPosition;
   bool _hoverRefreshPending = false;
   TerminalCompletion? _completion;
@@ -503,6 +524,7 @@ class _TerminalPaneState extends State<TerminalPane> {
               child: const Text('取消'),
             ),
             FilledButton(
+              autofocus: true,
               onPressed: () => Navigator.pop(context, true),
               child: const Text('粘贴'),
             ),
@@ -686,6 +708,10 @@ class _TerminalPaneState extends State<TerminalPane> {
                         onPointerDown: (event) {
                           _linkDown = null;
                           _pressedLink = null;
+                          if (event.buttons == kSecondaryMouseButton) {
+                            _secondaryPointer = event.pointer;
+                            _syncPointerInput();
+                          }
                           if (event.buttons == kPrimaryMouseButton &&
                               HardwareKeyboard.instance.isControlPressed) {
                             _linkDown = event;
@@ -699,9 +725,10 @@ class _TerminalPaneState extends State<TerminalPane> {
                             _pressedLink = null;
                           }
                         },
-                        onPointerCancel: (_) {
+                        onPointerCancel: (event) {
                           _linkDown = null;
                           _pressedLink = null;
+                          _releaseSecondaryPointer(event);
                         },
                         onPointerUp: (event) {
                           final uri = _pressedLink;
@@ -713,6 +740,7 @@ class _TerminalPaneState extends State<TerminalPane> {
                           }
                           _linkDown = null;
                           _pressedLink = null;
+                          _releaseSecondaryPointer(event);
                         },
                         child: _terminalScrollbar(
                           TerminalView(
@@ -753,12 +781,7 @@ class _TerminalPaneState extends State<TerminalPane> {
                               final keys = HardwareKeyboard.instance;
                               // Ctrl-click belongs to the local link action, including
                               // when a remote program has enabled mouse reporting.
-                              if (_controller.suspendedPointerInputs !=
-                                  keys.isControlPressed) {
-                                _controller.setSuspendPointerInput(
-                                  keys.isControlPressed,
-                                );
-                              }
+                              _syncPointerInput();
                               if (event is KeyDownEvent &&
                                   (event.logicalKey ==
                                           LogicalKeyboardKey.contextMenu ||

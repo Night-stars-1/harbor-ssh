@@ -253,6 +253,18 @@ class IndexAwareCircularBuffer<T extends IndexedItem> {
     _length = copyLength;
   }
 
+  /// Moves a child into [toIndex], detaching the replaced child and leaving
+  /// [fromIndex] empty. Callers must fill the vacated slot before reading it.
+  void move(int fromIndex, int toIndex) {
+    RangeError.checkValueInInterval(fromIndex, 0, _length - 1, 'fromIndex');
+    RangeError.checkValueInInterval(toIndex, 0, _length - 1, 'toIndex');
+    if (fromIndex == toIndex) return;
+    if (_getChild(fromIndex) == null) {
+      throw StateError('Cannot move an empty buffer slot');
+    }
+    _moveChild(fromIndex, toIndex);
+  }
+
   /// Replaces the element at [index] with [value] and returns the replaced
   /// item.
   T swap(int index, T value) {

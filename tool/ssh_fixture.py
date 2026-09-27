@@ -18,24 +18,34 @@ host_key = paramiko.RSAKey.generate(2048)
 client_key = paramiko.RSAKey.generate(2048)
 key_text = io.StringIO()
 client_key.write_private_key(key_text, password="fixture-passphrase")
+# Public halves only; the private key above is the throwaway loopback credential.
+public_key_line = "ssh-rsa {} harbor-fixture-client".format(client_key.get_base64())
+existing_key_line = "ssh-rsa {} harbor-fixture-host".format(host_key.get_base64())
 
-class HistoryHandle(paramiko.SFTPHandle):
-    def __init__(self, data):
-        super().__init__()
-        self.data = data
 
-    def read(self, offset, length):
-        return self.data[offset:offset + length]
+def requested_permissions(attr, default):
+    """Permissions an SFTP client asked for, falling back to a umask-like default."""
+    mode = getattr(attr, "st_mode", None)
+    if mode is None:
+        return default
+    return (mode & 0o7777) or default
+
 
 class TransferHandle(paramiko.SFTPHandle):
-    def __init__(self, files, path, flags):
+    def __init__(self, fixture, path, flags):
         super().__init__(flags)
-        self.files, self.path = files, path
+        self.fixture, self.path = fixture, path
+        self.append = bool(flags & os.O_APPEND)
+
+    @property
+    def files(self):
+        return self.fixture.files
 
     def stat(self):
         attr = paramiko.SFTPAttributes()
-        attr.st_mode = stat.S_IFREG | 0o644
+        attr.st_mode = self.fixture.mode_of(self.path)
         attr.st_size = len(self.files[self.path])
+        attr.st_mtime = 1700000002
         return attr
 
     def read(self, offset, length):
@@ -45,8 +55,14 @@ class TransferHandle(paramiko.SFTPHandle):
         if self.path.endswith('/write-fail'):
             return paramiko.SFTP_PERMISSION_DENIED
         previous = self.files[self.path]
+        if self.append:
+            # O_APPEND ignores the requested offset and always extends the file.
+            offset = len(previous)
         self.files[self.path] = previous[:offset].ljust(offset, b'\x00') + data + previous[offset + len(data):]
         return paramiko.SFTP_OK
+
+    def chattr(self, attr):
+        return self.fixture.apply_attributes(self.path, attr)
 
 class DirectoryFixture(paramiko.SFTPServerInterface):
     """A virtual directory tree; never accesses the host filesystem."""
@@ -64,13 +80,37 @@ class DirectoryFixture(paramiko.SFTPServerInterface):
         "/home/tester/.bash_history": b"#1700000000\ngit status\n#1700000001\ngit log\n",
         "/home/tester/.zsh_history": b": 1700000002:0;docker ps\n",
     }
+    symlinks = {
+        "/home/tester/linkdir": "/home/tester/docs",
+    }
 
     def __init__(self, server, *args, **kwargs):
         super().__init__(server, *args, **kwargs)
         if not hasattr(server, 'file_entries'):
             server.file_entries = dict(type(self).entries)
             server.file_data = dict(type(self).files)
+            server.file_links = dict(type(self).symlinks)
         self.entries, self.files = server.file_entries, server.file_data
+        self.symlinks = server.file_links
+
+    def mode_of(self, path):
+        """Current mode of a path; regular files keep the 0600 default."""
+        if path in self.entries:
+            return self.entries[path]
+        return stat.S_IFREG | 0o600
+
+    def apply_attributes(self, path, attr):
+        """Apply SETSTAT/FSETSTAT to the virtual tree, never to the host."""
+        if path not in self.entries and path not in self.files:
+            return paramiko.SFTP_NO_SUCH_FILE
+        mode = self.mode_of(path)
+        if getattr(attr, "st_mode", None) is not None:
+            mode = stat.S_IFMT(mode) | (attr.st_mode & 0o7777)
+        self.entries[path] = mode
+        if path in self.files and attr._flags & attr.FLAG_SIZE:
+            size = attr.st_size or 0
+            self.files[path] = self.files[path][:size].ljust(size, b'\x00')
+        return paramiko.SFTP_OK
 
     def open(self, path, flags, attr):
         path = self.canonicalize(path)
@@ -79,17 +119,25 @@ class DirectoryFixture(paramiko.SFTPServerInterface):
                 return paramiko.SFTP_FAILURE
             if posixpath.dirname(path) not in self.entries:
                 return paramiko.SFTP_NO_SUCH_FILE
-            self.files.setdefault(path, b'')
-            self.entries[path] = stat.S_IFREG | 0o644
+            if path not in self.files:
+                # O_CREAT on an existing path must not reset its permissions.
+                self.files[path] = b''
+                self.entries[path] = stat.S_IFREG | requested_permissions(attr, 0o644)
+        else:
+            # Reads follow links, the way a real server's open() does; O_CREAT
+            # deliberately does not, so a link is never written through.
+            path = self.symlinks.get(path, path)
         if path not in self.files:
             return paramiko.SFTP_NO_SUCH_FILE
-        return TransferHandle(self.files, path, flags)
+        if flags & os.O_TRUNC:
+            self.files[path] = b''
+        return TransferHandle(self, path, flags)
 
     def mkdir(self, path, attr):
         path = self.canonicalize(path)
         if path in self.entries or posixpath.dirname(path) not in self.entries:
             return paramiko.SFTP_FAILURE
-        self.entries[path] = stat.S_IFDIR | 0o755
+        self.entries[path] = stat.S_IFDIR | requested_permissions(attr, 0o755)
         return paramiko.SFTP_OK
 
     def rmdir(self, path):
@@ -103,9 +151,10 @@ class DirectoryFixture(paramiko.SFTPServerInterface):
 
     def remove(self, path):
         path = self.canonicalize(path)
-        if path not in self.files:
+        if path not in self.files and path not in self.symlinks:
             return paramiko.SFTP_NO_SUCH_FILE
-        del self.files[path]
+        self.files.pop(path, None)
+        self.symlinks.pop(path, None)
         self.entries.pop(path, None)
         return paramiko.SFTP_OK
 
@@ -119,9 +168,30 @@ class DirectoryFixture(paramiko.SFTPServerInterface):
         if stat.S_ISDIR(self.entries[oldpath]):
             return paramiko.SFTP_FAILURE
         self.entries[newpath] = self.entries.pop(oldpath)
-        self.files[newpath] = self.files.pop(oldpath)
+        data = self.files.pop(oldpath, None)
+        if data is not None:
+            self.files[newpath] = data
+        target = self.symlinks.pop(oldpath, None)
+        if target is not None:
+            self.symlinks[newpath] = target
         return paramiko.SFTP_OK
 
+    def symlink(self, target_path, path):
+        path = self.canonicalize(path)
+        if path in self.entries or path in self.files:
+            return paramiko.SFTP_FAILURE
+        if posixpath.dirname(path) not in self.entries:
+            return paramiko.SFTP_NO_SUCH_FILE
+        self.entries[path] = stat.S_IFLNK | 0o777
+        self.symlinks[path] = self.canonicalize(target_path)
+        return paramiko.SFTP_OK
+
+    def readlink(self, path):
+        target = self.symlinks.get(self.canonicalize(path))
+        return paramiko.SFTP_NO_SUCH_FILE if target is None else target
+
+    def chattr(self, path, attr):
+        return self.apply_attributes(self.canonicalize(path), attr)
 
     def canonicalize(self, path):
         return posixpath.normpath(path if path.startswith("/") else "/home/tester/" + path)
@@ -143,26 +213,21 @@ class DirectoryFixture(paramiko.SFTPServerInterface):
 
     def stat(self, path):
         path = self.canonicalize(path)
-        if path in self.files:
-            entry = paramiko.SFTPAttributes()
-            entry.st_mode = stat.S_IFREG | 0o600
-            entry.st_size = len(self.files[path])
-            entry.st_mtime = 1700000002
-            return entry
-        if path == "/home/tester/linkdir":
-            path = "/home/tester/docs"
-        if path not in self.entries:
+        path = self.symlinks.get(path, path)
+        if path not in self.entries and path not in self.files:
             return paramiko.SFTP_NO_SUCH_FILE
         entry = paramiko.SFTPAttributes()
-        entry.st_mode = self.entries[path]
+        entry.st_mode = self.mode_of(path)
+        entry.st_size = len(self.files.get(path, b''))
+        entry.st_mtime = 1700000002
         return entry
 
     def lstat(self, path):
         path = self.canonicalize(path)
-        if path not in self.entries:
+        if path not in self.entries and path not in self.files:
             return paramiko.SFTP_NO_SUCH_FILE
         entry = paramiko.SFTPAttributes()
-        entry.st_mode = self.entries[path]
+        entry.st_mode = self.mode_of(path)
         entry.st_size = len(self.files.get(path, b''))
         entry.st_mtime = 1700000002
         return entry
@@ -192,6 +257,25 @@ class Server(paramiko.ServerInterface):
         self.shell_channel = channel
         self.shell_ready.set()
         return True
+    def virtual_modes_report(self):
+        """Read-only view of the virtual tree; no host command is involved."""
+        entries = getattr(self, 'file_entries', {})
+        files = getattr(self, 'file_data', {})
+
+        def describe(path):
+            mode = entries.get(path)
+            if mode is None and path not in files:
+                return "-"
+            if mode is None:
+                mode = stat.S_IFREG | 0o600
+            return f"{stat.S_IMODE(mode):03o}:{len(files.get(path, b''))}"
+
+        return (
+            "KEYMODES"
+            f" .ssh={describe('/home/tester/.ssh')}"
+            f" authorized_keys={describe('/home/tester/.ssh/authorized_keys')}"
+            "\n"
+        )
     def check_channel_exec_request(self, channel, command):
         if command in (b"harbor-ai-fixture-success", b"harbor-ai-fixture-fail", b"harbor-ai-fixture-large", b"harbor-ai-fixture-wait"):
             def ai_reply():
@@ -209,6 +293,18 @@ class Server(paramiko.ServerInterface):
                 except (EOFError, OSError, paramiko.SSHException):
                     pass
             threading.Timer(0.02, ai_reply).start()
+            return True
+        if command == b"harbor-key-fixture-modes":
+            report = self.virtual_modes_report()
+            def modes_reply():
+                try:
+                    # Virtual permission query only; never run the received command.
+                    channel.sendall(report.encode())
+                    channel.send_exit_status(0)
+                    channel.close()
+                except (EOFError, OSError, paramiko.SSHException):
+                    pass
+            threading.Timer(0.02, modes_reply).start()
             return True
         if command.startswith(b"sh -c ") and b"__HARBOR_REMOTE_METRICS_BEGIN__" in command:
             self.metrics_queries += 1
@@ -299,7 +395,12 @@ def serve(client):
 listener = socket.socket()
 listener.bind(("127.0.0.1", 0))
 listener.listen(10)
-print(json.dumps({"port": listener.getsockname()[1], "privateKey": key_text.getvalue()}), flush=True)
+print(json.dumps({
+    "port": listener.getsockname()[1],
+    "privateKey": key_text.getvalue(),
+    "publicKey": public_key_line,
+    "existingKey": existing_key_line,
+}), flush=True)
 while True:
     client, _ = listener.accept()
     threading.Thread(target=serve, args=(client,), daemon=True).start()

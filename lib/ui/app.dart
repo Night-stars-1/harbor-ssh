@@ -1,13 +1,16 @@
 import 'dart:async';
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 
+import '../data/public_key_install.dart';
 import '../data/ssh_connection.dart';
 import '../domain/host.dart';
 import '../domain/appearance.dart';
 import 'host_editor.dart';
 import 'host_identity_dialog.dart';
 import 'expressive_widgets.dart';
+import 'public_key_target_dialog.dart';
 import 'reorderable_host_collection.dart';
 import 'terminal_pane.dart';
 import 'terminal_workspace.dart';
@@ -153,10 +156,7 @@ class _WorkspaceState extends State<Workspace> {
 
   void _message(String text) =>
       ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(text)));
-
-  /// [initialCredential] 仅用于从凭证卡片发起的新建连接：给出该私钥凭证，
-  /// 让 [HostEditor] 预先选中，Host 只保留对它的 userId 引用。
-  Future<void> _edit({Host? host, SshUser? initialCredential}) async {
+  Future<void> _edit([Host? host]) async {
     if (_opening) return;
     _opening = true;
     try {
@@ -169,7 +169,6 @@ class _WorkspaceState extends State<Workspace> {
         if (value != null) userCredentials[user.id] = value;
       }
       if (!mounted) return;
-      var saved = false;
       await showDialog<void>(
         context: context,
         barrierDismissible: false,
@@ -178,17 +177,10 @@ class _WorkspaceState extends State<Workspace> {
           credentials: credentials,
           users: model.users,
           userCredentials: userCredentials,
-          initialCredential: initialCredential,
-          onSave: (host, stored) async {
-            await model.saveHost(host, stored);
-            saved = true;
-          },
+          onSave: model.saveHost,
           onTest: _testConnection,
         ),
       );
-      // 从凭证卡片发起的新建：保存成功后切回连接列表。其它入口保持原有
-      // 视图与筛选不变，取消或保存失败一律留在原页面。
-      if (saved && initialCredential != null && mounted) model.filter();
     } catch (_) {
       if (mounted) _message('无法读取安全存储，请检查系统权限。');
     } finally {
@@ -246,7 +238,7 @@ class _WorkspaceState extends State<Workspace> {
               : '请为连接选择已保存的私钥凭证。',
         );
         _opening = false;
-        await _edit(host: host);
+        await _edit(host);
       } else if (mounted) {
         _start(host, credentials);
       }
@@ -302,16 +294,11 @@ class _WorkspaceState extends State<Workspace> {
   }
 
   Future<SshConnection?> _connectFiles(Host host) async {
-    final stored = await model.repository.credentials(host.id);
-    final credentials =
-        stored ??
-        (host.userId.isEmpty
-            ? null
-            : await model.repository.userCredentials(host.userId));
+    final credentials = await _loginCredentialsFor(host);
     if (!mounted) return null;
     if (credentials == null) {
       _message('请先为连接保存密码或选择私钥凭证');
-      await _edit(host: host);
+      await _edit(host);
       return null;
     }
     final session = SshConnection(
@@ -369,7 +356,7 @@ class _WorkspaceState extends State<Workspace> {
   Future<void> _hostAction(Host host, String action) async {
     switch (action) {
       case 'edit':
-        await _edit(host: host);
+        await _edit(host);
       case 'delete':
         if (await _confirm(
           '删除连接？',
@@ -394,8 +381,8 @@ class _WorkspaceState extends State<Workspace> {
 
   Future<void> _userAction(SshUser user, String action) async {
     switch (action) {
-      case 'createHost':
-        await _edit(initialCredential: user);
+      case 'installKey':
+        await _installPublicKey(user);
       case 'edit':
         await _editUser(user);
       case 'delete':
@@ -407,6 +394,169 @@ class _WorkspaceState extends State<Workspace> {
           await _guard(() => model.deleteUser(user));
         }
     }
+  }
+
+  /// 该主机已有的已连接会话：安装公钥时复用它，既不新建连接，也不动它的终端。
+  ///
+  /// 只有地址、端口与登录账户都与所选主机一致才算同一个目标：主机条目改过
+  /// 地址或账户后，旧会话连的是另一台服务器，绝不能把公钥装到那里去。
+  SshConnection? _connectedSessionFor(Host host) {
+    for (final session in model.sessions) {
+      if (session.status != ConnectionStatus.connected) continue;
+      final live = session.host;
+      if (live.id == host.id &&
+          live.endpoint == host.endpoint &&
+          live.username == host.username) {
+        return session;
+      }
+    }
+    return null;
+  }
+
+  /// 目标服务器自己的登录凭证（连接级优先，其次继承凭证）。
+  /// 被安装的公钥不参与登录，私钥也不会离开这份凭证。
+  Future<Credentials?> _loginCredentialsFor(Host host) async {
+    final stored = await model.repository.credentials(host.id);
+    if (stored != null) return stored;
+    if (host.userId.isEmpty) return null;
+    return model.repository.userCredentials(host.userId);
+  }
+
+  /// 把私钥凭证的公钥安装到用户选定的服务器：仅把公钥追加到目标账户的
+  /// ~/.ssh/authorized_keys。优先复用该主机已连接的会话，否则用目标主机
+  /// 自己的登录凭证临时建连（不打开终端），用完即断。
+  /// 无论成败都不改动凭证、主机配置或登录来源。
+  Future<void> _installPublicKey(SshUser user) async {
+    final String publicKey;
+    try {
+      publicKey = validatedOpenSshPublicKey(user.publicKey);
+    } on FormatException catch (error) {
+      _message('「${user.name}」没有可安装的 OpenSSH 公钥：${error.message}');
+      return;
+    }
+    if (!mounted) return;
+    final hosts = model.hosts;
+    final target = await PublicKeyTargetDialog.show(
+      context,
+      credential: user,
+      publicKey: publicKey,
+      hosts: hosts,
+      // 弹窗只用它提示「会复用已连接的会话」，因此必须与复用条件完全一致：
+      // 只按 host.id 提示会让用户以为公钥会装到那台旧服务器上。
+      liveSessionHostIds: {
+        for (final host in hosts)
+          if (_connectedSessionFor(host) != null) host.id,
+      },
+    );
+    if (target == null || !mounted) return;
+
+    SshConnection? temporary;
+    final existing = _connectedSessionFor(target);
+    if (existing == null) {
+      temporary = SshConnection(
+        id: 'key-install-${DateTime.now().microsecondsSinceEpoch}',
+        host: target,
+      );
+    }
+    final connection = existing ?? temporary!;
+    final targetPath = '${target.destination} 的 ~/.ssh/authorized_keys';
+    // 复用已有会话时不必再连接，进度从一开始就说清写入目标。
+    final status = ValueNotifier<String>(
+      existing == null
+          ? '正在连接 ${target.destination}…'
+          : '正在通过已连接的会话写入 $targetPath…',
+    );
+    BuildContext? progressContext;
+    final progress = showDialog<void>(
+      context: context,
+      barrierDismissible: false,
+      builder: (dialogContext) {
+        progressContext = dialogContext;
+        return _InstallProgress(status: status);
+      },
+    );
+    // 安装已发出后断线，与连接阶段失败的含义不同：前者可能已经写入。
+    var installing = false;
+    var declined = false;
+    try {
+      if (temporary != null) {
+        final credentials = await _loginCredentialsFor(target);
+        if (!mounted) return;
+        if (credentials == null) {
+          _message('「${target.name}」还没有可用的登录凭证，请先编辑该连接保存密码或选择私钥凭证。');
+          return;
+        }
+        await temporary.connect(
+          credentials,
+          model.repository,
+          (type, fingerprint) async {
+            final accepted = await _trustHost(target, type, fingerprint);
+            declined = !accepted;
+            return accepted;
+          },
+          openShell: false,
+        );
+        if (temporary.status != ConnectionStatus.connected) {
+          throw Exception(temporary.error ?? '无法建立 SSH 连接');
+        }
+      }
+      status.value = '正在写入 $targetPath…';
+      installing = true;
+      final installed = await connection.installPublicKey(publicKey);
+      if (!mounted) return;
+      _message(
+        installed
+            ? '已把「${user.name}」的公钥安装到 $targetPath。'
+            : '该公钥已存在于 $targetPath，无需重复安装。',
+      );
+    } catch (error) {
+      if (!mounted) return;
+      if (declined) {
+        _message('未确认 ${target.destination} 的主机身份，已取消安装。');
+      } else if (_installResultUnknown(error, connection, installing)) {
+        _message(
+          '无法确认安装结果：${_installError(error)}。'
+          '请稍后在服务器上核对 ~/.ssh/authorized_keys。',
+        );
+      } else if (!installing) {
+        _message('未能连接 ${target.destination}，公钥未安装：${_installError(error)}');
+      } else {
+        _message('安装公钥失败：${_installError(error)}');
+      }
+    } finally {
+      // 很快结束的安装（例如无可用的登录凭证）可能还没渲染出进度弹窗：
+      // 先等它出现，再精确关闭自己，绝不留下永远转圈的遮罩。
+      await WidgetsBinding.instance.endOfFrame;
+      final dialogContext = progressContext;
+      if (dialogContext != null && dialogContext.mounted) {
+        Navigator.of(dialogContext).pop();
+        await progress;
+      }
+      status.dispose();
+      temporary?.dispose();
+    }
+  }
+
+  /// 安装请求已发出后超时或断线，公钥可能已经写入、也可能没有：
+  /// 既不宣称成功，也不断言失败，只提示用户去服务器核对。
+  bool _installResultUnknown(
+    Object error,
+    SshConnection connection,
+    bool installing,
+  ) {
+    if (error is PublicKeyInstallFailure) return error.unknown;
+    if (!installing) return false;
+    return error is TimeoutException ||
+        connection.status != ConnectionStatus.connected;
+  }
+
+  String _installError(Object error) {
+    if (error is PublicKeyInstallFailure) return error.message;
+    final text = error.toString();
+    for (final prefix in const ['Exception: ', 'StateError: ']) {
+      if (text.startsWith(prefix)) return text.substring(prefix.length);
+    }
+    return text;
   }
 
   Future<void> _closeSession(SshConnection session) async {
@@ -1767,5 +1917,35 @@ class _WorkspaceState extends State<Workspace> {
     asCard: asCard,
     onOpen: () => _editUser(user),
     onAction: (action) => _userAction(user, action),
+  );
+}
+
+/// 安装公钥期间的进度弹窗：不能手动关闭，安装一结束就由调用方移除。
+class _InstallProgress extends StatelessWidget {
+  const _InstallProgress({required this.status});
+
+  final ValueListenable<String> status;
+
+  @override
+  Widget build(BuildContext context) => PopScope(
+    canPop: false,
+    child: AlertDialog(
+      content: Row(
+        children: [
+          const SizedBox(
+            width: 24,
+            height: 24,
+            child: CircularProgressIndicator(strokeWidth: 3),
+          ),
+          const SizedBox(width: 20),
+          Expanded(
+            child: ValueListenableBuilder<String>(
+              valueListenable: status,
+              builder: (_, value, _) => Text(value),
+            ),
+          ),
+        ],
+      ),
+    ),
   );
 }

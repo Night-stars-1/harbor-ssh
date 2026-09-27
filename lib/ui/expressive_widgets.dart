@@ -161,9 +161,12 @@ class ExpressiveUserCard extends StatelessWidget {
     onTap: onOpen,
     onAction: onAction,
     menuItems: [
-      // 旧版密码凭证没有可引用的私钥，无法据此新建连接。
+      // 旧版密码凭证没有可安装的公钥，因此没有这个入口。
       if (user.authMethod == AuthMethod.privateKey)
-        const PopupMenuItem(value: 'createHost', child: Text('用此凭证新建连接')),
+        const PopupMenuItem(
+          value: 'installKey',
+          child: Text('将公钥安装到服务器'),
+        ),
       const PopupMenuItem(value: 'edit', child: Text('编辑凭证')),
       const PopupMenuItem(value: 'delete', child: Text('删除凭证')),
     ],

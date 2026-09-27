@@ -10,6 +10,7 @@ import '../domain/host.dart';
 import '../domain/command_history.dart';
 import '../domain/path_completion.dart';
 import 'host_repository.dart';
+import 'public_key_install.dart';
 import 'terminal_ai.dart';
 import 'ssh_ai_executor.dart';
 import 'remote_commands.dart';
@@ -409,6 +410,32 @@ class SshConnection extends ChangeNotifier {
     } catch (_) {
       // Servers may disable SFTP. Completion must not interrupt terminal input.
       return const [];
+    }
+  }
+
+  /// Installs [publicKey] into the login account's `~/.ssh/authorized_keys`
+  /// through a separate SFTP channel.
+  ///
+  /// Returns true when the key was appended and false when the very same key
+  /// was already present. Only that remote file is touched: the saved
+  /// credentials, the host entry and the user's terminal stay untouched, and
+  /// no shell or exec channel is opened.
+  ///
+  /// Throws a [FormatException] when [publicKey] is not one valid OpenSSH line
+  /// (nothing is sent in that case) and a [PublicKeyInstallFailure] otherwise;
+  /// its `unknown` flag tells the caller whether the remote file may have
+  /// changed, which a timeout or a dropped channel cannot rule out.
+  Future<bool> installPublicKey(String publicKey) async {
+    // Validation comes first so a malformed key never reaches the network.
+    final key = validatedOpenSshPublicKey(publicKey);
+    if (status != ConnectionStatus.connected || _closed) {
+      throw const PublicKeyInstallFailure('SSH 未连接，公钥未安装');
+    }
+    try {
+      return await SftpFiles(_openSftp).installAuthorizedKey(key);
+    } on StateError {
+      // The SFTP channel could not be opened, so nothing was written.
+      throw const PublicKeyInstallFailure('SSH 连接已断开，公钥未安装');
     }
   }
 

@@ -120,3 +120,12 @@ Limitations:
   mapping only the moving end through the current viewport. Existing pixel-
   based selection methods still delegate to them for single-action selection.
 
+## Selection anchors in alternate-screen scrolling regions
+
+`lib/src/utils/circular_buffer.dart` exposes `move(fromIndex, toIndex)` to
+transfer ownership of a line without leaving a duplicate reference at the
+source slot. `lib/src/core/buffer/buffer.dart` uses it for scroll up/down and
+delete-lines. Assigning `lines[i] = lines[j]` left the same line in two slots;
+replacing the stale source then detached the visible line and invalidated its
+selection anchors. This happened routinely when GNU screen scrolled its
+alternate buffer. `test/terminal_test.dart` covers scrolling and copying.

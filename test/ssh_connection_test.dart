@@ -22,6 +22,7 @@ void main() {
       late Process fixture;
       late int port;
       late String privateKey;
+      late String publicKey;
       setUpAll(() async {
         fixture = await Process.start('python', ['tool/ssh_fixture.py']);
         final output = fixture.stdout
@@ -39,6 +40,7 @@ void main() {
         final config = await ready.future.timeout(const Duration(seconds: 20));
         port = config['port'] as int;
         privateKey = config['privateKey'] as String;
+        publicKey = config['publicKey'] as String;
       });
       tearDownAll(() async {
         fixture.kill();
@@ -484,6 +486,28 @@ void main() {
         );
         expect(utf8.decode(bytes.takeBytes()), 'Hello SFTP\n');
         expect(connection.terminal.buffer.getText().trim(), isEmpty);
+      });
+      test('公钥安装使用独立 SFTP 通道，不干扰交互终端', () async {
+        final connection = SshConnection(id: 'install-live', host: host());
+        addTearDown(connection.dispose);
+        await connection.connect(
+          const Credentials(password: 'fixture-password'),
+          memoryRepository(),
+          (_, _) async => true,
+        );
+        expect(connection.status, ConnectionStatus.connected);
+        await eventually(
+          () => connection.terminal.buffer.getText().contains('测试 connected'),
+        );
+        final before = connection.terminal.buffer.getText();
+        expect(await connection.installPublicKey(publicKey), isTrue);
+        expect(connection.terminal.buffer.getText(), before);
+        connection.send('after-key-install\r');
+        await eventually(
+          () => connection.terminal.buffer.getText().contains(
+            'ECHO=after-key-install',
+          ),
+        );
       });
       for (final method in AuthMethod.values) {
         test('测试连接只验证身份，不打开终端 ${method.name}', () async {

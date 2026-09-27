@@ -124,6 +124,98 @@ void main() {
     await tester.pumpWidget(const SizedBox.shrink());
   });
 
+  testWidgets('screen 开启鼠标上报后仍可右键复制选中的文字', (tester) async {
+    tester.view.physicalSize = const Size(1280, 900);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    final session = SshConnection(id: 'screen-copy', host: testHost)
+      ..status = ConnectionStatus.connected;
+    session.terminal.write('\x1b[?1049h\x1b[?1000h\x1b[?1006hscreen text');
+    final sent = <String>[];
+    session.terminal.onOutput = sent.add;
+    String? copied;
+    tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+      SystemChannels.platform,
+      (call) async {
+        if (call.method == 'Clipboard.setData') {
+          copied = call.arguments['text'] as String;
+        }
+        if (call.method == 'Clipboard.getData') return {'text': 'pwd'};
+        return null;
+      },
+    );
+    addTearDown(() {
+      session.dispose();
+      tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+        SystemChannels.platform,
+        null,
+      );
+    });
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: harborTheme(),
+        home: Scaffold(
+          body: TerminalPane(session: session, onReconnect: () {}),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+    final terminal = find.byType(TerminalView);
+    final controller = tester.widget<TerminalView>(terminal).controller!;
+    final render = tester.state<TerminalViewState>(terminal).renderTerminal;
+    Offset point(int column) => render.localToGlobal(
+      render.getOffset(CellOffset(column, 0)) +
+          Offset(render.cellSize.width / 2, render.lineHeight / 2),
+    );
+    final drag = await tester.startGesture(
+      point(0),
+      kind: PointerDeviceKind.mouse,
+    );
+    await drag.moveTo(point(5));
+    await tester.pump();
+    await drag.up();
+    await tester.pumpAndSettle();
+    expect(session.terminal.buffer.getText(controller.selection), 'screen');
+    await tester.tapAt(point(2), buttons: kSecondaryMouseButton);
+    await tester.pumpAndSettle();
+    expect(copied, 'screen');
+    expect(sent, isEmpty);
+    expect(controller.selection, isNull);
+    await tester.tapAt(point(2), buttons: kSecondaryMouseButton);
+    await tester.pumpAndSettle();
+    expect(sent.join(), 'pwd');
+    await tester.tapAt(point(2));
+    await tester.pumpAndSettle();
+    await tester.pump(kDoubleTapTimeout + const Duration(milliseconds: 10));
+    expect(sent.length, greaterThan(1));
+    expect(tester.takeException(), isNull);
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
+
+  test('screen 滚动后保留可见行的选区锚点', () {
+    final terminal = Terminal()..resize(20, 4);
+    final controller = TerminalController();
+    terminal.write('\x1b[?1049hrow0\r\nrow1\r\nrow2\r\nrow3');
+    controller.setSelection(
+      terminal.buffer.createAnchor(0, 1),
+      terminal.buffer.createAnchor(4, 1),
+    );
+    expect(terminal.buffer.getText(controller.selection), 'row1');
+
+    terminal.write('\r\nrow4');
+    expect(controller.selection, isNotNull);
+    expect(terminal.buffer.getText(controller.selection), 'row1');
+
+    terminal.write('\x1b[1;1H\x1bM');
+    expect(controller.selection, isNotNull);
+    expect(terminal.buffer.getText(controller.selection), 'row1');
+
+    terminal.write('\x1b[1;1H\x1b[M');
+    expect(controller.selection, isNotNull);
+    expect(terminal.buffer.getText(controller.selection), 'row1');
+  });
+
   testWidgets('Ctrl+A/C 发送到远端，Ctrl+V 多行粘贴需要检查', (tester) async {
     tester.view.physicalSize = const Size(1280, 900);
     tester.view.devicePixelRatio = 1;
@@ -177,6 +269,16 @@ void main() {
     await tester.tap(find.text('取消'));
     await tester.pumpAndSettle();
     expect(output.join(), isNot(contains('echo one')));
+    output.clear();
+    await tester.sendKeyDownEvent(LogicalKeyboardKey.controlLeft);
+    await tester.sendKeyEvent(LogicalKeyboardKey.keyV);
+    await tester.sendKeyUpEvent(LogicalKeyboardKey.controlLeft);
+    await tester.pumpAndSettle();
+    expect(find.text('粘贴多行内容？'), findsOneWidget);
+    await tester.sendKeyEvent(LogicalKeyboardKey.enter);
+    await tester.pumpAndSettle();
+    expect(find.text('粘贴多行内容？'), findsNothing);
+    expect(output.join(), 'echo one\necho two');
     expect(tester.takeException(), isNull);
     await tester.pumpWidget(const SizedBox.shrink());
   });
