@@ -7,6 +7,7 @@ import '../data/public_key_install.dart';
 import '../data/ssh_connection.dart';
 import '../domain/host.dart';
 import '../domain/appearance.dart';
+import 'ai_window_bridge.dart';
 import 'host_editor.dart';
 import 'host_identity_dialog.dart';
 import 'expressive_widgets.dart';
@@ -26,9 +27,15 @@ import 'settings_window_bridge.dart';
 import 'system_color_scope.dart';
 
 class HarborApp extends StatefulWidget {
-  const HarborApp({super.key, required this.model, this.settingsWindow});
+  const HarborApp({
+    super.key,
+    required this.model,
+    this.settingsWindow,
+    this.aiWindow,
+  });
   final WorkspaceModel model;
   final SettingsWindowHost? settingsWindow;
+  final AiWindowHost? aiWindow;
   @override
   State<HarborApp> createState() => _HarborAppState();
 }
@@ -43,6 +50,10 @@ class _HarborAppState extends State<HarborApp> {
   @override
   void dispose() {
     widget.settingsWindow?.dispose();
+    if (widget.aiWindow != null) {
+      widget.model.appearance.removeListener(widget.aiWindow!.refresh);
+      widget.aiWindow!.dispose();
+    }
     widget.model.dispose();
     super.dispose();
   }
@@ -75,6 +86,7 @@ class _HarborAppState extends State<HarborApp> {
         home: Builder(
           builder: (context) => Workspace(
             model: widget.model,
+            aiWindow: widget.aiWindow,
             onOpenSettings: widget.settingsWindow == null
                 ? null
                 : () => widget.settingsWindow!.open(),
@@ -106,10 +118,12 @@ class Workspace extends StatefulWidget {
     required this.model,
     required this.onToggleTheme,
     this.onOpenSettings,
+    this.aiWindow,
   });
   final WorkspaceModel model;
   final VoidCallback onToggleTheme;
   final Future<void> Function()? onOpenSettings;
+  final AiWindowHost? aiWindow;
   @override
   State<Workspace> createState() => _WorkspaceState();
 }
@@ -486,16 +500,14 @@ class _WorkspaceState extends State<Workspace> {
           _message('「${target.name}」还没有可用的登录凭证，请先编辑该连接保存密码或选择私钥凭证。');
           return;
         }
-        await temporary.connect(
-          credentials,
-          model.repository,
-          (type, fingerprint) async {
-            final accepted = await _trustHost(target, type, fingerprint);
-            declined = !accepted;
-            return accepted;
-          },
-          openShell: false,
-        );
+        await temporary.connect(credentials, model.repository, (
+          type,
+          fingerprint,
+        ) async {
+          final accepted = await _trustHost(target, type, fingerprint);
+          declined = !accepted;
+          return accepted;
+        }, openShell: false);
         if (temporary.status != ConnectionStatus.connected) {
           throw Exception(temporary.error ?? '无法建立 SSH 连接');
         }
@@ -884,6 +896,9 @@ class _WorkspaceState extends State<Workspace> {
                                           child: TerminalWorkspace(
                                             sessions: model.sessions,
                                             aiSettings: () => model.aiSettings,
+                                            aiHistoryStore:
+                                                model.aiHistoryStore,
+                                            aiWindow: widget.aiWindow,
                                             onAiSettings: () async {
                                               if (widget.onOpenSettings !=
                                                   null) {

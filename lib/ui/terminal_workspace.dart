@@ -2,6 +2,8 @@ import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
 
+import 'ai_window_bridge.dart';
+import '../data/ai_conversation_store.dart';
 import '../data/ssh_connection.dart';
 import '../data/terminal_ai.dart';
 import '../domain/host.dart';
@@ -24,6 +26,8 @@ class TerminalWorkspace extends StatefulWidget {
     required this.onFiles,
     this.aiSettings,
     this.onAiSettings,
+    this.aiHistoryStore,
+    this.aiWindow,
     this.fontSize = 14,
     this.terminalWrap = true,
     this.statusRefreshSeconds = 5,
@@ -39,6 +43,8 @@ class TerminalWorkspace extends StatefulWidget {
   final ValueChanged<SshConnection> onClose, onFiles;
   final AiSettings Function()? aiSettings;
   final VoidCallback? onAiSettings;
+  final AiConversationStore? aiHistoryStore;
+  final AiWindowHost? aiWindow;
   final double fontSize;
   final bool terminalWrap;
   final int statusRefreshSeconds;
@@ -360,6 +366,8 @@ class _TerminalWorkspaceState extends State<TerminalWorkspace> {
                   session: session,
                   aiSettings: widget.aiSettings,
                   onAiSettings: widget.onAiSettings,
+                  aiHistoryStore: widget.aiHistoryStore,
+                  aiWindow: widget.aiWindow,
                   controller: !widget.desktop && _focused == side
                       ? widget.mobileController
                       : _controllers.putIfAbsent(

@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'package:flutter_test/flutter_test.dart';
+import 'package:harbor_ssh/data/ai_conversation_store.dart';
 import 'package:harbor_ssh/data/gist_sync.dart';
 import 'package:harbor_ssh/data/github_device_auth.dart';
 import 'package:harbor_ssh/data/host_repository.dart';
@@ -94,6 +95,46 @@ void main() {
       throwsA(anything),
     );
   }, timeout: const Timeout(Duration(minutes: 2)));
+
+  test('本机 AI 历史不进入云同步快照或明文偏好设置', () async {
+    final root = await Directory.systemTemp.createTemp(
+      'harbor-local-ai-history-',
+    );
+    addTearDown(() => root.delete(recursive: true));
+    final repository = memoryRepository();
+    await repository.saveHosts([testHost]);
+    final store = AiConversationStore(
+      secrets: repository.secrets,
+      directory: () async => root,
+    );
+    const scope = 'host-1|dev.example.com:22|deploy';
+    final now = DateTime(2026);
+    await store.save(
+      AiConversation(
+        id: 'local-chat',
+        scope: scope,
+        title: '本机敏感对话',
+        model: 'test',
+        createdAt: now,
+        updatedAt: now,
+        entries: [
+          {'text': '私有输出标记-仅本机', 'user': true},
+        ],
+        history: [
+          {'role': 'user', 'content': '私有输出标记-仅本机'},
+        ],
+      ),
+    );
+    final snapshot = await SyncStorage(repository).capture();
+    expect(snapshot.records.keys, ['host:${testHost.id}']);
+    expect(snapshot.encode(), isNot(contains('私有输出标记-仅本机')));
+    expect(snapshot.encode(), isNot(contains('本机敏感对话')));
+    expect(
+      (repository.preferences as MemoryStore).values.values.join(),
+      isNot(contains('私有输出标记-仅本机')),
+    );
+    expect((await store.load(scope, 'local-chat'))?.title, '本机敏感对话');
+  });
 
   test('本地同步写入失败回滚，密钥仅落在安全存储，启动可恢复未完成写入', () async {
     final preferences = _FailOnceStore();

@@ -777,8 +777,14 @@ class TerminalAiClient {
       throw const AiFailure('AI 返回格式不正确，请检查接口兼容性');
     } on TypeError {
       throw const AiFailure('AI 返回格式不正确，请检查接口兼容性');
-    } catch (_) {
-      throw AiFailure(_cancelled ? '已取消生成' : '无法连接 AI 服务，请检查地址和网络');
+    } on IOException catch (error) {
+      throw AiFailure(
+        _cancelled ? '已取消生成' : 'AI 连接或响应中断（${error.runtimeType}），请检查网络或服务端',
+      );
+    } catch (error) {
+      throw AiFailure(
+        _cancelled ? '已取消生成' : 'AI 响应处理异常（${error.runtimeType}），请重试或反馈错误类型',
+      );
     } finally {
       client.close(force: true);
       _client = null;
@@ -806,6 +812,7 @@ class TerminalAiClient {
     final client = HttpClient()
       ..connectionTimeout = const Duration(seconds: 15);
     _client = client;
+    var streaming = false;
     try {
       return await (() async {
         final request = await client.postUrl(uri);
@@ -850,6 +857,7 @@ class TerminalAiClient {
           if (reply.text.isNotEmpty) onText(reply.text);
           return reply;
         }
+        streaming = true;
         final lines = response
             .transform(utf8.decoder)
             .transform(const LineSplitter());
@@ -865,8 +873,18 @@ class TerminalAiClient {
       throw const AiFailure('AI 返回格式不正确，请检查接口兼容性');
     } on TypeError {
       throw const AiFailure('AI 返回格式不正确，请检查接口兼容性');
-    } catch (_) {
-      throw AiFailure(_cancelled ? '已取消生成' : '无法连接 AI 服务，请检查地址和网络');
+    } on IOException catch (error) {
+      throw AiFailure(
+        _cancelled
+            ? '已取消生成'
+            : streaming
+            ? 'AI 流式回复中断（${error.runtimeType}），请检查网络或服务端后继续'
+            : 'AI 连接或响应中断（${error.runtimeType}），请检查网络或服务端',
+      );
+    } catch (error) {
+      throw AiFailure(
+        _cancelled ? '已取消生成' : 'AI 响应处理异常（${error.runtimeType}），请重试或反馈错误类型',
+      );
     } finally {
       client.close(force: true);
       _client = null;

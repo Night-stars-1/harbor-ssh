@@ -850,4 +850,94 @@ void main() {
     expect(reply.text, '你好，这是流式回复');
     client.cancel();
   });
+  test('流式回答中途断开时保留已收到文本并区分连接失败', () async {
+    final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+    addTearDown(() => server.close(force: true));
+    final received = Completer<void>();
+    server.listen((request) async {
+      await request.drain<void>();
+      request.response.headers.contentType = ContentType(
+        'text',
+        'event-stream',
+        charset: 'utf-8',
+      );
+      request.response.bufferOutput = false;
+      request.response.write(
+        'data: ${jsonEncode({
+          'choices': [
+            {
+              'delta': {'content': '已收到部分回答'},
+            },
+          ],
+        })}\n\n',
+      );
+      await request.response.flush();
+      await received.future.timeout(const Duration(seconds: 5));
+      await server.close(force: true);
+    });
+    final client = TerminalAiClient();
+    addTearDown(client.cancel);
+    final chunks = <String>[];
+    await expectLater(
+      client.stream(
+        AiSettings(
+          baseUrl: 'http://127.0.0.1:${server.port}/v1',
+          model: 'mock',
+        ),
+        [
+          {'role': 'user', 'content': '继续'},
+        ],
+        onText: (delta) {
+          chunks.add(delta);
+          if (!received.isCompleted) received.complete();
+        },
+      ),
+      throwsA(
+        isA<AiFailure>().having(
+          (e) => e.message,
+          'message',
+          contains('流式回复中断'),
+        ),
+      ),
+    );
+    expect(chunks, ['已收到部分回答']);
+  });
+
+  test('增量回调异常不会误报为 AI 网络故障或泄漏异常内容', () async {
+    final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+    addTearDown(() => server.close(force: true));
+    server.listen((request) async {
+      await request.drain<void>();
+      request.response.headers.contentType = ContentType(
+        'text',
+        'event-stream',
+        charset: 'utf-8',
+      );
+      request.response.write(
+        'data: {"choices":[{"delta":{"content":"ok"}}]}\n\n',
+      );
+      await request.response.close();
+    });
+    final client = TerminalAiClient();
+    addTearDown(client.cancel);
+    await expectLater(
+      client.stream(
+        AiSettings(
+          baseUrl: 'http://127.0.0.1:${server.port}/v1',
+          model: 'mock',
+        ),
+        [
+          {'role': 'user', 'content': '你好'},
+        ],
+        onText: (_) => throw StateError('secret-error-detail'),
+      ),
+      throwsA(
+        isA<AiFailure>().having(
+          (e) => e.message,
+          'message',
+          allOf(contains('StateError'), isNot(contains('secret-error-detail'))),
+        ),
+      ),
+    );
+  });
 }

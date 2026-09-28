@@ -1,12 +1,19 @@
+import 'dart:io';
+
+import 'package:flutter/services.dart';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:xterm/xterm.dart';
+import 'package:harbor_ssh/data/ai_conversation_store.dart';
 import 'package:harbor_ssh/data/terminal_ai.dart';
 import 'package:harbor_ssh/data/ssh_connection.dart';
 import 'package:harbor_ssh/ui/app.dart';
 import 'package:harbor_ssh/ui/ai_settings.dart';
 import 'package:harbor_ssh/ui/ai_task_controller.dart';
 import 'package:harbor_ssh/ui/terminal_ai_panel.dart';
+import 'package:harbor_ssh/domain/appearance.dart';
+import 'package:harbor_ssh/ui/ai_window_bridge.dart';
 import 'package:harbor_ssh/ui/terminal_pane.dart';
 import 'package:harbor_ssh/ui/sync_settings_controller.dart';
 import 'package:harbor_ssh/ui/theme.dart';
@@ -262,7 +269,6 @@ void main() {
     model.dispose();
   });
 
-
   testWidgets('新建的自定义服务商可以删除', (tester) async {
     tester.view.physicalSize = const Size(1280, 1000);
     tester.view.devicePixelRatio = 1;
@@ -385,8 +391,6 @@ void main() {
     model.dispose();
   });
 
-
-
   for (final width in [390.0, 1280.0]) {
     testWidgets('终端 AI 入口绑定当前会话 $width', (tester) async {
       tester.view.physicalSize = Size(width, 900);
@@ -468,6 +472,45 @@ void main() {
       session.dispose();
     });
   }
+  testWidgets('主窗口把当前 SSH 主机的本机历史接入 AI 面板', (tester) async {
+    tester.view.physicalSize = const Size(1280, 900);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    final session = SshConnection(id: 'history-host', host: testHost)
+      ..status = ConnectionStatus.connected;
+    final history = _HistoryFixture();
+    final model = _SessionModel(session, historyStore: history);
+    await model.initialize();
+    model.aiSettings = const AiSettings(
+      baseUrl: 'https://ai.example.com/v1',
+      model: 'test',
+    );
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: harborTheme(),
+        home: Workspace(model: model, onToggleTheme: () {}),
+      ),
+    );
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const ValueKey('terminal-ai')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const ValueKey('ai-history')));
+    await tester.pumpAndSettle();
+    expect(
+      history.scopes,
+      contains('${testHost.id}|${testHost.endpoint}|${testHost.username}'),
+    );
+    expect(find.text('本机归档问题'), findsOneWidget);
+    await tester.tap(find.byKey(const ValueKey('ai-history-item-history-1')));
+    await tester.pumpAndSettle();
+    expect(find.text('归档回答'), findsOneWidget);
+    expect(tester.takeException(), isNull);
+    await tester.pumpWidget(const SizedBox.shrink());
+    model.dispose();
+    session.dispose();
+  });
+
   testWidgets('AI 随 SSH 面板缩放，保留输入和终端状态', (tester) async {
     tester.view.devicePixelRatio = 1;
     tester.view.physicalSize = const Size(1000, 700);
@@ -626,6 +669,148 @@ void main() {
       task.dispose();
     });
   }
+
+  testWidgets('独立窗口与主面板互斥，切换和收回都不停止任务', (tester) async {
+    tester.view.devicePixelRatio = 1;
+    tester.view.physicalSize = const Size(2000, 900);
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    final calls = <MethodCall>[];
+    var failOpen = false;
+    tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+      aiWindowChannel,
+      (call) async {
+        calls.add(call);
+        if (call.method == 'open' && failOpen) {
+          throw PlatformException(code: 'window', message: '无法创建 AI 窗口');
+        }
+        return null;
+      },
+    );
+    addTearDown(
+      () => tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+        aiWindowChannel,
+        null,
+      ),
+    );
+    final host = AiWindowHost(
+      appearance: () => const AppearancePreferences(),
+      pushInterval: Duration.zero,
+    );
+    addTearDown(host.dispose);
+    final first = SshConnection(id: 'pane-a', host: testHost)
+      ..status = ConnectionStatus.connected;
+    final second = SshConnection(id: 'pane-b', host: testHost)
+      ..status = ConnectionStatus.connected;
+    addTearDown(first.dispose);
+    addTearDown(second.dispose);
+
+    AiSettings settings() =>
+        const AiSettings(baseUrl: 'https://ai.example.com/v1', model: 'test');
+    Widget pane(Key key, SshConnection session) => KeyedSubtree(
+      key: key,
+      child: TerminalPane(
+        session: session,
+        onReconnect: () {},
+        aiSettings: settings,
+        aiWindow: host,
+        statusVisible: false,
+      ),
+    );
+
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: harborTheme(),
+        home: Scaffold(
+          body: Row(
+            children: [
+              Expanded(child: pane(const ValueKey('pane-a'), first)),
+              Expanded(child: pane(const ValueKey('pane-b'), second)),
+            ],
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+    expect(find.byKey(const ValueKey('ai-popout')), findsNothing);
+
+    Future<void> openAi(ValueKey<String> pane) async {
+      await tester.tap(
+        find.descendant(
+          of: find.byKey(pane),
+          matching: find.byKey(const ValueKey('terminal-ai')),
+        ),
+      );
+      await tester.pumpAndSettle();
+    }
+
+    Finder panelIn(ValueKey<String> pane) => find.descendant(
+      of: find.byKey(pane),
+      matching: find.byType(TerminalAiPanel),
+    );
+
+    await openAi(const ValueKey('pane-a'));
+    expect(panelIn(const ValueKey('pane-a')), findsOneWidget);
+    final taskA =
+        tester.widget<TerminalAiPanel>(panelIn(const ValueKey('pane-a'))).task
+          ..running = true
+          ..status = '思考中';
+    taskA.notifyListeners();
+    await tester.pump();
+
+    failOpen = true;
+    await tester.tap(find.byKey(const ValueKey('ai-popout')));
+    await tester.pumpAndSettle();
+    expect(panelIn(const ValueKey('pane-a')), findsOneWidget);
+    expect(host.isDetached(first.id), isFalse);
+    expect(taskA.running, isTrue);
+
+    failOpen = false;
+    await tester.tap(find.byKey(const ValueKey('ai-popout')));
+    await tester.pumpAndSettle();
+    expect(panelIn(const ValueKey('pane-a')), findsNothing);
+    expect(host.isDetached(first.id), isTrue);
+    expect(taskA.running, isTrue);
+    expect(calls.where((call) => call.method == 'open'), isNotEmpty);
+
+    await openAi(const ValueKey('pane-b'));
+    final taskB =
+        tester.widget<TerminalAiPanel>(panelIn(const ValueKey('pane-b'))).task
+          ..running = true;
+    taskB.notifyListeners();
+    await tester.pump();
+    await tester.tap(find.byKey(const ValueKey('ai-popout')));
+    await tester.pumpAndSettle();
+    expect(host.isDetached(second.id), isTrue);
+    expect(host.isDetached(first.id), isFalse);
+    expect(panelIn(const ValueKey('pane-a')), findsOneWidget);
+    expect(panelIn(const ValueKey('pane-b')), findsNothing);
+    expect(taskA.running, isTrue);
+    expect(taskB.running, isTrue);
+
+    await tester.tap(
+      find.descendant(
+        of: find.byKey(const ValueKey('pane-b')),
+        matching: find.byKey(const ValueKey('terminal-ai')),
+      ),
+    );
+    await tester.pumpAndSettle();
+    expect(host.isDetached(second.id), isFalse);
+    expect(taskB.running, isTrue);
+    expect(panelIn(const ValueKey('pane-b')), findsOneWidget);
+
+    await tester.tap(
+      find.descendant(
+        of: find.byKey(const ValueKey('pane-b')),
+        matching: find.byIcon(Icons.close_rounded),
+      ),
+    );
+    await tester.pumpAndSettle();
+    expect(taskB.running, isFalse);
+    expect(taskA.running, isTrue);
+    expect(tester.takeException(), isNull);
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
 }
 
 class _ApprovalClient extends TerminalAiClient {
@@ -655,7 +840,8 @@ class _NeverExecute implements AiCommandExecutor {
 }
 
 class _SessionModel extends WorkspaceModel {
-  _SessionModel(this.session) : super(memoryRepository()) {
+  _SessionModel(this.session, {AiConversationStore? historyStore})
+    : super(memoryRepository(), aiHistoryStore: historyStore) {
     activeSessionId = session.id;
   }
   final SshConnection session;
@@ -663,4 +849,49 @@ class _SessionModel extends WorkspaceModel {
   List<SshConnection> get sessions => [session];
   @override
   SshConnection? get activeSession => session;
+}
+
+class _HistoryFixture extends AiConversationStore {
+  _HistoryFixture()
+    : super(
+        secrets: MemoryStore(),
+        directory: () async => Directory.systemTemp,
+      );
+
+  final scopes = <String>[];
+  static final created = DateTime(2024, 1, 1);
+
+  @override
+  Future<List<AiConversationSummary>> list(String scope) async {
+    scopes.add(scope);
+    return [
+      AiConversationSummary(
+        id: 'history-1',
+        title: '本机归档问题',
+        model: 'test',
+        updatedAt: created,
+      ),
+    ];
+  }
+
+  @override
+  Future<AiConversation?> load(String scope, String id) async {
+    scopes.add(scope);
+    return AiConversation(
+      id: id,
+      scope: scope,
+      title: '本机归档问题',
+      model: 'test',
+      createdAt: created,
+      updatedAt: created,
+      entries: [
+        {'text': '本机归档问题', 'user': true},
+        {'text': '归档回答', 'model': 'test'},
+      ],
+      history: [
+        {'role': 'user', 'content': '本机归档问题'},
+        {'role': 'assistant', 'content': '归档回答'},
+      ],
+    );
+  }
 }

@@ -33,9 +33,15 @@ class FlutterWindow : public Win32Window {
   std::unique_ptr<flutter::MethodChannel<flutter::EncodableValue>> settings_channel_;
   std::unique_ptr<flutter::MethodChannel<flutter::EncodableValue>> system_color_channel_;
   std::unique_ptr<flutter::MethodChannel<flutter::EncodableValue>> local_paths_channel_;
+  std::unique_ptr<flutter::MethodChannel<flutter::EncodableValue>> ai_channel_;
   std::unique_ptr<FlutterWindow> settings_window_;
+  std::unique_ptr<FlutterWindow> ai_window_;
   FlutterWindow* owner_;
+  // True only for the secondary engine hosting the detached AI assistant
+  // window (launched with the "--ai-window" entrypoint argument).
+  bool is_ai_window_ = false;
   void OpenSettings();
+  void OpenAiWindow();
 };
 
 #endif  // RUNNER_FLUTTER_WINDOW_H_

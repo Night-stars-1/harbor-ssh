@@ -1,6 +1,9 @@
 import 'package:flutter/material.dart';
 import 'package:path_provider/path_provider.dart';
 
+import 'data/ai_conversation_store.dart';
+import 'ui/ai_window_app.dart';
+import 'ui/ai_window_bridge.dart';
 import 'data/host_repository.dart';
 import 'ui/app.dart';
 import 'ui/workspace_model.dart';
@@ -13,17 +16,31 @@ Future<void> main(List<String> arguments) async {
   WidgetsFlutterBinding.ensureInitialized();
   final settings =
       usesWindowsTitleBar && arguments.contains('--settings-window');
-  await initializeWindowsWindow(settings: settings);
+  final ai = usesWindowsTitleBar && arguments.contains('--ai-window');
+  await initializeWindowsWindow(settings: settings, ai: ai);
   if (settings) {
     runApp(const SettingsWindowApp());
     return;
   }
+  if (ai) {
+    runApp(const AiWindowApp());
+    return;
+  }
+  final repository = HostRepository.platform();
   final model = WorkspaceModel(
-    HostRepository.platform(),
+    repository,
     localDocumentsDirectory: getApplicationDocumentsDirectory,
+    aiHistoryStore: AiConversationStore(
+      secrets: repository.secrets,
+      directory: getApplicationSupportDirectory,
+    ),
   );
+  final aiWindow = usesWindowsTitleBar
+      ? (AiWindowHost(appearance: () => model.appearance.value)..attach())
+      : null;
+  if (aiWindow != null) model.appearance.addListener(aiWindow.refresh);
   final host = usesWindowsTitleBar
       ? (SettingsWindowHost(LocalSyncSettingsController(model))..attach())
       : null;
-  runApp(HarborApp(model: model, settingsWindow: host));
+  runApp(HarborApp(model: model, settingsWindow: host, aiWindow: aiWindow));
 }

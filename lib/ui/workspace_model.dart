@@ -5,6 +5,7 @@ import 'dart:io';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 
+import '../data/ai_conversation_store.dart';
 import '../data/host_repository.dart';
 import '../data/terminal_ai.dart';
 import '../data/local_files.dart';
@@ -18,9 +19,14 @@ import '../domain/appearance.dart';
 import 'file_workspace_model.dart';
 
 class WorkspaceModel extends ChangeNotifier {
-  WorkspaceModel(this.repository, {this.localDocumentsDirectory});
+  WorkspaceModel(
+    this.repository, {
+    this.localDocumentsDirectory,
+    this.aiHistoryStore,
+  });
   final HostRepository repository;
   final Future<Directory> Function()? localDocumentsDirectory;
+  final AiConversationStore? aiHistoryStore;
   AiSettings aiSettings = const AiSettings();
   static const _aiKey = 'harbor.ai.v1';
   Future<void> _aiWrite = Future.value();

@@ -17,15 +17,26 @@ bool get usesCustomTitleBar => usesWindowsTitleBar || usesMacosTitleBar;
 
 const _macosTrafficLightInset = 78.0;
 
-Future<void> initializeWindowsWindow({bool settings = false}) async {
+Future<void> initializeWindowsWindow({
+  bool settings = false,
+  bool ai = false,
+}) async {
   if (!usesCustomTitleBar) return;
   await windowManager.ensureInitialized();
   await windowManager.waitUntilReadyToShow(
     WindowOptions(
-      title: settings ? '设置 · Harbor SSH' : 'Harbor SSH',
+      title: settings
+          ? '设置 · Harbor SSH'
+          : ai
+          ? 'AI 助手 · Harbor SSH'
+          : 'Harbor SSH',
       titleBarStyle: TitleBarStyle.hidden,
       windowButtonVisibility: usesMacosTitleBar,
-      minimumSize: settings ? const Size(360, 560) : const Size(320, 480),
+      minimumSize: settings
+          ? const Size(360, 560)
+          : ai
+          ? const Size(480, 520)
+          : const Size(320, 480),
     ),
   );
   if (usesMacosTitleBar) {

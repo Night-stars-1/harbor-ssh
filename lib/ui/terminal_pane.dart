@@ -5,11 +5,13 @@ import 'package:flutter/gestures.dart';
 import 'package:flutter/services.dart';
 import 'package:xterm/xterm.dart';
 
+import '../data/ai_conversation_store.dart';
 import '../data/ssh_connection.dart';
 import '../data/remote_metrics.dart';
 import '../data/web_link.dart';
 import '../data/terminal_ai.dart';
 import 'ai_task_controller.dart';
+import 'ai_window_bridge.dart';
 import 'remote_status_bar.dart';
 import 'terminal_ai_panel.dart';
 import 'terminal_links.dart';
@@ -38,6 +40,8 @@ class TerminalPane extends StatefulWidget {
     this.statusVisible = true,
     this.aiSettings,
     this.onAiSettings,
+    this.aiHistoryStore,
+    this.aiWindow,
   });
   final SshConnection session;
   final VoidCallback onReconnect;
@@ -60,6 +64,8 @@ class TerminalPane extends StatefulWidget {
   final bool statusVisible;
   final AiSettings Function()? aiSettings;
   final VoidCallback? onAiSettings;
+  final AiConversationStore? aiHistoryStore;
+  final AiWindowHost? aiWindow;
   @override
   State<TerminalPane> createState() => _TerminalPaneState();
 }
@@ -67,23 +73,74 @@ class TerminalPane extends StatefulWidget {
 class _TerminalPaneState extends State<TerminalPane> {
   AiTaskController? _ai;
   bool _aiOpen = false;
+  bool _aiDetached = false;
 
   void _openAi() {
     if (widget.aiSettings == null) return;
+    if (_aiDetached) {
+      // The assistant is already running in the other window. Bring that
+      // panel back here instead of stopping the turn.
+      unawaited(widget.aiWindow?.dock(widget.session.id));
+      return;
+    }
     if (_aiOpen) {
       _closeAi();
       return;
     }
     _completion?.dismiss();
-    _ai ??= AiTaskController(
-      settings: () => widget.aiSettings!(),
-      executorFactory: () => widget.session.createAiExecutor(),
-      connected: () => widget.session.status == ConnectionStatus.connected,
-    );
+    _ensureAi();
     setState(() => _aiOpen = true);
   }
 
+  void _ensureAi() {
+    if (_ai != null) return;
+    _ai = AiTaskController(
+      settings: () => widget.aiSettings!(),
+      executorFactory: () => widget.session.createAiExecutor(),
+      connected: () => widget.session.status == ConnectionStatus.connected,
+      historyStore: widget.aiHistoryStore,
+      historyScope: widget.aiHistoryStore == null
+          ? null
+          : '${widget.session.host.id}|${widget.session.host.endpoint}|${widget.session.host.username}',
+    );
+    _registerAi();
+  }
+
+  void _registerAi() {
+    final task = _ai;
+    final host = widget.aiWindow;
+    if (task == null || host == null) return;
+    host.register(
+      widget.session.id,
+      task,
+      widget.session.host.name,
+      onDock: _aiDocked,
+      onSettings: widget.onAiSettings,
+    );
+  }
+
+  void _aiDocked() {
+    if (!mounted) return;
+    setState(() {
+      _aiOpen = true;
+      _aiDetached = false;
+    });
+  }
+
+  Future<void> _detachAi() async {
+    final host = widget.aiWindow;
+    if (host == null || _ai == null || _aiDetached) return;
+    setState(() => _aiDetached = true);
+    await host.open(widget.session.id);
+    if (!mounted) return;
+    final detached = host.isDetached(widget.session.id);
+    if (detached != _aiDetached) setState(() => _aiDetached = detached);
+  }
+
   void _closeAi() {
+    // Closing or docking the separate window must not cancel the turn. The
+    // embedded close button is the only control that stops it.
+    if (_aiDetached) return;
     _ai?.stop();
     setState(() => _aiOpen = false);
     _focus.requestFocus();
@@ -333,9 +390,11 @@ class _TerminalPaneState extends State<TerminalPane> {
     if (oldWidget.session != widget.session) {
       oldWidget.session.removeListener(_connectionChanged);
       widget.session.addListener(_connectionChanged);
+      oldWidget.aiWindow?.unregister(oldWidget.session.id);
       _ai?.dispose();
       _ai = null;
       _aiOpen = false;
+      _aiDetached = false;
       _completion?.dispose();
       _completion = null;
       _bindCompletion();
@@ -352,6 +411,10 @@ class _TerminalPaneState extends State<TerminalPane> {
         _metricsTimer = null;
       }
       _syncMetrics();
+    } else if (oldWidget.aiWindow != widget.aiWindow) {
+      oldWidget.aiWindow?.unregister(widget.session.id);
+      _aiDetached = false;
+      _registerAi();
     }
   }
 
@@ -381,6 +444,7 @@ class _TerminalPaneState extends State<TerminalPane> {
   void dispose() {
     _stopMetrics(notify: false);
     widget.session.removeListener(_connectionChanged);
+    widget.aiWindow?.unregister(widget.session.id);
     _ai?.dispose();
     _focus.removeListener(_completionChanged);
     _scrollController.removeListener(_queueCompletionGeometry);
@@ -558,12 +622,15 @@ class _TerminalPaneState extends State<TerminalPane> {
   @override
   Widget build(BuildContext context) => TerminalAiLayout(
     terminal: _buildTerminal(context),
-    panel: _aiOpen && _ai != null
+    panel: _aiOpen && !_aiDetached && _ai != null
         ? TerminalAiPanel(
             task: _ai!,
             hostName: widget.session.host.name,
             onClose: _closeAi,
             onSettings: widget.onAiSettings,
+            onDetach: widget.aiWindow == null
+                ? null
+                : () => unawaited(_detachAi()),
           )
         : null,
   );

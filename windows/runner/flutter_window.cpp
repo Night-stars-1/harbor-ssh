@@ -1,4 +1,5 @@
 #include "flutter_window.h"
+#include <algorithm>
 #include <filesystem>
 
 #include <optional>
@@ -111,6 +112,87 @@ bool FlutterWindow::OnCreate() {
                 [reply]() { reply->NotImplemented(); }));
       });
 
+  ai_channel_ = std::make_unique<flutter::MethodChannel<Value>>(
+      flutter_controller_->engine()->messenger(), "harbor/ai_window",
+      &flutter::StandardMethodCodec::GetInstance());
+  const auto& entrypoint_arguments = project_.dart_entrypoint_arguments();
+  is_ai_window_ =
+      std::find(entrypoint_arguments.begin(), entrypoint_arguments.end(),
+                "--ai-window") != entrypoint_arguments.end();
+  ai_channel_->SetMethodCallHandler(
+      [this](const flutter::MethodCall<Value>& call,
+             std::unique_ptr<flutter::MethodResult<Value>> result) {
+        if (!owner_) {
+          // Main engine: owns the detached AI window and its single controller.
+          if (call.method_name() == "open") {
+            OpenAiWindow();
+            if (ai_window_ && ai_window_->GetHandle()) {
+              result->Success();
+            } else {
+              result->Error("window", "Unable to create AI window");
+            }
+          } else if (call.method_name() == "changed") {
+            // Safe no-op while no detached window exists.
+            if (ai_window_ && ai_window_->ai_channel_) {
+              ai_window_->ai_channel_->InvokeMethod(
+                  "changed",
+                  call.arguments() ? std::make_unique<Value>(*call.arguments())
+                                   : nullptr);
+            }
+            result->Success();
+          } else if (call.method_name() == "hide") {
+            if (ai_window_) {
+              const HWND hwnd = ai_window_->GetHandle();
+              if (hwnd) {
+                ShowWindow(hwnd, SW_HIDE);
+              }
+            }
+            result->Success();
+          } else {
+            result->NotImplemented();
+          }
+          return;
+        }
+        // Detached AI engine: relay user actions to the main engine. The main
+        // engine owns the controller, SSH connection and encrypted history, so
+        // this window only mirrors state and forwards intents.
+        const std::string& method = call.method_name();
+        if (method != "state" && method != "action" && method != "dock") {
+          result->NotImplemented();
+          return;
+        }
+        auto reply =
+            std::shared_ptr<flutter::MethodResult<Value>>(std::move(result));
+        const bool dock = method == "dock";
+        const HWND self = GetHandle();
+        owner_->ai_channel_->InvokeMethod(
+            method,
+            call.arguments() ? std::make_unique<Value>(*call.arguments())
+                             : nullptr,
+            std::make_unique<flutter::MethodResultFunctions<Value>>(
+                [reply, dock, self](const Value* value) {
+                  // Docking hands control back to the embedded panel: hide this
+                  // window unless it was already torn down.
+                  if (dock && self && IsWindow(self)) {
+                    ShowWindow(self, SW_HIDE);
+                  }
+                  if (value) {
+                    reply->Success(*value);
+                  } else {
+                    reply->Success();
+                  }
+                },
+                [reply](const std::string& code, const std::string& message,
+                        const Value* details) {
+                  if (details) {
+                    reply->Error(code, message, *details);
+                  } else {
+                    reply->Error(code, message);
+                  }
+                },
+                [reply]() { reply->NotImplemented(); }));
+      });
+
   flutter_controller_->engine()->SetNextFrameCallback([&]() {
     this->Show();
   });
@@ -124,6 +206,8 @@ bool FlutterWindow::OnCreate() {
 }
 
 void FlutterWindow::OnDestroy() {
+  ai_window_.reset();
+  ai_channel_.reset();
   settings_window_.reset();
   settings_channel_.reset();
   system_color_channel_.reset();
@@ -152,14 +236,43 @@ void FlutterWindow::OpenSettings() {
   SetForegroundWindow(hwnd);
 }
 
+void FlutterWindow::OpenAiWindow() {
+  if (!ai_window_) {
+    // A second Flutter engine dedicated to the detached AI assistant. It never
+    // receives credentials, session text or images through the command line.
+    flutter::DartProject project(L"data");
+    project.set_dart_entrypoint_arguments({"--ai-window"});
+    ai_window_ = std::make_unique<FlutterWindow>(project, this);
+    if (!ai_window_->Create(L"Harbor SSH - AI Assistant", {120, 90},
+                            {560, 820})) {
+      ai_window_.reset();
+      return;
+    }
+    ai_window_->SetQuitOnClose(false);
+  }
+  const auto hwnd = ai_window_->GetHandle();
+  if (!hwnd) {
+    return;
+  }
+  if (IsIconic(hwnd)) ShowWindow(hwnd, SW_RESTORE);
+  else ShowWindow(hwnd, SW_SHOW);
+  SetForegroundWindow(hwnd);
+}
+
 LRESULT
 FlutterWindow::MessageHandler(HWND hwnd, UINT const message,
                               WPARAM const wparam,
                               LPARAM const lparam) noexcept {
-  // Keep the settings engine and draft alive when its window is closed.
-  // The main window owns its lifetime, so closing it never exits the app.
+  // Keep the secondary engines and their drafts alive when their windows are
+  // closed. The main window owns their lifetime, so closing them never exits the
+  // app and never touches the other secondary window.
   if (owner_ && message == WM_CLOSE) {
     ShowWindow(hwnd, SW_HIDE);
+    if (is_ai_window_ && owner_->ai_channel_) {
+      // The main engine decides what closing means for the task; nothing is
+      // posted to the message queue here.
+      owner_->ai_channel_->InvokeMethod("closed", nullptr);
+    }
     return 0;
   }
   // Give Flutter, including plugins, an opportunity to handle window messages.
