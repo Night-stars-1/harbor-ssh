@@ -19,7 +19,12 @@ class _RecordingWorkspace extends WorkspaceModel {
   _RecordingWorkspace(super.repository);
   int connections = 0;
   @override
-  void connect(Host host, Credentials credentials, TrustHost prompt) {
+  void connect(
+    Host host,
+    Credentials credentials,
+    TrustHost prompt, {
+    ConfirmHostKeyChange? confirmKeyChange,
+  }) {
     connections++;
   }
 }

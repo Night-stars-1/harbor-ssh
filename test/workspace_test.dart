@@ -759,7 +759,7 @@ void main() {
       await tester.pumpAndSettle();
       // 没有可用的登录凭证，于是要求先配置，绝不把公钥交给旧会话。
       expect(session.installed, isEmpty);
-      expect(find.textContaining('还没有可用的登录凭证'), findsOneWidget);
+      expect(find.text('「开发服务器」：请填写连接密码。'), findsOneWidget);
       expect(session.status, ConnectionStatus.connected);
       expect(tester.takeException(), isNull);
       await tester.pumpWidget(const SizedBox.shrink());
@@ -788,7 +788,7 @@ void main() {
     await tester.tap(find.byKey(const ValueKey('public-key-install-confirm')));
     await tester.pumpAndSettle();
     expect(
-      find.textContaining('还没有可用的登录凭证，请先编辑该连接保存密码或选择私钥凭证'),
+      find.text('「开发服务器」：请填写连接密码。'),
       findsOneWidget,
     );
     expect(find.textContaining('已把「生产部署」的公钥安装到'), findsNothing);

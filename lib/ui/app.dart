@@ -238,21 +238,11 @@ class _WorkspaceState extends State<Workspace> {
     if (_opening) return;
     _opening = true;
     try {
-      final stored = await model.repository.credentials(host.id);
+      final credentials = await _loginCredentialsFor(host);
       if (!mounted) return;
-      final inherited = host.userId.isEmpty
-          ? null
-          : await model.repository.userCredentials(host.userId);
-      if (!mounted) return;
-      final credentials = stored ?? inherited;
       if (credentials == null) {
-        _message(
-          host.authMethod == AuthMethod.password
-              ? '请填写连接密码。'
-              : '请为连接选择已保存的私钥凭证。',
-        );
         _opening = false;
-        await _edit(host);
+        await _requestMissingCredentials(host);
       } else if (mounted) {
         _start(host, credentials);
       }
@@ -271,6 +261,8 @@ class _WorkspaceState extends State<Workspace> {
         model.repository,
         (type, fingerprint) => _trustHost(host, type, fingerprint),
         openShell: false,
+        confirmKeyChange: (type, fingerprint, previousKey) =>
+            _trustHost(host, type, fingerprint, previousKey: previousKey),
       );
       if (connection.status != ConnectionStatus.connected) {
         throw Exception(connection.error ?? '无法建立 SSH 连接');
@@ -285,6 +277,8 @@ class _WorkspaceState extends State<Workspace> {
       host,
       credentials,
       (type, fingerprint) => _trustHost(host, type, fingerprint),
+      confirmKeyChange: (type, fingerprint, previousKey) =>
+          _trustHost(host, type, fingerprint, previousKey: previousKey),
     );
   }
 
@@ -311,8 +305,7 @@ class _WorkspaceState extends State<Workspace> {
     final credentials = await _loginCredentialsFor(host);
     if (!mounted) return null;
     if (credentials == null) {
-      _message('请先为连接保存密码或选择私钥凭证');
-      await _edit(host);
+      await _requestMissingCredentials(host);
       return null;
     }
     final session = SshConnection(
@@ -324,6 +317,8 @@ class _WorkspaceState extends State<Workspace> {
       model.repository,
       (type, fingerprint) => _trustHost(host, type, fingerprint),
       openShell: false,
+      confirmKeyChange: (type, fingerprint, previousKey) =>
+          _trustHost(host, type, fingerprint, previousKey: previousKey),
     );
     if (!mounted || session.status != ConnectionStatus.connected) {
       final error = session.error;
@@ -334,7 +329,12 @@ class _WorkspaceState extends State<Workspace> {
     return session;
   }
 
-  Future<bool> _trustHost(Host host, String type, String fingerprint) async {
+  Future<bool> _trustHost(
+    Host host,
+    String type,
+    String fingerprint, {
+    String? previousKey,
+  }) async {
     if (!mounted) return false;
     return await showDialog<bool>(
           context: context,
@@ -343,6 +343,7 @@ class _WorkspaceState extends State<Workspace> {
             host: host,
             keyType: type,
             fingerprint: fingerprint,
+            previousKey: previousKey,
           ),
         ) ??
         false;
@@ -429,11 +430,25 @@ class _WorkspaceState extends State<Workspace> {
 
   /// 目标服务器自己的登录凭证（连接级优先，其次继承凭证）。
   /// 被安装的公钥不参与登录，私钥也不会离开这份凭证。
-  Future<Credentials?> _loginCredentialsFor(Host host) async {
-    final stored = await model.repository.credentials(host.id);
-    if (stored != null) return stored;
-    if (host.userId.isEmpty) return null;
-    return model.repository.userCredentials(host.userId);
+  Future<Credentials?> _loginCredentialsFor(Host host) =>
+      model.repository.loginCredentials(host);
+
+  String _missingCredentialsMessage(Host host) {
+    if (host.authMethod == AuthMethod.password) return '请填写连接密码。';
+    if (host.userId.isEmpty) return '请为连接选择已保存的私钥凭证。';
+    final user = model.users.where((u) => u.id == host.userId).firstOrNull;
+    if (user == null) return '此连接引用的私钥凭证已不存在，请重新选择凭证。';
+    return '已选择凭证「${user.name}」，但本机没有保存它的私钥。请从完整的同步备份恢复，或在凭证页导入私钥。';
+  }
+
+  Future<void> _requestMissingCredentials(Host host) async {
+    _message(_missingCredentialsMessage(host));
+    if (host.authMethod == AuthMethod.privateKey &&
+        model.users.any((u) => u.id == host.userId)) {
+      model.filter(users: true);
+      return;
+    }
+    await _edit(host);
   }
 
   /// 把私钥凭证的公钥安装到用户选定的服务器：仅把公钥追加到目标账户的
@@ -497,17 +512,29 @@ class _WorkspaceState extends State<Workspace> {
         final credentials = await _loginCredentialsFor(target);
         if (!mounted) return;
         if (credentials == null) {
-          _message('「${target.name}」还没有可用的登录凭证，请先编辑该连接保存密码或选择私钥凭证。');
+          _message('「${target.name}」：${_missingCredentialsMessage(target)}');
           return;
         }
-        await temporary.connect(credentials, model.repository, (
-          type,
-          fingerprint,
-        ) async {
-          final accepted = await _trustHost(target, type, fingerprint);
-          declined = !accepted;
-          return accepted;
-        }, openShell: false);
+        await temporary.connect(
+          credentials,
+          model.repository,
+          (type, fingerprint) async {
+            final accepted = await _trustHost(target, type, fingerprint);
+            declined = !accepted;
+            return accepted;
+          },
+          openShell: false,
+          confirmKeyChange: (type, fingerprint, previousKey) async {
+            final accepted = await _trustHost(
+              target,
+              type,
+              fingerprint,
+              previousKey: previousKey,
+            );
+            declined = !accepted;
+            return accepted;
+          },
+        );
         if (temporary.status != ConnectionStatus.connected) {
           throw Exception(temporary.error ?? '无法建立 SSH 连接');
         }

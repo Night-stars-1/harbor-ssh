@@ -5,6 +5,7 @@ import 'dart:typed_data';
 import 'package:dartssh2/dartssh2.dart';
 
 import '../domain/remote_file.dart';
+import 'download_stream.dart';
 import 'public_key_install.dart';
 
 /// Each operation owns its channel, independently of the terminal/completion.
@@ -240,14 +241,17 @@ class SftpFiles implements RemoteFileSystem {
     cancellation.check();
     final file = await client.open(path).timeout(_timeout);
     try {
-      var count = 0;
-      await for (final chunk in file.read().timeout(_timeout)) {
-        cancellation.check();
-        await write(chunk);
-        count += chunk.length;
-        onProgress(count);
-      }
-      cancellation.check();
+      // Use the library's bulk-download request sizes instead of the smaller
+      // general-purpose read defaults. Coalesce replies before the disk/relay
+      // boundary while retaining backpressure, cancellation and bounded memory.
+      await writeDownloadStream(
+        file
+            .read(chunkSize: 64 * 1024, maxPendingRequests: 128)
+            .timeout(_timeout),
+        write,
+        cancellation: cancellation,
+        onProgress: onProgress,
+      );
     } finally {
       try {
         await file.close().timeout(const Duration(seconds: 2));

@@ -37,6 +37,7 @@ class SyncStorage {
   }
 
   Future<void> apply(SyncSnapshot snapshot) async {
+    snapshot.requireCompletePrivateKeys();
     final before = await capture();
     await repository.secrets.write(
       _journal,

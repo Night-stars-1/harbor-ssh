@@ -560,6 +560,10 @@ class CloudSync extends ChangeNotifier {
       failed = true;
       message = '存在冲突，请打开云同步选择保留的版本';
       rethrow;
+    } on SyncCredentialMissing catch (error) {
+      failed = true;
+      message = error.toString();
+      throw SyncFailure(message!);
     } catch (error) {
       failed = true;
       message = error is SyncFailure ? error.message : '同步未完成，请检查网络与本地存储后重试';

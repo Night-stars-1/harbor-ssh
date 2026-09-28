@@ -477,7 +477,12 @@ class WorkspaceModel extends ChangeNotifier {
     _notify();
   }
 
-  void connect(Host host, Credentials credentials, TrustHost prompt) {
+  void connect(
+    Host host,
+    Credentials credentials,
+    TrustHost prompt, {
+    ConfirmHostKeyChange? confirmKeyChange,
+  }) {
     showingSettings = false;
     showingFiles = false;
     final session = SshConnection(
@@ -488,7 +493,14 @@ class WorkspaceModel extends ChangeNotifier {
     activeSessionId = session.id;
     session.addListener(_notify);
     _notify();
-    unawaited(session.connect(credentials, repository, prompt));
+    unawaited(
+      session.connect(
+        credentials,
+        repository,
+        prompt,
+        confirmKeyChange: confirmKeyChange,
+      ),
+    );
   }
 
   void closeSession(SshConnection session) {

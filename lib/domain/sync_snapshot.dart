@@ -11,6 +11,14 @@ class SyncConflict implements Exception {
   String toString() => '两端同时修改了：${names.join('、')}';
 }
 
+class SyncCredentialMissing implements Exception {
+  const SyncCredentialMissing(this.names);
+  final List<String> names;
+  @override
+  String toString() =>
+      '凭证「${names.join('、')}」缺少私钥，已停止同步以防止覆盖完整凭证。请从完整备份恢复或重新导入私钥。';
+}
+
 /// Each connection/key and its secret form one record for conflict resolution.
 class SyncSnapshot {
   SyncSnapshot(this.records);
@@ -67,6 +75,82 @@ class SyncSnapshot {
     return jsonEncode(value);
   }
 
+  static bool _hasSecret(Map<String, dynamic>? record) {
+    if (record == null) return false;
+    final data = record['data'] as Map;
+    final secret = record['secret'] as Map?;
+    final isKey = data['authMethod'] == AuthMethod.privateKey.name;
+    final value = secret?[isKey ? 'privateKey' : 'password'] as String? ?? '';
+    return isKey ? value.trim().isNotEmpty : value.isNotEmpty;
+  }
+
+  static bool _sameAuthentication(
+    String id,
+    Map<String, dynamic> a,
+    Map<String, dynamic> b,
+  ) {
+    final first = a['data'] as Map, second = b['data'] as Map;
+    if (first['authMethod'] != second['authMethod']) return false;
+    if (id.startsWith('key:')) {
+      if (first['authMethod'] == AuthMethod.password.name) {
+        return first['username'] == second['username'];
+      }
+      final key = (first['publicKey'] as String? ?? '').trim().split(
+        RegExp(r'\s+'),
+      );
+      final other = (second['publicKey'] as String? ?? '').trim().split(
+        RegExp(r'\s+'),
+      );
+      return key.length >= 2 &&
+          other.length >= 2 &&
+          key[0] == other[0] &&
+          key[1] == other[1];
+    }
+    return [
+      'address',
+      'port',
+      'username',
+      'authMethod',
+      'userId',
+    ].every((field) => first[field] == second[field]);
+  }
+
+  static Map<String, dynamic>? _recoverPrivateKey(
+    String id,
+    Map<String, dynamic>? record,
+    List<Map<String, dynamic>?> candidates,
+  ) {
+    if (record == null ||
+        !id.startsWith('key:') ||
+        (record['data'] as Map)['authMethod'] != AuthMethod.privateKey.name ||
+        _hasSecret(record)) {
+      return record;
+    }
+    for (final candidate in candidates) {
+      if (candidate != null &&
+          _hasSecret(candidate) &&
+          _sameAuthentication(id, record, candidate)) {
+        return {...record, 'secret': candidate['secret']};
+      }
+    }
+    return record;
+  }
+
+  /// Private-key records always require their signing key. Missing secrets
+  /// from a legacy client must never become a cloud or local deletion.
+  void requireCompletePrivateKeys() {
+    final missing = <String>[];
+    for (final entry in records.entries) {
+      final data = entry.value['data'] as Map;
+      if (entry.key.startsWith('key:') &&
+          data['authMethod'] == AuthMethod.privateKey.name &&
+          !_hasSecret(entry.value)) {
+        missing.add(data['name'] as String);
+      }
+    }
+    if (missing.isNotEmpty) throw SyncCredentialMissing(missing);
+  }
+
   static SyncSnapshot merge({
     required SyncSnapshot local,
     required SyncSnapshot remote,
@@ -80,9 +164,15 @@ class SyncSnapshot {
       ...local.records.keys,
       ...remote.records.keys,
     }) {
-      final a = local.records[id],
-          b = remote.records[id],
-          previous = base.records[id];
+      final previous = base.records[id];
+      final a = _recoverPrivateKey(id, local.records[id], [
+        remote.records[id],
+        previous,
+      ]);
+      final b = _recoverPrivateKey(id, remote.records[id], [
+        local.records[id],
+        previous,
+      ]);
       Map<String, dynamic>? selected;
       if (same(a, b) || same(b, previous)) {
         selected = a;
@@ -93,9 +183,31 @@ class SyncSnapshot {
       } else {
         conflicts.add(((a ?? b ?? previous)!['data'] as Map)['name'] as String);
       }
-      if (selected != null) result[id] = selected;
+      if (selected != null) {
+        // Clearing a saved password on an otherwise unchanged account needs
+        // an explicit conflict choice. An entirely deleted record still uses
+        // normal three-way deletion semantics.
+        if (!_hasSecret(selected) &&
+            (selected['data'] as Map)['authMethod'] ==
+                AuthMethod.password.name &&
+            [a, b, previous].any(
+              (candidate) =>
+                  candidate != null &&
+                  _hasSecret(candidate) &&
+                  _sameAuthentication(id, selected!, candidate),
+            )) {
+          if (choice == null) {
+            conflicts.add((selected['data'] as Map)['name'] as String);
+          } else {
+            selected = choice == SyncConflictChoice.local ? a : b;
+          }
+        }
+        if (selected != null) result[id] = selected;
+      }
     }
     if (conflicts.isNotEmpty) throw SyncConflict(conflicts);
-    return SyncSnapshot(result);
+    final merged = SyncSnapshot(result);
+    merged.requireCompletePrivateKeys();
+    return merged;
   }
 }

@@ -182,6 +182,41 @@ void main() {
     expect(saved, isFalse);
     expect(find.text('请先在凭证页补全所选凭证的私钥。'), findsOneWidget);
     expect(find.byType(CredentialFields), findsNothing);
+    await tester.ensureVisible(find.text('保存连接'));
+    await tester.tap(find.text('保存连接'));
+    await tester.pumpAndSettle();
+    expect(saved, isFalse);
+    expect(find.text('请先在凭证页补全所选凭证的私钥。'), findsOneWidget);
+  });
+
+  testWidgets('已绑定凭证但缺少私钥时说明原因，不要求再次选择凭证', (tester) async {
+    final repository = memoryRepository();
+    await repository.saveHosts([
+      Host(
+        id: testHost.id,
+        name: testHost.name,
+        address: testHost.address,
+        username: testHost.username,
+        userId: user.id,
+        authMethod: AuthMethod.privateKey,
+      ),
+    ]);
+    await repository.saveUsers([user]);
+    final model = WorkspaceModel(repository);
+    await tester.pumpWidget(HarborApp(model: model));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text(testHost.name));
+    await tester.pumpAndSettle();
+    expect(
+      find.textContaining('已选择凭证「Deployment」，但本机没有保存它的私钥'),
+      findsOneWidget,
+    );
+    expect(find.text('请为连接选择已保存的私钥凭证。'), findsNothing);
+    expect(find.byType(HostEditor), findsNothing);
+    expect(model.showingUsers, isTrue);
+    expect(model.sessions, isEmpty);
+    expect(tester.takeException(), isNull);
+    await tester.pumpWidget(const SizedBox.shrink());
   });
 
   testWidgets('测试期间禁止重复操作，失败后可修改并保存', (tester) async {

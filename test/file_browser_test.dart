@@ -76,12 +76,20 @@ void main() {
     session.fake.gate = Completer<void>();
     await tester.tap(find.text('report.txt'));
     await tester.pump();
+    expect(
+      find.byKey(const ValueKey('file-browser-transfer-speed')),
+      findsOneWidget,
+    );
     await tester.tap(find.byIcon(Icons.close_rounded));
     session.fake.gate!.complete();
     await tester.pumpAndSettle();
     expect(local.target.aborted, isTrue);
     expect(local.target.finished, isFalse);
     expect(find.text('传输已取消'), findsOneWidget);
+    expect(
+      find.byKey(const ValueKey('file-browser-transfer-speed')),
+      findsNothing,
+    );
     session.fake.gate = null;
     session.fake.failDownload = true;
     await tester.tap(find.text('report.txt'));
@@ -100,6 +108,45 @@ void main() {
     expect(tester.takeException(), isNull);
     await tester.pumpWidget(const SizedBox.shrink());
   });
+
+  for (final upload in [false, true]) {
+    testWidgets('${upload ? '上传' : '下载'}显示速度，结束后清除速度栏', (tester) async {
+      tester.view.physicalSize = const Size(320, 740);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+      final session = FileTestSession();
+      addTearDown(session.dispose);
+      final gate = Completer<void>();
+      if (upload) {
+        session.fake.uploadGate = gate;
+      } else {
+        session.fake.gate = gate;
+      }
+      await tester.pumpWidget(
+        MaterialApp(
+          theme: harborTheme(),
+          home: FileBrowser(session: session, local: FakeLocalTransfer()),
+        ),
+      );
+      await tester.pumpAndSettle();
+      await tester.tap(find.text(upload ? '上传' : 'report.txt'));
+      await tester.pump();
+      final speed = find.byKey(const ValueKey('file-browser-transfer-speed'));
+      expect(speed, findsOneWidget);
+      await tester.pump(const Duration(milliseconds: 250));
+      expect(tester.widget<Text>(speed).data, endsWith('/s'));
+      expect(tester.takeException(), isNull);
+      gate.complete();
+      await tester.pumpAndSettle();
+      expect(speed, findsNothing);
+      expect(
+        find.text(upload ? '已上传 1 个文件' : '已下载 report.txt'),
+        findsOneWidget,
+      );
+      await tester.pumpWidget(const SizedBox.shrink());
+    });
+  }
 
   testWidgets('同名上传不覆盖；目录错误可重试', (tester) async {
     final session = FileTestSession();
@@ -178,6 +225,7 @@ class FakeRemoteFiles implements RemoteFileSystem {
       throw UnimplementedError();
   final uploads = <String, List<int>>{};
   Completer<void>? gate;
+  Completer<void>? uploadGate;
   bool failDownload = false, failBrowse = false;
   @override
   Future<RemoteDirectory> browse(String path) async {
@@ -234,6 +282,8 @@ class FakeRemoteFiles implements RemoteFileSystem {
       bytes.addAll(chunk);
       onProgress(bytes.length);
     }
+    if (uploadGate != null) await uploadGate!.future;
+    cancellation.check();
     uploads[path] = bytes;
   }
 }

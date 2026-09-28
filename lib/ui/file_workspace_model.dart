@@ -8,6 +8,7 @@ import '../data/file_copy.dart';
 import '../data/local_files.dart';
 import '../data/ssh_connection.dart';
 import '../domain/remote_file.dart';
+import 'transfer_speed.dart';
 
 class FileLocationTab extends ChangeNotifier {
   FileLocationTab({
@@ -200,9 +201,13 @@ class FileDragData {
 }
 
 class FileWorkspaceModel extends ChangeNotifier {
-  FileWorkspaceModel({this.localHome});
+  FileWorkspaceModel({this.localHome, TransferSpeed? transferSpeed})
+    : transferSpeed = transferSpeed ?? TransferSpeed() {
+    this.transferSpeed.addListener(_notify);
+  }
 
   final RemoteFileSystem? Function()? localHome;
+  final TransferSpeed transferSpeed;
   String defaultLocalPath = '';
   String get localTabName => defaultLocalPath.isEmpty
       ? '本地 · 用户目录'
@@ -579,6 +584,7 @@ class FileWorkspaceModel extends ChangeNotifier {
     transferName = '准备传输 ${selected.length} 个项目';
     transferred = 0;
     total = null;
+    transferSpeed.reset();
     message = null;
     failed = false;
     _notify();
@@ -599,9 +605,11 @@ class FileWorkspaceModel extends ChangeNotifier {
         transferred = 0;
         total = file.isDirectory ? null : file.size;
         _lastProgress = null;
+        transferSpeed.start();
         _notify();
         void progress(int bytes) {
           transferred = bytes;
+          transferSpeed.update(bytes);
           final now = DateTime.now();
           if (_lastProgress == null ||
               now.difference(_lastProgress!).inMilliseconds >= 80) {
@@ -620,6 +628,7 @@ class FileWorkspaceModel extends ChangeNotifier {
               cancellation: cancellation,
               onPrepared: (result) {
                 total = result.totalBytes;
+                transferSpeed.start();
                 transferName =
                     '${file.name} · ${result.files} 个文件 / ${result.directories} 个目录';
                 _notify();
@@ -738,6 +747,7 @@ class FileWorkspaceModel extends ChangeNotifier {
       message =
           '${fileError(e)}${completed > 0 ? ' · 已完成 $completed 个项目' : ''}';
     } finally {
+      transferSpeed.stop();
       transfer = null;
       transferSourceId = null;
       transferDestinationId = null;
@@ -757,6 +767,8 @@ class FileWorkspaceModel extends ChangeNotifier {
   void dispose() {
     _disposed = true;
     transfer?.cancel();
+    transferSpeed.removeListener(_notify);
+    transferSpeed.dispose();
     for (final pane in panes) {
       for (final tab in pane.tabs) {
         tab.removeListener(_notify);

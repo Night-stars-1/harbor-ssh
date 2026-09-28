@@ -9,6 +9,7 @@ import '../domain/remote_file.dart';
 import 'remote_file_tile.dart';
 import 'remote_text_editor_dialog.dart';
 import 'theme.dart';
+import 'transfer_speed.dart';
 
 class FileBrowser extends StatefulWidget {
   const FileBrowser({
@@ -36,13 +37,19 @@ class _FileBrowserState extends State<FileBrowser> {
   String _transferName = '';
   TransferCancellation? _cancellation;
   DateTime? _lastProgress;
+  final _speed = TransferSpeed();
   bool get _connected => widget.session.status == ConnectionStatus.connected;
 
   @override
   void initState() {
     super.initState();
     widget.session.addListener(_sessionChanged);
+    _speed.addListener(_speedChanged);
     unawaited(_browse('~'));
+  }
+
+  void _speedChanged() {
+    if (mounted) setState(() {});
   }
 
   void _sessionChanged() {
@@ -58,6 +65,8 @@ class _FileBrowserState extends State<FileBrowser> {
   void dispose() {
     _generation++;
     _cancellation?.cancel();
+    _speed.removeListener(_speedChanged);
+    _speed.dispose();
     widget.session.removeListener(_sessionChanged);
     _pathInput.dispose();
     super.dispose();
@@ -114,6 +123,7 @@ class _FileBrowserState extends State<FileBrowser> {
   void _progress(int bytes) {
     if (!mounted) return;
     _transferred = bytes;
+    _speed.update(bytes);
     final now = DateTime.now();
     if (_lastProgress == null ||
         now.difference(_lastProgress!).inMilliseconds >= 80) {
@@ -135,6 +145,7 @@ class _FileBrowserState extends State<FileBrowser> {
       _total = null;
       _message = null;
       _lastProgress = null;
+      _speed.reset();
     });
     try {
       final message = await action(cancellation);
@@ -152,6 +163,7 @@ class _FileBrowserState extends State<FileBrowser> {
         });
       }
     } finally {
+      _speed.stop();
       if (mounted) {
         setState(() {
           _busy = false;
@@ -186,6 +198,8 @@ class _FileBrowserState extends State<FileBrowser> {
         _transferName = '上传 ${upload.name}';
         _total = upload.size;
         _transferred = 0;
+        _lastProgress = null;
+        _speed.start();
       });
       try {
         await _files.upload(
@@ -216,6 +230,8 @@ class _FileBrowserState extends State<FileBrowser> {
         _transferName = '下载 ${file.name}';
         _total = file.size;
         _transferred = 0;
+        _lastProgress = null;
+        _speed.start();
       });
       await _files.download(
         file.path,
@@ -493,11 +509,29 @@ class _FileBrowserState extends State<FileBrowser> {
                                         maxLines: 1,
                                         overflow: TextOverflow.ellipsis,
                                       ),
-                                      Text(
-                                        '${fileSizeLabel(_transferred)}${_total == null ? '' : ' / ${fileSizeLabel(_total)}'}',
-                                        style: Theme.of(context)
-                                            .textTheme
-                                            .labelSmall,
+                                      Row(
+                                        children: [
+                                          Expanded(
+                                            child: Text(
+                                              '${fileSizeLabel(_transferred)}${_total == null ? '' : ' / ${fileSizeLabel(_total)}'}',
+                                              maxLines: 1,
+                                              overflow: TextOverflow.ellipsis,
+                                              style: Theme.of(context)
+                                                  .textTheme
+                                                  .labelSmall,
+                                            ),
+                                          ),
+                                          const SizedBox(width: 8),
+                                          Text(
+                                            _speed.label,
+                                            key: const ValueKey(
+                                              'file-browser-transfer-speed',
+                                            ),
+                                            style: Theme.of(context)
+                                                .textTheme
+                                                .labelSmall,
+                                          ),
+                                        ],
                                       ),
                                     ],
                                   ),

@@ -174,7 +174,7 @@ class _HostEditorState extends State<HostEditor> {
     if (_busy) return;
     if (!_form.currentState!.validate()) return;
     final credentials = _connectionCredentials;
-    if (test &&
+    if ((test || _auth == AuthMethod.privateKey) &&
         (credentials == null ||
             (_auth == AuthMethod.privateKey &&
                 credentials.privateKey.trim().isEmpty))) {

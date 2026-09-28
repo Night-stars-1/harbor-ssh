@@ -10,6 +10,7 @@ import '../domain/host.dart';
 import '../domain/command_history.dart';
 import '../domain/path_completion.dart';
 import 'host_repository.dart';
+import 'ssh_algorithms.dart';
 import 'public_key_install.dart';
 import 'terminal_ai.dart';
 import 'ssh_ai_executor.dart';
@@ -61,6 +62,7 @@ class SshConnection extends ChangeNotifier {
     HostRepository repository,
     TrustHost prompt, {
     bool openShell = true,
+    ConfirmHostKeyChange? confirmKeyChange,
   }) async {
     Object? verificationError;
     try {
@@ -82,6 +84,7 @@ class SshConnection extends ChangeNotifier {
       final client = SSHClient(
         socket,
         username: host.username,
+        algorithms: harborSshAlgorithms,
         handshakeTimeout: const Duration(minutes: 5),
         authTimeout: const Duration(seconds: 30),
         identities: identities,
@@ -92,13 +95,27 @@ class SshConnection extends ChangeNotifier {
         onVerifyHostKey: (type, bytes) async {
           if (_closed) return false;
           try {
-            return await repository.verifyHost(host, type, utf8.decode(bytes), (
-              t,
-              f,
-            ) async {
-              final accepted = await prompt(t, f);
-              return !_closed && accepted;
-            });
+            return await repository.verifyHost(
+              host,
+              type,
+              utf8.decode(bytes),
+              (t, f) async {
+                if (_closed) return false;
+                final accepted = await prompt(t, f);
+                return !_closed && accepted;
+              },
+              confirmKeyChange: confirmKeyChange == null
+                  ? null
+                  : (t, f, previousKey) async {
+                      if (_closed) return false;
+                      final accepted = await confirmKeyChange(
+                        t,
+                        f,
+                        previousKey,
+                      );
+                      return !_closed && accepted;
+                    },
+            );
           } catch (e) {
             verificationError = e;
             return false;

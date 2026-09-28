@@ -16,6 +16,7 @@ import 'package:harbor_ssh/ui/app.dart';
 import 'package:harbor_ssh/ui/file_workspace.dart';
 import 'package:harbor_ssh/ui/file_workspace_model.dart';
 import 'package:harbor_ssh/ui/theme.dart';
+import 'package:harbor_ssh/ui/transfer_speed.dart';
 import 'package:harbor_ssh/ui/workspace_model.dart';
 import 'package:re_editor/re_editor.dart';
 import 'package:xterm/xterm.dart';
@@ -30,7 +31,10 @@ void main() {
       tester.view.devicePixelRatio = 1;
       addTearDown(tester.view.resetPhysicalSize);
       addTearDown(tester.view.resetDevicePixelRatio);
-      final model = FileWorkspaceModel();
+      var elapsed = Duration.zero;
+      final model = FileWorkspaceModel(
+        transferSpeed: TransferSpeed(elapsed: () => elapsed),
+      );
       addTearDown(model.dispose);
       final source = MemoryFiles()..data['/large.bin'] = Uint8List(131072);
       final target = MemoryFiles()
@@ -62,6 +66,15 @@ void main() {
       expect(initial.height, 64);
       expect(initial.width, width);
       expect(find.text('64 KB / 128 KB · 50%'), findsOneWidget);
+      final speed = find.byKey(const ValueKey('file-transfer-speed'));
+      expect(tester.widget<Text>(speed).data, '0 B/s');
+      elapsed = const Duration(seconds: 1);
+      await tester.pump(const Duration(milliseconds: 250));
+      expect(tester.widget<Text>(speed).data, '64 KB/s');
+      expect(tester.getRect(bar).contains(tester.getCenter(speed)), isTrue);
+      elapsed = const Duration(seconds: 3);
+      await tester.pump(const Duration(milliseconds: 250));
+      expect(tester.widget<Text>(speed).data, '0 B/s');
       expect(
         tester
             .widget<LinearProgressIndicator>(
@@ -76,6 +89,7 @@ void main() {
       expect(tester.getRect(bar), initial);
       expect(find.text('已传输 1 个项目'), findsOneWidget);
       expect(find.byType(LinearProgressIndicator), findsNothing);
+      expect(speed, findsNothing);
       await model.drop(data, b);
       await tester.pumpAndSettle();
       expect(model.failed, isTrue);

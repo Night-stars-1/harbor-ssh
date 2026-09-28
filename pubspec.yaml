@@ -16,7 +16,7 @@ publish_to: 'none' # Remove this line if you wish to publish to pub.dev
 # https://developer.apple.com/library/archive/documentation/General/Reference/InfoPlistKeyReference/Articles/CoreFoundationKeys.html
 # In Windows, build-name is used as the major, minor, and patch parts
 # of the product and file versions while build-number is used as the build suffix.
-version: 1.0.10+11
+version: 1.0.12+13
 
 environment:
   sdk: ^3.13.3
@@ -34,7 +34,10 @@ dependencies:
   # The following adds the Cupertino Icons font to your application.
   # Use with the CupertinoIcons class for iOS style icons.
   cupertino_icons: ^1.0.8
-  dartssh2: ^4.1.0
+  # Pinned SSH transport with a measured ChaCha20 performance patch.
+  # See third_party/dartssh2/HARBOR_PATCHES.md.
+  dartssh2:
+    path: third_party/dartssh2
   # Local Flutter text-input compatibility patch; see third_party/xterm/HARBOR_PATCHES.md.
   xterm:
     path: third_party/xterm
@@ -55,6 +58,8 @@ dependencies:
   re_highlight: ^0.0.3
 
 dev_dependencies:
+  # Independent reference implementation for SSH packet regression tests.
+  pointycastle: ^4.0.0
   flutter_test:
     sdk: flutter
 

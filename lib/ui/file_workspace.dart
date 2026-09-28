@@ -1112,13 +1112,36 @@ class _FileWorkspaceState extends State<FileWorkspace> {
                                   ),
                             ),
                             if (transferring)
-                              Text(
-                                '${fileSizeLabel(model.transferred)}${model.total != null ? ' / ${fileSizeLabel(model.total)}' : ''}${progress != null ? ' · ${(progress * 100).round()}%' : ''}',
-                                key: const ValueKey('file-transfer-progress'),
-                                maxLines: 1,
-                                overflow: TextOverflow.ellipsis,
-                                style: Theme.of(context).textTheme.labelSmall
-                                    ?.copyWith(color: colors.onSurfaceVariant),
+                              Row(
+                                children: [
+                                  Expanded(
+                                    child: Text(
+                                      '${fileSizeLabel(model.transferred)}${model.total != null ? ' / ${fileSizeLabel(model.total)}' : ''}${progress != null ? ' · ${(progress * 100).round()}%' : ''}',
+                                      key: const ValueKey(
+                                        'file-transfer-progress',
+                                      ),
+                                      maxLines: 1,
+                                      overflow: TextOverflow.ellipsis,
+                                      style: Theme.of(context)
+                                          .textTheme
+                                          .labelSmall
+                                          ?.copyWith(
+                                            color: colors.onSurfaceVariant,
+                                          ),
+                                    ),
+                                  ),
+                                  const SizedBox(width: 8),
+                                  Text(
+                                    model.transferSpeed.label,
+                                    key: const ValueKey('file-transfer-speed'),
+                                    style: Theme.of(context)
+                                        .textTheme
+                                        .labelSmall
+                                        ?.copyWith(
+                                          color: colors.onSurfaceVariant,
+                                        ),
+                                  ),
+                                ],
                               ),
                           ],
                         ),

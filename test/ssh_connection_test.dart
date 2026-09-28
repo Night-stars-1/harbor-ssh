@@ -278,7 +278,7 @@ void main() {
         );
         await expectLater(files.browse('/missing'), throwsA(anything));
         final payload = Uint8List.fromList(
-          List.generate(180000, (index) => index % 251),
+          List.generate(3 * 1024 * 1024 + 123, (index) => index % 251),
         );
         var progress = 0;
         final path = '${listing.path}/传输 test.bin';
@@ -302,15 +302,32 @@ void main() {
           throwsA(anything),
         );
         final received = BytesBuilder();
+        var downloadWrites = 0;
         await files.download(
           path,
           (bytes) async {
+            downloadWrites++;
+            expect(bytes.length, lessThanOrEqualTo(256 * 1024));
             received.add(bytes);
           },
           cancellation: TransferCancellation(),
           onProgress: (_) {},
         );
         expect(received.takeBytes(), payload);
+        expect(downloadWrites, 13);
+        final downloadCancellation = TransferCancellation();
+        var cancelledBytes = 0;
+        await expectLater(
+          files.download(
+            path,
+            (bytes) async => cancelledBytes += bytes.length,
+            cancellation: downloadCancellation,
+            onProgress: (_) => downloadCancellation.cancel(),
+          ),
+          throwsA(isA<TransferCancelled>()),
+        );
+        expect(cancelledBytes, 256 * 1024);
+        expect(connection.status, ConnectionStatus.connected);
         final cancellation = TransferCancellation();
         await expectLater(
           files.upload(
@@ -588,6 +605,102 @@ void main() {
         );
         expect(connection.status, ConnectionStatus.failed);
         expect(connection.error, contains('指纹已改变'));
+      });
+      for (final openShell in [false, true]) {
+        for (final accept in [false, true]) {
+          test(
+            '指纹冲突${accept ? '确认后更新并继续' : '取消后保留并阻止'}连接 (shell=$openShell)',
+            () async {
+              final repository = memoryRepository();
+              final target = host();
+              await repository.verifyHost(
+                target,
+                'ssh-rsa',
+                'SHA256:old',
+                (_, _) async => true,
+              );
+              final connection = SshConnection(id: 'conflict', host: target);
+              addTearDown(connection.dispose);
+              String? presented;
+              var confirmations = 0;
+              await connection.connect(
+                const Credentials(password: 'fixture-password'),
+                repository,
+                (_, _) async => fail('冲突必须显示单独的确认提示'),
+                openShell: openShell,
+                confirmKeyChange: (type, fingerprint, previousKey) async {
+                  confirmations++;
+                  expect(previousKey, 'ssh-rsa SHA256:old');
+                  expect(connection.status, ConnectionStatus.connecting);
+                  expect(
+                    connection.terminal.buffer.getText(),
+                    isNot(contains('connected')),
+                  );
+                  presented = '$type $fingerprint';
+                  return accept;
+                },
+              );
+              expect(confirmations, 1);
+              expect(
+                connection.status,
+                accept ? ConnectionStatus.connected : ConnectionStatus.failed,
+                reason: connection.error,
+              );
+              expect((repository.secrets as MemoryStore).values.values, [
+                accept ? presented : 'ssh-rsa SHA256:old',
+              ]);
+              if (accept) {
+                final second = SshConnection(id: 'trusted-again', host: target);
+                addTearDown(second.dispose);
+                await second.connect(
+                  const Credentials(password: 'fixture-password'),
+                  repository,
+                  (_, _) async => fail('已信任指纹不应再次提示'),
+                  openShell: false,
+                  confirmKeyChange: (_, _, _) async => fail('已信任指纹不应再次提示'),
+                );
+                expect(
+                  second.status,
+                  ConnectionStatus.connected,
+                  reason: second.error,
+                );
+              } else {
+                expect(connection.error, contains('指纹已改变'));
+              }
+            },
+          );
+        }
+      }
+      test('冲突弹窗等待期间关闭连接，迟到确认不更新指纹', () async {
+        final repository = memoryRepository();
+        final target = host();
+        await repository.verifyHost(
+          target,
+          'ssh-rsa',
+          'SHA256:old',
+          (_, _) async => true,
+        );
+        final connection = SshConnection(id: 'closed-conflict', host: target);
+        addTearDown(connection.dispose);
+        final opened = Completer<void>();
+        final decision = Completer<bool>();
+        final attempt = connection.connect(
+          const Credentials(password: 'fixture-password'),
+          repository,
+          (_, _) async => fail('冲突不应显示首次信任提示'),
+          confirmKeyChange: (_, _, _) {
+            opened.complete();
+            return decision.future;
+          },
+        );
+        await opened.future.timeout(const Duration(seconds: 10));
+        connection.close();
+        decision.complete(true);
+        await attempt;
+        expect(connection.status, ConnectionStatus.closed);
+        expect((repository.secrets as MemoryStore).values.values, [
+          'ssh-rsa SHA256:old',
+        ]);
       });
       test('连接过程中关闭，不产生迟到会话', () async {
         final connection = SshConnection(id: '6', host: host());
