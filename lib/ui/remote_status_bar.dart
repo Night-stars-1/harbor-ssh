@@ -446,7 +446,7 @@ class _RemoteStatusBarState extends State<RemoteStatusBar> {
           ),
           total: _bytes(metrics?.memoryTotalBytes),
         ),
-        if (metrics?.swapTotalBytes != null) ...[
+        if (metrics?.swapTotalBytes != null || metrics?.swappiness != null) ...[
           const SizedBox(height: 8),
           _swapSummary(context, colors, metrics),
         ],
@@ -483,8 +483,15 @@ class _RemoteStatusBarState extends State<RemoteStatusBar> {
   ) {
     final used = metrics?.swapUsedBytes;
     final total = metrics?.swapTotalBytes;
-    final percent = total == 0 ? null : _usagePercent(used, total);
+    final swappiness = metrics?.swappiness;
+    final percent = total == null || total == 0
+        ? null
+        : _usagePercent(used, total);
     final theme = Theme.of(context);
+    final usageStyle = theme.textTheme.labelMedium?.copyWith(
+      color: _textTone(colors, percent),
+      fontFeatures: _tabular,
+    );
     return Container(
       key: const ValueKey('swap-summary'),
       padding: const EdgeInsets.fromLTRB(12, 8, 12, 9),
@@ -498,16 +505,13 @@ class _RemoteStatusBarState extends State<RemoteStatusBar> {
           Row(
             children: [
               Expanded(child: Text('Swap', style: theme.textTheme.labelMedium)),
-              Text(
-                total == 0 ? '未启用' : _percent(percent, precise: true),
-                style: theme.textTheme.labelMedium?.copyWith(
-                  color: _textTone(colors, percent),
-                  fontFeatures: _tabular,
-                ),
-              ),
+              if (total == 0)
+                Text('未启用', style: usageStyle)
+              else if (total != null)
+                Text(_percent(percent, precise: true), style: usageStyle),
             ],
           ),
-          if (total != 0) ...[
+          if (total != null && total > 0) ...[
             const SizedBox(height: 6),
             _UsageBar(
               percent: percent,
@@ -515,10 +519,29 @@ class _RemoteStatusBarState extends State<RemoteStatusBar> {
               height: 8,
             ),
             const SizedBox(height: 6),
+            FittedBox(
+              fit: BoxFit.scaleDown,
+              alignment: Alignment.centerLeft,
+              child: Text(
+                '已用 ${_bytes(used)} · 可用 ${_remaining(used, total)} · 共 ${_bytes(total)}'
+                '${swappiness == null ? '' : ' · 交换倾向 $swappiness'}',
+                key: swappiness == null
+                    ? null
+                    : const ValueKey('swap-swappiness'),
+                maxLines: 1,
+                softWrap: false,
+                style: theme.textTheme.labelSmall?.copyWith(
+                  color: colors.onSurfaceVariant,
+                  fontFeatures: _tabular,
+                ),
+              ),
+            ),
+          ] else if (swappiness != null) ...[
+            const SizedBox(height: 6),
             Text(
-              '已用 ${_bytes(used)} · 可用 ${_remaining(used, total)} · 共 ${_bytes(total)}',
-              style: theme.textTheme.labelSmall?.copyWith(
-                color: colors.onSurfaceVariant,
+              '交换倾向 $swappiness',
+              key: const ValueKey('swap-swappiness'),
+              style: theme.textTheme.labelMedium?.copyWith(
                 fontFeatures: _tabular,
               ),
             ),

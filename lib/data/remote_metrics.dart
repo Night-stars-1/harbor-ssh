@@ -45,6 +45,16 @@ if [ -r /proc/meminfo ]; then
     esac
   done < /proc/meminfo
 fi
+metrics_swappiness=
+if [ -r /proc/sys/vm/swappiness ]; then
+  metrics_swappiness=$(cat /proc/sys/vm/swappiness 2>/dev/null) || metrics_swappiness=
+fi
+if [ -z "$metrics_swappiness" ] && command -v sysctl >/dev/null 2>&1; then
+  metrics_swappiness=$(sysctl -n vm.swappiness 2>/dev/null) || metrics_swappiness=
+fi
+if [ -n "$metrics_swappiness" ]; then
+  printf "swappiness %s\n" "$metrics_swappiness"
+fi
 metrics_iface=
 if [ -r /proc/net/route ]; then
   while IFS= read -r metrics_line; do
@@ -208,6 +218,7 @@ final class RemoteMetricsSample {
     this.memoryTotalBytes,
     this.swapUsedBytes,
     this.swapTotalBytes,
+    this.swappiness,
     this.diskUsedBytes,
     this.diskTotalBytes,
     this.networkInterface,
@@ -234,6 +245,9 @@ final class RemoteMetricsSample {
   final int? memoryTotalBytes;
   final int? swapUsedBytes;
   final int? swapTotalBytes;
+
+  /// `vm.swappiness`, 0–200. Null when the host did not report a usable value.
+  final int? swappiness;
   final int? diskUsedBytes;
   final int? diskTotalBytes;
 
@@ -278,6 +292,7 @@ final class RemoteHostMetrics {
     this.memoryTotalBytes,
     this.swapUsedBytes,
     this.swapTotalBytes,
+    this.swappiness,
     this.diskUsedBytes,
     this.diskTotalBytes,
     this.cpuCores = const [],
@@ -302,6 +317,9 @@ final class RemoteHostMetrics {
   final int? memoryTotalBytes;
   final int? swapUsedBytes;
   final int? swapTotalBytes;
+
+  /// `vm.swappiness` from the current sample, or null when it was not read.
+  final int? swappiness;
   final int? diskUsedBytes;
   final int? diskTotalBytes;
 
@@ -354,6 +372,7 @@ final class RemoteHostMetrics {
       memoryTotalBytes: current.memoryTotalBytes,
       swapUsedBytes: current.swapUsedBytes,
       swapTotalBytes: current.swapTotalBytes,
+      swappiness: current.swappiness,
       diskUsedBytes: current.diskUsedBytes,
       diskTotalBytes: current.diskTotalBytes,
       cpuCores: _cpuCores(current, previous),
@@ -507,6 +526,7 @@ RemoteMetricsSample? parseRemoteMetrics(String output) {
   int? memoryAvailableKb;
   int? swapTotalKb;
   int? swapFreeKb;
+  int? swappiness;
   String? networkInterface;
   int? networkRxBytes;
   int? networkTxBytes;
@@ -548,6 +568,8 @@ RemoteMetricsSample? parseRemoteMetrics(String output) {
         swapTotalKb ??= _parseKilobytes(value);
       case 'swapfree':
         swapFreeKb ??= _parseKilobytes(value);
+      case 'swappiness':
+        swappiness ??= _parseSwappiness(value);
       case 'iface':
         if (_interfaceName.hasMatch(value)) networkInterface ??= value;
       case 'net':
@@ -646,6 +668,7 @@ RemoteMetricsSample? parseRemoteMetrics(String output) {
     memoryTotalBytes: memoryTotalBytes,
     swapUsedBytes: swapUsedBytes,
     swapTotalBytes: swapTotalBytes,
+    swappiness: swappiness,
     diskUsedBytes: root?.usedBytes,
     diskTotalBytes: root?.totalBytes,
     networkInterface: networkInterface,
@@ -727,6 +750,15 @@ int? _parseKilobytes(String value) {
   if (tokens.isEmpty) return null;
   final parsed = int.tryParse(tokens.first);
   if (parsed == null || parsed < 0) return null;
+  return parsed;
+}
+
+/// `vm.swappiness`: an integer from 0 through 200. Anything else is unusable.
+int? _parseSwappiness(String value) {
+  final tokens = _tokens(value);
+  if (tokens.length != 1) return null;
+  final parsed = int.tryParse(tokens.single);
+  if (parsed == null || parsed < 0 || parsed > 200) return null;
   return parsed;
 }
 

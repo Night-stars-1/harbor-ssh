@@ -15,6 +15,7 @@ memtotal        16316420 kB
 memavail         8000000 kB
 swaptotal        2097152 kB
 swapfree          1048576 kB
+swappiness 60
 iface eth0
 net 1000000 2000000
 disks-ok
@@ -27,6 +28,8 @@ __HARBOR_REMOTE_METRICS_END__
       expect(sample.memoryTotalBytes, 16316420 * 1024);
       expect(sample.swapTotalBytes, 2097152 * 1024);
       expect(sample.swapUsedBytes, 1048576 * 1024);
+      expect(sample.swappiness, 60);
+      expect(RemoteHostMetrics.fromSamples(sample, null).swappiness, 60);
       expect(sample.memoryUsedBytes, (16316420 - 8000000) * 1024);
       expect(sample.diskTotalBytes, 10240000 * 1024);
       expect(sample.diskUsedBytes, 4096000 * 1024);
@@ -143,6 +146,22 @@ __HARBOR_REMOTE_METRICS_END__
 ''')!;
       expect(invalid.swapTotalBytes, 100 * 1024);
       expect(invalid.swapUsedBytes, isNull);
+    });
+
+    test('交换倾向只接受 0 到 200 的整数', () {
+      int? read(String value) => parseRemoteMetrics('''
+__HARBOR_REMOTE_METRICS_BEGIN__
+os Linux
+uptime 5
+swappiness $value
+__HARBOR_REMOTE_METRICS_END__
+''')!.swappiness;
+      expect(read('0'), 0);
+      expect(read('200'), 200);
+      expect(read('201'), isNull);
+      expect(read('-1'), isNull);
+      expect(read('60%'), isNull);
+      expect(read(''), isNull);
     });
 
     test('负数、越界总量与非法 df 行按不可用处理', () {

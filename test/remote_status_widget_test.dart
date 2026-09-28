@@ -56,6 +56,7 @@ const _metrics = RemoteHostMetrics(
   memoryTotalBytes: 10300000000,
   swapUsedBytes: 268435456,
   swapTotalBytes: 1073741824,
+  swappiness: 10,
   diskPercent: 72,
   diskUsedBytes: 72000000000,
   diskTotalBytes: 100000000000,
@@ -482,7 +483,11 @@ __HARBOR_REMOTE_METRICS_END__
     expect(swapSummary, findsOneWidget);
     expect(
       _detailsTexts(tester),
-      containsAll(['Swap', '25.0%', '已用 256.0 MB · 可用 768.0 MB · 共 1.0 GB']),
+      containsAll([
+        'Swap',
+        '25.0%',
+        '已用 256.0 MB · 可用 768.0 MB · 共 1.0 GB · 交换倾向 10',
+      ]),
     );
     final progressIndicators = tester.widgetList<LinearProgressIndicator>(
       find.descendant(
@@ -857,6 +862,7 @@ __HARBOR_REMOTE_METRICS_END__
       _statusBar(
         metrics: const RemoteHostMetrics(
           swapTotalBytes: 0,
+          swappiness: 60,
           processesAvailable: true,
           processes: [
             RemoteMemoryProcess(pid: 7, name: 'worker', residentBytes: 1024),
@@ -868,6 +874,11 @@ __HARBOR_REMOTE_METRICS_END__
     final swap = find.byKey(const ValueKey('swap-summary'));
     expect(
       find.descendant(of: swap, matching: find.text('未启用')),
+      findsOneWidget,
+    );
+    expect(find.byKey(const ValueKey('swap-swappiness')), findsOneWidget);
+    expect(
+      find.descendant(of: swap, matching: find.text('交换倾向 60')),
       findsOneWidget,
     );
     expect(
