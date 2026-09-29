@@ -56,7 +56,7 @@ jobs:
           channel: stable
           cache: true
       - run: flutter pub get
-      - name: Verify macOS legacy Keychain compatibility
+      - name: Verify macOS credential bundle
         if: matrix.target == 'macos'
         shell: bash
         run: |

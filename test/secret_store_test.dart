@@ -5,186 +5,136 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:harbor_ssh/data/host_repository.dart';
 
 void main() {
-  test('Windows 默认保留旧版可读取的逐项存储', () async {
+  test('Windows 直接使用逐项存储，不访问旧合并存档', () async {
     debugDefaultTargetPlatformOverride = TargetPlatform.windows;
     addTearDown(() => debugDefaultTargetPlatformOverride = null);
-    final backend = _Backend();
+    final backend = _Backend()..items[SecretStore.bundleKey] = 'old-archive';
     final store = SecretStore(backend: backend);
-    await store.write('harbor.credentials.user.key', 'private-key');
-    expect(await backend.read('harbor.credentials.user.key'), 'private-key');
-    expect(backend.items.containsKey(SecretStore.bundleKey), isFalse);
-    expect(backend.readAlls, 0);
+    await store.write('key', 'value');
+    expect(await store.read('key'), 'value');
+    await store.delete('key');
+    expect(backend.items, {SecretStore.bundleKey: 'old-archive'});
+    expect(backend.readKeys, ['key']);
+    expect(backend.deletedKeys, ['key']);
   });
 
-  test('macOS 默认继续使用单条钥匙串记录', () async {
+  test('macOS 默认只读写当前单条钥匙串归档', () async {
     debugDefaultTargetPlatformOverride = TargetPlatform.macOS;
     addTearDown(() => debugDefaultTargetPlatformOverride = null);
     final backend = _Backend();
-    await SecretStore(backend: backend).write('key', 'value');
+    final store = SecretStore(backend: backend);
+    await store.write('key', 'value');
+    expect(await store.read('key'), 'value');
     expect(backend.items.keys, [SecretStore.bundleKey]);
+    expect(backend.readKeys, [SecretStore.bundleKey]);
   });
 
-  test('逐项模式拆回 1.0.10 存档，旧版立即可读且保留其较新记录', () async {
+  test('只有旧逐项凭证时不迁移不读取不删除，首次保存只建立新归档', () async {
     final backend = _Backend()
-      ..items[SecretStore.bundleKey] = jsonEncode({
-        'harbor.credentials.user.key': 'private-key',
-        'harbor.sync.settings.v1': 'older-settings',
-      })
-      ..items['harbor.sync.settings.v1'] = 'newer-settings';
-    final store = SecretStore(backend: backend, useBundle: false);
-    expect(await store.read('harbor.credentials.user.key'), 'private-key');
-    expect(await backend.read('harbor.credentials.user.key'), 'private-key');
-    expect(await store.read('harbor.sync.settings.v1'), 'newer-settings');
-    expect(backend.items.containsKey(SecretStore.bundleKey), isFalse);
+      ..items['harbor.credentials.old'] = 'old-private-key'
+      ..items['harbor.ai.v1'] = 'old-ai-settings';
+    final original = Map.of(backend.items);
+    final store = SecretStore(backend: backend, useBundle: true);
+    expect(await store.read('harbor.credentials.old'), isNull);
+    expect(await store.read('harbor.ai.v1'), isNull);
+    expect(await store.read('harbor.sync.pending.v1'), isNull);
+    expect(backend.items, original);
+    expect(backend.readKeys, [SecretStore.bundleKey]);
+    expect(backend.writes, isEmpty);
+    expect(backend.deletedKeys, isEmpty);
+    await store.write('harbor.credentials.new', 'new-private-key');
+    expect(jsonDecode(backend.items[SecretStore.bundleKey]!), {
+      'harbor.credentials.new': 'new-private-key',
+    });
+    expect(backend.items['harbor.credentials.old'], 'old-private-key');
+    expect(backend.items['harbor.ai.v1'], 'old-ai-settings');
+    expect(backend.deletedKeys, isEmpty);
   });
 
-  test('拆回逐项存储失败保留原存档，重试不覆盖已写入的新值', () async {
+  test('当前归档缺项时不回退读取旧凭证', () async {
     final backend = _Backend()
-      ..items[SecretStore.bundleKey] = jsonEncode({
-        'first': 'one',
-        'second': 'two',
-      })
-      ..failWriteKey = 'second';
-    final store = SecretStore(backend: backend, useBundle: false);
-    await expectLater(store.read('first'), throwsStateError);
-    expect(backend.items.containsKey(SecretStore.bundleKey), isTrue);
-    expect(backend.items['first'], 'one');
-    backend.items['first'] = 'updated-by-legacy';
-    backend.failWriteKey = null;
-    expect(await store.read('first'), 'updated-by-legacy');
-    expect(await store.read('second'), 'two');
-    expect(backend.items.containsKey(SecretStore.bundleKey), isFalse);
+      ..items[SecretStore.bundleKey] = jsonEncode({'current': 'saved'})
+      ..items['old'] = 'old-private-key';
+    final original = Map.of(backend.items);
+    final store = SecretStore(backend: backend, useBundle: true);
+    expect(await store.read('current'), 'saved');
+    expect(await store.read('old'), isNull);
+    await store.delete('old');
+    expect(backend.items, original);
+    expect(backend.readKeys, [SecretStore.bundleKey]);
+    expect(backend.writes, isEmpty);
+    expect(backend.deletedKeys, isEmpty);
   });
 
-  test('逐项模式每次读取最新值，不以旧缓存覆盖其他客户端的凭据', () async {
+  test('删除当前凭证后不会从旧记录恢复，旧记录留给用户清理', () async {
+    final backend = _Backend()
+      ..items[SecretStore.bundleKey] = jsonEncode({'key': 'current'})
+      ..items['key'] = 'old';
+    final store = SecretStore(backend: backend, useBundle: true);
+    await store.delete('key');
+    expect(await store.read('key'), isNull);
+    expect(
+      await SecretStore(backend: backend, useBundle: true).read('key'),
+      isNull,
+    );
+    expect(backend.items['key'], 'old');
+    expect(backend.deletedKeys, isEmpty);
+  });
+
+  test('逐项模式不从旧合并存档恢复凭证', () async {
+    final backend = _Backend()
+      ..items[SecretStore.bundleKey] = jsonEncode({'key': 'archived'});
+    final store = SecretStore(backend: backend, useBundle: false);
+    expect(await store.read('key'), isNull);
+    await store.write('key', 'current');
+    expect(await store.read('key'), 'current');
+    expect(jsonDecode(backend.items[SecretStore.bundleKey]!), {
+      'key': 'archived',
+    });
+    expect(backend.readKeys, ['key', 'key']);
+    expect(backend.deletedKeys, isEmpty);
+  });
+
+  test('逐项模式每次读取最新值', () async {
     final backend = _Backend()..items['key'] = 'one';
     final store = SecretStore(backend: backend, useBundle: false);
     expect(await store.read('key'), 'one');
-    await backend.write('key', 'changed-by-legacy');
-    await store.write('other', 'value');
-    expect(await store.read('key'), 'changed-by-legacy');
-    await store.delete('key');
-    expect(await backend.read('key'), isNull);
-    expect(await store.read('other'), 'value');
+    backend.items['key'] = 'changed';
+    expect(await store.read('key'), 'changed');
   });
 
-  test('损坏存档不能在拆分迁移时被删除或覆盖', () async {
-    final backend = _Backend()..items[SecretStore.bundleKey] = 'corrupt';
-    final store = SecretStore(backend: backend, useBundle: false);
-    await expectLater(store.write('key', 'value'), throwsFormatException);
-    expect(backend.items, {SecretStore.bundleKey: 'corrupt'});
-    expect(backend.writes, isEmpty);
-  });
-
-  test('多次写入只保留一个钥匙串项', () async {
+  test('重复保存相同值不写入，重开后能读取所有当前值', () async {
     final backend = _Backend();
     final store = SecretStore(backend: backend, useBundle: true);
-
-    await store.write('harbor.credentials.a', 'one');
-    await store.write('harbor.credentials.b', 'two');
-    await store.write('harbor.credentials.a', 'one');
-
-    expect(backend.items.keys, [SecretStore.bundleKey]);
-    expect(await store.read('harbor.credentials.a'), 'one');
-    expect(await store.read('harbor.credentials.b'), 'two');
-    expect(backend.reads, 1);
-    expect(backend.readAlls, 1);
-  });
-
-  test('旧的逐条记录合并进同一个项后删除', () async {
-    final backend = _Backend()
-      ..items['harbor.credentials.a'] = '{"password":"secret"}'
-      ..items['harbor.ai.v1'] = 'settings';
-    final store = SecretStore(backend: backend, useBundle: true);
-
-    expect(await store.read('harbor.ai.v1'), 'settings');
-    expect(backend.items.keys, [SecretStore.bundleKey]);
-    expect(backend.readAlls, 1);
-
+    await store.write('a', 'one');
+    await store.write('b', 'two');
+    await store.write('a', 'one');
+    expect(backend.writes, [SecretStore.bundleKey, SecretStore.bundleKey]);
     final reopened = SecretStore(backend: backend, useBundle: true);
-    expect(
-      await reopened.read('harbor.credentials.a'),
-      '{"password":"secret"}',
-    );
-    expect(backend.readAlls, 1, reason: '已有存档时不再逐条读取旧记录');
-
-    await reopened.delete('harbor.credentials.a');
-    expect(await reopened.read('harbor.credentials.a'), isNull);
-    expect(await reopened.read('harbor.ai.v1'), 'settings');
-    expect(backend.items.keys, [SecretStore.bundleKey]);
+    expect(await reopened.read('a'), 'one');
+    expect(await reopened.read('b'), 'two');
   });
 
-  test('损坏的存档不会被空数据覆盖', () async {
+  test('损坏的当前归档不能被空数据覆盖', () async {
     final backend = _Backend()..items[SecretStore.bundleKey] = 'not-json';
     final store = SecretStore(backend: backend, useBundle: true);
-
-    await expectLater(store.read('harbor.ai.v1'), throwsFormatException);
+    await expectLater(store.read('key'), throwsFormatException);
+    await expectLater(store.write('key', 'new'), throwsFormatException);
     expect(backend.items[SecretStore.bundleKey], 'not-json');
     expect(backend.writes, isEmpty);
+    expect(backend.deletedKeys, isEmpty);
   });
 
-  test('已有存档漏掉的旧凭据按键读取并迁移，保留其他记录', () async {
+  test('归档授权失败后可重试，不清空或覆盖现有凭证', () async {
     final backend = _Backend()
-      ..items[SecretStore.bundleKey] = jsonEncode({'harbor.ai.v1': 'settings'})
-      ..items['harbor.credentials.user.key'] = 'saved-private-key';
+      ..items[SecretStore.bundleKey] = jsonEncode({'key': 'saved'})
+      ..failReads = true;
     final store = SecretStore(backend: backend, useBundle: true);
-    expect(
-      await store.read('harbor.credentials.user.key'),
-      'saved-private-key',
-    );
-    expect(await store.read('harbor.ai.v1'), 'settings');
-    expect(backend.items.keys, [SecretStore.bundleKey]);
-    expect(backend.readAlls, 0);
-    final reopened = SecretStore(backend: backend, useBundle: true);
-    expect(
-      await reopened.read('harbor.credentials.user.key'),
-      'saved-private-key',
-    );
-  });
-
-  test('迁移保存失败时保留旧凭据并允许重试', () async {
-    final backend = _Backend()
-      ..items[SecretStore.bundleKey] = '{}'
-      ..items['harbor.credentials.user.key'] = 'saved-private-key'
-      ..failWrites = true;
-    final store = SecretStore(backend: backend, useBundle: true);
-    await expectLater(
-      store.read('harbor.credentials.user.key'),
-      throwsStateError,
-    );
-    expect(backend.items['harbor.credentials.user.key'], 'saved-private-key');
-    backend.failWrites = false;
-    expect(
-      await store.read('harbor.credentials.user.key'),
-      'saved-private-key',
-    );
-    expect(backend.items.keys, [SecretStore.bundleKey]);
-  });
-
-  test('存档中已更新的凭据优先于残留旧记录，删除后不会复活', () async {
-    const key = 'harbor.credentials.user.key';
-    final backend = _Backend()
-      ..items[SecretStore.bundleKey] = jsonEncode({key: 'new'})
-      ..items[key] = 'old';
-    final store = SecretStore(backend: backend, useBundle: true);
-    expect(await store.read(key), 'new');
-    await store.delete(key);
-    expect(await store.read(key), isNull);
-    expect(
-      await SecretStore(backend: backend, useBundle: true).read(key),
-      isNull,
-    );
-  });
-
-  test('删除未迁移的旧凭据不会被后续读取恢复', () async {
-    const key = 'harbor.credentials.user.key';
-    final backend = _Backend()
-      ..items[SecretStore.bundleKey] = '{}'
-      ..items[key] = 'old';
-    final store = SecretStore(backend: backend, useBundle: true);
-    await store.delete(key);
-    expect(await store.read(key), isNull);
-    expect(backend.items.keys, [SecretStore.bundleKey]);
+    await expectLater(store.read('key'), throwsStateError);
+    await expectLater(store.write('key', 'new'), throwsStateError);
+    expect(backend.writes, isEmpty);
+    backend.failReads = false;
+    expect(await store.read('key'), 'saved');
   });
 
   test('保存失败不污染缓存，相同内容重试仍会落盘', () async {
@@ -220,34 +170,28 @@ void main() {
 class _Backend implements SecretBackend {
   final items = <String, String>{};
   final writes = <String>[];
-  var reads = 0;
-  var readAlls = 0;
+  final readKeys = <String>[];
+  final deletedKeys = <String>[];
+  var failReads = false;
   var failWrites = false;
-  String? failWriteKey;
 
   @override
   Future<String?> read(String key) async {
-    reads++;
+    readKeys.add(key);
+    if (failReads) throw StateError('authorization denied');
     return items[key];
   }
 
   @override
   Future<void> write(String key, String value) async {
-    if (failWrites || failWriteKey == key) {
-      throw StateError('storage unavailable');
-    }
+    if (failWrites) throw StateError('storage unavailable');
     writes.add(key);
     items[key] = value;
   }
 
   @override
   Future<void> delete(String key) async {
+    deletedKeys.add(key);
     items.remove(key);
-  }
-
-  @override
-  Future<Map<String, String>> readAll() async {
-    readAlls++;
-    return Map<String, String>.from(items);
   }
 }

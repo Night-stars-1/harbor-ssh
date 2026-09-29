@@ -488,11 +488,6 @@ class FlutterSecureStorage {
 
     /// Reads all items from the keychain matching the query parameters.
     internal func readAll(params: KeychainQueryParameters) -> FlutterSecureStorageResponse {
-        #if os(macOS)
-        if !params.usesDataProtectionKeychain {
-            return readAllFileBased(params: params)
-        }
-        #endif
         func collectResults(from ref: AnyObject?, into results: inout [String: String]) {
             guard let items = ref as? [[CFString: Any]] else { return }
             for item in items {
@@ -579,44 +574,6 @@ class FlutterSecureStorage {
 
         return FlutterSecureStorageResponse(status: errSecSuccess, value: results)
     }
-
-    #if os(macOS)
-    /// The file-based keychain rejects returning password data with MatchLimitAll
-    /// (errSecParam). Enumerate attributes, then authorize/read each exact item.
-    /// Fail the entire migration if any item cannot be read; never return a
-    /// partial credential archive after a denied authorization.
-    private func readAllFileBased(params: KeychainQueryParameters) -> FlutterSecureStorageResponse {
-        var enumeration = params
-        enumeration.shouldReturnData = false
-        enumeration.resultLimit = nil
-        var query = baseQuery(from: enumeration)
-        query[kSecMatchLimit] = kSecMatchLimitAll
-        query[kSecReturnAttributes] = true
-        var ref: AnyObject?
-        let status = SecItemCopyMatching(query as CFDictionary, &ref)
-        if status == errSecItemNotFound {
-            return FlutterSecureStorageResponse(status: errSecSuccess, value: [String: String]())
-        }
-        guard status == errSecSuccess else {
-            return FlutterSecureStorageResponse(status: status, value: nil)
-        }
-        guard let items = ref as? [[CFString: Any]] else {
-            return FlutterSecureStorageResponse(status: errSecDecode, value: nil)
-        }
-        var values: [String: String] = [:]
-        for item in items {
-            guard let key = item[kSecAttrAccount] as? String else { continue }
-            var individual = params
-            individual.key = key
-            individual.resultLimit = 1
-            individual.shouldReturnData = true
-            let response = read(params: individual)
-            guard response.status == errSecSuccess else { return response }
-            if let value = response.value as? String { values[key] = value }
-        }
-        return FlutterSecureStorageResponse(status: errSecSuccess, value: values)
-    }
-    #endif
 
     /// Reads a single item from the keychain.
     internal func read(params: KeychainQueryParameters) -> FlutterSecureStorageResponse {

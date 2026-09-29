@@ -23,19 +23,21 @@ propagation, service/account identity, and all stored values remain unchanged.
 Data-protection clients and iOS retain the upstream migration behavior.
 No entitlement, access-control list, signing identity, or data reset is added.
 
-## Enumerate file-based records without requesting all password data at once
+## Current storage only
 
-The native macOS smoke test reproduced OSStatus -50 (errSecParam) when the
-upstream readAll combines kSecMatchLimitAll with kSecReturnData. File-based
-readAll now enumerates item attributes and reads each exact account separately.
-Any read/authorization failure aborts enumeration, so the app cannot migrate
-an incomplete set of accessible credentials and treat it as a complete archive.
-The data-protection/iOS enumeration path is unchanged.
+Harbor no longer enumerates or migrates older credential layouts. On macOS it
+reads/writes only harbor.secrets.bundle.v1; a missing archive or entry is absent,
+without falling back to individual old records. Other platforms use their
+current per-key storage without unpacking an older bundle. Existing obsolete
+records are not deleted automatically. See docs/macos-credentials.md.
+
+The experimental file-based readAll workaround was removed together with the
+app's migration code. Harbor's SecretBackend no longer exposes readAll.
 
 ## Validation
 
-`tool/macos_keychain_smoke.swift` checks absent records, existing file-based
-records, enumeration, update, and deletion against the real Security framework.
+`tool/macos_keychain_smoke.swift` checks absent records and current-bundle
+creation, update, reopening and deletion against the real Security framework.
 The macOS build job runs it with a temporary CI-only keychain.
 `test/startup_failure_test.dart` verifies redacted, actionable diagnostics.
 `test/workspace_startup_test.dart` verifies failed recovery still blocks sync,

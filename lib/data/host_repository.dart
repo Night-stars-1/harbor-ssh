@@ -24,7 +24,7 @@ class PreferencesStore implements KeyValueStore {
 }
 
 /// Bundle secrets only on macOS, where authorization is per keychain item.
-/// Other platforms keep the per-key layout understood by earlier releases.
+/// Other platforms use per-key storage. No legacy layout is read or migrated.
 class SecretStore implements KeyValueStore {
   SecretStore({SecretBackend? backend, bool? useBundle})
     : _useBundle =
@@ -56,33 +56,23 @@ class SecretStore implements KeyValueStore {
 
   @override
   Future<String?> read(String key) => _sync(() async {
-    await _ensure();
     if (!_useBundle) return _backend.read(key);
-    final value = _values[key];
-    if (value != null) return value;
-    // Some platform backends cannot enumerate every legacy item. An existing
-    // bundle is therefore not proof that migration included this exact key.
-    final legacy = await _backend.read(key);
-    if (legacy == null) return null;
-    await _persist({..._values, key: legacy});
-    await _backend.delete(key);
-    return legacy;
+    await _ensure();
+    return _values[key];
   });
 
   @override
   Future<void> write(String key, String value) => _sync(() async {
-    await _ensure();
     if (!_useBundle) return _backend.write(key, value);
+    await _ensure();
     if (_values[key] == value) return;
     await _persist({..._values, key: value});
   });
 
   @override
   Future<void> delete(String key) => _sync(() async {
-    await _ensure();
     if (!_useBundle) return _backend.delete(key);
-    // Remove a leftover legacy copy too, so a later read cannot resurrect it.
-    await _backend.delete(key);
+    await _ensure();
     if (!_values.containsKey(key)) return;
     final next = {..._values}..remove(key);
     await _persist(next);
@@ -91,35 +81,9 @@ class SecretStore implements KeyValueStore {
   Future<void> _ensure() async {
     if (_loaded) return;
     final bundled = await _backend.read(bundleKey);
-    if (!_useBundle) {
-      if (bundled != null) {
-        // Reverse the 1.0.10 migration on platforms that do not need bundling.
-        // A legacy client may have edited individual entries since migration;
-        // preserve those newer values. Keep the bundle until every write lands.
-        for (final entry in _decode(bundled).entries) {
-          if (await _backend.read(entry.key) == null) {
-            await _backend.write(entry.key, entry.value);
-          }
-        }
-        await _backend.delete(bundleKey);
-      }
-      _loaded = true;
-      return;
-    }
     if (bundled != null) {
       _values.addAll(_decode(bundled));
-      _loaded = true;
-      return;
     }
-    final legacy = await _backend.readAll();
-    legacy.remove(bundleKey);
-    if (legacy.isNotEmpty) {
-      await _backend.write(bundleKey, jsonEncode(legacy));
-      for (final key in legacy.keys) {
-        await _backend.delete(key);
-      }
-    }
-    _values.addAll(legacy);
     _loaded = true;
   }
 
@@ -145,7 +109,6 @@ abstract interface class SecretBackend {
   Future<String?> read(String key);
   Future<void> write(String key, String value);
   Future<void> delete(String key);
-  Future<Map<String, String>> readAll();
 }
 
 class _SecureStorageBackend implements SecretBackend {
@@ -158,8 +121,6 @@ class _SecureStorageBackend implements SecretBackend {
       _storage.write(key: key, value: value);
   @override
   Future<void> delete(String key) => _storage.delete(key: key);
-  @override
-  Future<Map<String, String>> readAll() => _storage.readAll();
 }
 
 class HostKeyMismatch implements Exception {

@@ -27,10 +27,6 @@ struct MacOSKeychainSmoke {
         }
         defer { _ = storage.deleteAll(params: params(nil)) }
 
-        let empty = storage.readAll(params: params(nil))
-        success(empty, "enumerate empty keychain service")
-        require((empty.value as? [String: String])?.isEmpty == true, "Empty service has items")
-
         // The regression: a missing bundle/journal must be null, not an
         // entitlement failure from a fallback to a different keychain.
         for key in ["harbor.secrets.bundle.v1", "harbor.sync.pending.v1"] {
@@ -43,39 +39,20 @@ struct MacOSKeychainSmoke {
             }
         }
 
-        // Seed an old file-based record using Security directly, rather than
-        // writing and reading through the same plugin implementation.
-        let legacyKey = "harbor.credentials.legacy"
-        let legacy: [CFString: Any] = [
-            kSecClass: kSecClassGenericPassword, kSecAttrService: service,
-            kSecAttrAccount: legacyKey,
-            kSecValueData: Data("legacy-test-secret".utf8),
-        ]
-        require(SecItemAdd(legacy as CFDictionary, nil) == errSecSuccess, "Seed legacy item")
-        var secondLegacy = legacy
-        secondLegacy[kSecAttrAccount] = "harbor.credentials.second"
-        secondLegacy[kSecValueData] = Data("second-test-secret".utf8)
-        require(SecItemAdd(secondLegacy as CFDictionary, nil) == errSecSuccess, "Seed second legacy item")
-        let restored = storage.read(params: params(legacyKey))
-        success(restored, "read legacy item")
-        require(restored.value as? String == "legacy-test-secret", "Legacy value changed")
-        let all = storage.readAll(params: params(nil))
-        success(all, "enumerate legacy items")
-        require((all.value as? [String: String])?[legacyKey] == "legacy-test-secret", "Legacy item omitted")
-        require((all.value as? [String: String])?["harbor.credentials.second"] == "second-test-secret", "Second legacy item omitted")
-        require((all.value as? [String: String])?.count == 2, "Unexpected enumeration result")
-
         let bundle = params("harbor.secrets.bundle.v1")
         success(storage.write(params: bundle, value: "test-bundle"), "create bundle")
         success(storage.write(params: bundle, value: "updated-bundle"), "update bundle")
         let updated = storage.read(params: bundle)
         success(updated, "read updated bundle")
         require(updated.value as? String == "updated-bundle", "Updated value mismatch")
+        let reopened = FlutterSecureStorage().read(params: bundle)
+        success(reopened, "reopen current bundle")
+        require(reopened.value as? String == "updated-bundle", "Reopened value mismatch")
         success(storage.delete(params: bundle), "delete bundle")
         let deleted = storage.read(params: bundle)
         success(deleted, "read deleted bundle")
         require(deleted.value == nil, "Deleted value returned")
         success(storage.delete(params: bundle), "delete absent bundle")
-        print("macOS legacy Keychain smoke test passed")
+        print("macOS current-bundle Keychain smoke test passed")
     }
 }
