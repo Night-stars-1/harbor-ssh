@@ -163,13 +163,59 @@ class ExpressiveUserCard extends StatelessWidget {
     menuItems: [
       // 旧版密码凭证没有可安装的公钥，因此没有这个入口。
       if (user.authMethod == AuthMethod.privateKey)
-        const PopupMenuItem(
-          value: 'installKey',
-          child: Text('将公钥安装到服务器'),
-        ),
+        const PopupMenuItem(value: 'installKey', child: Text('将公钥安装到服务器')),
       const PopupMenuItem(value: 'edit', child: Text('编辑凭证')),
       const PopupMenuItem(value: 'delete', child: Text('删除凭证')),
     ],
+  );
+}
+
+/// A connection-style item with a secondary action and optional details.
+/// Shares layout, menus, focus and surfaces with host and credential items.
+class ExpressiveActionTile extends StatelessWidget {
+  const ExpressiveActionTile({
+    super.key,
+    required this.title,
+    required this.subtitle,
+    required this.icon,
+    required this.badges,
+    required this.menuLabel,
+    required this.onAction,
+    required this.menuItems,
+    this.onOpen,
+    this.details,
+    this.trailing,
+    this.extraBadges = const [],
+    this.slot = HarborListSlot.single,
+    this.asCard = false,
+  });
+  final String title, subtitle, menuLabel;
+  final IconData icon;
+  final List<String> badges;
+  final List<Widget> extraBadges;
+  final Widget? details, trailing;
+  final VoidCallback? onOpen;
+  final ValueChanged<String> onAction;
+  final List<PopupMenuEntry<String>> menuItems;
+  final HarborListSlot slot;
+  final bool asCard;
+
+  @override
+  Widget build(BuildContext context) => _ConnectionTile(
+    title: title,
+    subtitle: subtitle,
+    icon: icon,
+    badges: badges,
+    actionLabel: '编辑',
+    menuLabel: menuLabel,
+    onTap: onOpen,
+    onAction: onAction,
+    menuItems: menuItems,
+    slot: slot,
+    asCard: asCard,
+    details: details,
+    trailing: trailing,
+    extraBadges: extraBadges,
   );
 }
 
@@ -316,13 +362,18 @@ class _ConnectionTile extends StatefulWidget {
     this.favorite = false,
     this.showMenuButton = true,
     this.menuController,
+    this.details,
+    this.trailing,
+    this.extraBadges = const [],
   });
   final String title, subtitle, actionLabel, menuLabel;
   final List<String> badges;
   final IconData icon;
   final bool favorite, asCard, showMenuButton;
   final HarborListSlot slot;
-  final VoidCallback onTap;
+  final VoidCallback? onTap;
+  final Widget? details, trailing;
+  final List<Widget> extraBadges;
   final ValueChanged<String> onAction;
   final List<PopupMenuEntry<String>> menuItems;
 
@@ -466,7 +517,7 @@ class _ConnectionTileState extends State<_ConnectionTile>
       overflow: TextOverflow.ellipsis,
       style: type.bodyMedium?.copyWith(color: colors.onSurfaceVariant),
     );
-    final badges = widget.badges.isEmpty
+    final badges = widget.badges.isEmpty && widget.extraBadges.isEmpty
         ? null
         : Padding(
             padding: const EdgeInsets.only(top: _tagTopPadding),
@@ -490,6 +541,7 @@ class _ConnectionTileState extends State<_ConnectionTile>
                       ),
                     ),
                   ),
+                ...widget.extraBadges,
               ],
             ),
           );
@@ -514,10 +566,18 @@ class _ConnectionTileState extends State<_ConnectionTile>
                 title,
                 const SizedBox(height: _cardTitleGap),
                 subtitle,
+                if (widget.details != null) ...[
+                  const SizedBox(height: _cardTitleGap),
+                  widget.details!,
+                ],
                 ?badges,
               ],
             ),
           ),
+          if (widget.trailing != null) ...[
+            const SizedBox(width: 4),
+            widget.trailing!,
+          ],
           if (widget.showMenuButton) menu,
         ],
       ),
@@ -535,8 +595,10 @@ class _ConnectionTileState extends State<_ConnectionTile>
     return CallbackShortcuts(
       bindings: bindings,
       child: Semantics(
-        button: true,
-        hint: '${widget.actionLabel} ${widget.title}',
+        button: widget.onTap != null,
+        hint: widget.onTap == null
+            ? null
+            : '${widget.actionLabel} ${widget.title}',
         child: AnimatedBuilder(
           animation: _scale,
           child: Material(

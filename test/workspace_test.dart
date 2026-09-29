@@ -199,6 +199,10 @@ void main() {
     await tester.tap(find.text('左右分屏'));
     await tester.pumpAndSettle();
     expect(find.byType(TerminalView), findsNWidgets(2));
+    await tester.ensureVisible(
+      find.byKey(const ValueKey('session-menu-split-third')),
+    );
+    await tester.pumpAndSettle();
     await tester.tap(find.byKey(const ValueKey('session-menu-split-third')));
     await tester.pumpAndSettle();
     Finder terminal(SshConnection session) => find.byWidgetPredicate(

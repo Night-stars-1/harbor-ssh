@@ -56,7 +56,7 @@ class _SSHDynamicForwardImpl implements SSHDynamicForward {
   bool get isClosed => _closed;
 
   void _handleClient(Socket client) {
-    if (_closed) {
+    if (_closed || _connections.length >= options.maxConnections) {
       client.destroy();
       return;
     }
@@ -113,7 +113,7 @@ class _SocksConnection {
 
   SSHForwardChannel? _remote;
   StreamSubscription<List<int>>? _clientSub;
-  StreamSubscription<Uint8List>? _remoteSub;
+  StreamController<List<int>>? _outbound;
   Timer? _handshakeTimer;
   bool _closed = false;
   bool _dialing = false;
@@ -135,17 +135,7 @@ class _SocksConnection {
 
   void _handleClientEOF() {
     if (_state == _SocksState.streaming) {
-      _remote?.sink.close();
-      _clientSub?.cancel();
-    } else {
-      close();
-    }
-  }
-
-  void _handleRemoteEOF() {
-    if (_state == _SocksState.streaming) {
-      _client.destroy();
-      _remoteSub?.cancel();
+      unawaited(_outbound?.close());
     } else {
       close();
     }
@@ -156,7 +146,7 @@ class _SocksConnection {
     _closed = true;
 
     await _clientSub?.cancel();
-    await _remoteSub?.cancel();
+    unawaited(_outbound?.close());
     _handshakeTimer?.cancel();
 
     _remote?.destroy();
@@ -169,7 +159,7 @@ class _SocksConnection {
     if (_closed) return;
 
     if (_state == _SocksState.streaming) {
-      _remote?.sink.add(chunk);
+      _outbound?.add(chunk);
       return;
     }
 
@@ -211,10 +201,15 @@ class _SocksConnection {
       _handshakeTimer?.cancel();
       _handshakeTimer = null;
 
+      _clientSub?.pause();
       try {
-        _remote = await dial(target.host, target.port).timeout(
-          options.connectTimeout,
-        );
+        final opening = dial(target.host, target.port);
+        try {
+          _remote = await opening.timeout(options.connectTimeout);
+        } on TimeoutException {
+          unawaited(opening.then((late) => late.destroy()).catchError((Object _) {}));
+          rethrow;
+        }
       } catch (_) {
         _sendReply(_SocksReply.hostUnreachable);
         _dialing = false;
@@ -230,20 +225,37 @@ class _SocksConnection {
         return;
       }
 
-      _remoteSub = _remote!.stream.listen(
-        _client.add,
-        onDone: _handleRemoteEOF,
-        onError: (_, __) => close(),
-        cancelOnError: true,
-      );
-
       _sendReply(_SocksReply.succeeded);
       _state = _SocksState.streaming;
-
+      _outbound = StreamController<List<int>>(
+        onPause: () => _clientSub?.pause(),
+        onResume: () => _clientSub?.resume(),
+      );
       final pending = _buffer.takeAll();
       if (pending.isNotEmpty) {
-        _remote!.sink.add(pending);
+        _outbound!.add(pending);
       }
+      unawaited(_pipe());
+      _clientSub?.resume();
+    }
+  }
+
+  Future<void> _pipe() async {
+    try {
+      await Future.wait<void>([
+        () async {
+          await _remote!.sink.addStream(_outbound!.stream);
+          await _remote!.sink.close();
+        }(),
+        () async {
+          await _client.addStream(_remote!.stream);
+          await _client.close();
+        }(),
+      ], eagerError: true);
+    } catch (_) {
+      // Either side can disappear while the other is still writing.
+    } finally {
+      await close();
     }
   }
 

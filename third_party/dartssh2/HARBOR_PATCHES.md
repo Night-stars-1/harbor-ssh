@@ -39,3 +39,22 @@ small-window deadlock protections are unchanged.
 `test/ssh_channel_window_test.dart` preserves upstream protocol checks and
 tests early replenishment, bounded grant frequency, pause/resume, late
 subscription, small windows and invalid remote packets.
+
+## Port-forward lifecycle (2026-09-29)
+
+`lib/src/ssh_client.dart` retains the remote-forward registration until the
+server acknowledges cancellation. A rejected cancellation can therefore be
+retried without losing the active listener's incoming channels. Successful
+cancellation also closes its incoming connection stream.
+
+`lib/src/forward/dynamic_forward_io.dart` destroys a channel returned after a
+SOCKS dial timeout, caps accepted connections before negotiation, and pipes
+both directions with backpressure. TCP EOF closes only the opposite write
+side; buffered responses are flushed before full cleanup. Finished clients
+are removed from the connection set so repeated use does not exhaust it.
+
+`test/port_forward_integration_test.dart` covers local, remote and SOCKS
+forwarding through a temporary loopback Paramiko server, including a 3 MiB
+response after client EOF, port reuse, cancellation rejection/retry and SSH
+disconnect. `test/socks_forward_lifecycle_test.dart` covers late dial completion
+and the connection cap. No real host credentials are used.

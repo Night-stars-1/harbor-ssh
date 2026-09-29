@@ -163,6 +163,9 @@ class WorkspaceModel extends ChangeNotifier {
   bool favoritesOnly = false;
   bool showingUsers = false;
   bool showingFiles = false;
+  bool showingPortForwards = false;
+  String? portForwardSessionId;
+  int portForwardRequest = 0;
   bool showingSettings = false;
   late final fileWorkspace = FileWorkspaceModel();
   static const _localPathKey = 'harbor.files.default-local-path.v1';
@@ -470,6 +473,7 @@ class WorkspaceModel extends ChangeNotifier {
   }) {
     showingSettings = false;
     showingFiles = false;
+    showingPortForwards = false;
     favoritesOnly = favorites;
     ungroupedOnly = ungrouped;
     selectedTag = ungrouped ? null : tag;
@@ -481,6 +485,7 @@ class WorkspaceModel extends ChangeNotifier {
   void selectSession(String? id) {
     showingSettings = false;
     showingFiles = false;
+    showingPortForwards = false;
     activeSessionId = id;
     _notify();
   }
@@ -493,6 +498,7 @@ class WorkspaceModel extends ChangeNotifier {
   }) {
     showingSettings = false;
     showingFiles = false;
+    showingPortForwards = false;
     final session = SshConnection(
       id: '${DateTime.now().microsecondsSinceEpoch}-${_sequence++}',
       host: host,
@@ -529,6 +535,18 @@ class WorkspaceModel extends ChangeNotifier {
   void showFiles() {
     showingSettings = false;
     showingFiles = true;
+    showingPortForwards = false;
+    _notify();
+  }
+
+  void showPortForwards({String? sessionId}) {
+    showingSettings = false;
+    showingFiles = false;
+    showingPortForwards = true;
+    if (sessionId != null) {
+      portForwardSessionId = sessionId;
+      portForwardRequest++;
+    }
     _notify();
   }
 

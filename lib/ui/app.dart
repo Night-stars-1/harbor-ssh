@@ -10,6 +10,7 @@ import '../domain/appearance.dart';
 import 'ai_window_bridge.dart';
 import 'host_editor.dart';
 import 'host_identity_dialog.dart';
+import 'port_forward_workspace.dart';
 import 'expressive_widgets.dart';
 import 'public_key_target_dialog.dart';
 import 'reorderable_host_collection.dart';
@@ -135,6 +136,7 @@ class _WorkspaceState extends State<Workspace> {
   bool _sidebarCollapsed = false;
   bool _hideAddresses = false;
   bool _settingsOpened = false;
+  bool _portForwardsOpened = false;
   bool _sessionsOpen = false;
   final _settingsNavigation = SettingsNavigation();
   double _sidebarWidth = 264;
@@ -147,6 +149,7 @@ class _WorkspaceState extends State<Workspace> {
       model.activeSessionId == null &&
       !model.showingSettings &&
       !model.showingFiles &&
+      !model.showingPortForwards &&
       !model.showingUsers;
 
   /// 真实标签恰好同名时，仅在显示上加以区分。
@@ -280,6 +283,22 @@ class _WorkspaceState extends State<Workspace> {
       confirmKeyChange: (type, fingerprint, previousKey) =>
           _trustHost(host, type, fingerprint, previousKey: previousKey),
     );
+  }
+
+  void _openPortForwards(SshConnection session) {
+    if (_sessionsOpen) Navigator.of(context).pop();
+    model.showPortForwards(sessionId: session.id);
+  }
+
+  Future<SshConnection?> _connectPortForwardHost(Host host) async {
+    final previous = model.sessions.map((s) => s.id).toSet();
+    await _connect(host);
+    if (!mounted) return null;
+    final session = model.sessions
+        .where((s) => s.host.id == host.id && !previous.contains(s.id))
+        .lastOrNull;
+    model.showPortForwards(sessionId: session?.id);
+    return session;
   }
 
   void _openSessionFiles(SshConnection session) {
@@ -690,13 +709,18 @@ class _WorkspaceState extends State<Workspace> {
         final sidebarWidth = _sidebarWidth.clamp(220.0, maxSidebarWidth);
         final colors = Theme.of(context).colorScheme;
         if (model.showingSettings) _settingsOpened = true;
-        final terminalSession = model.showingFiles || model.showingSettings
+        if (model.showingPortForwards) _portForwardsOpened = true;
+        final terminalSession =
+            model.showingFiles ||
+                model.showingSettings ||
+                model.showingPortForwards
             ? null
             : model.activeSession;
         final canAdd = !model.loading && model.loadError == null;
         final nestedPage =
             model.showingSettings ||
             model.showingFiles ||
+            model.showingPortForwards ||
             model.showingUsers ||
             terminalSession != null;
         return PopScope(
@@ -764,6 +788,8 @@ class _WorkspaceState extends State<Workspace> {
                                   terminalSession?.host.name ??
                                       (model.showingSettings
                                           ? _settingsNavigation.title
+                                          : model.showingPortForwards
+                                          ? '端口转发'
                                           : model.showingFiles
                                           ? 'SFTP'
                                           : model.showingUsers
@@ -811,10 +837,12 @@ class _WorkspaceState extends State<Workspace> {
                           session: model.activeSession!,
                           controller: _terminalController,
                           canClose: true,
+                          canForward: true,
                         ),
                       if (terminalSession == null &&
                           !model.showingSettings &&
-                          !model.showingFiles)
+                          !model.showingFiles &&
+                          !model.showingPortForwards)
                         IconButton(
                           tooltip: model.favoritesOnly ? '显示全部连接' : '收藏',
                           isSelected: model.favoritesOnly,
@@ -831,6 +859,7 @@ class _WorkspaceState extends State<Workspace> {
                     terminalSession == null &&
                     !model.showingSettings &&
                     !model.showingFiles &&
+                    !model.showingPortForwards &&
                     canAdd
                 ? FloatingActionButton(
                     onPressed: _add,
@@ -843,12 +872,16 @@ class _WorkspaceState extends State<Workspace> {
             bottomNavigationBar:
                 !wide && terminalSession == null && !model.showingSettings
                 ? NavigationBar(
-                    selectedIndex: model.showingFiles
+                    selectedIndex: model.showingPortForwards
+                        ? 3
+                        : model.showingFiles
                         ? 2
                         : model.showingUsers
                         ? 1
                         : 0,
-                    onDestinationSelected: (index) => index == 2
+                    onDestinationSelected: (index) => index == 3
+                        ? model.showPortForwards()
+                        : index == 2
                         ? model.showFiles()
                         : model.filter(users: index == 1),
                     destinations: const [
@@ -866,6 +899,12 @@ class _WorkspaceState extends State<Workspace> {
                         icon: Icon(Icons.folder_copy_outlined),
                         selectedIcon: Icon(Icons.folder_copy_rounded),
                         label: 'SFTP',
+                      ),
+                      NavigationDestination(
+                        key: ValueKey('mobile-port-forwards'),
+                        icon: Icon(Icons.alt_route_outlined),
+                        selectedIcon: Icon(Icons.alt_route_rounded),
+                        label: '端口转发',
                       ),
                     ],
                   )
@@ -903,6 +942,8 @@ class _WorkspaceState extends State<Workspace> {
                               child: IndexedStack(
                                 index: model.showingSettings
                                     ? 2
+                                    : model.showingPortForwards
+                                    ? 3
                                     : model.showingFiles
                                     ? 1
                                     : 0,
@@ -910,7 +951,8 @@ class _WorkspaceState extends State<Workspace> {
                                   ExcludeFocus(
                                     excluding:
                                         model.showingSettings ||
-                                        model.showingFiles,
+                                        model.showingFiles ||
+                                        model.showingPortForwards,
                                     child: IndexedStack(
                                       index: model.activeSession == null
                                           ? 0
@@ -961,6 +1003,7 @@ class _WorkspaceState extends State<Workspace> {
                                             visible:
                                                 !model.showingSettings &&
                                                 !model.showingFiles &&
+                                                !model.showingPortForwards &&
                                                 model.activeSession != null,
                                             mobileController:
                                                 _terminalController,
@@ -968,6 +1011,7 @@ class _WorkspaceState extends State<Workspace> {
                                             onConnect: _connect,
                                             onClose: _closeSession,
                                             onFiles: _openSessionFiles,
+                                            onPortForward: _openPortForwards,
                                           ),
                                         ),
                                       ],
@@ -996,6 +1040,25 @@ class _WorkspaceState extends State<Workspace> {
                                             model: model,
                                             desktop: wide,
                                             navigation: _settingsNavigation,
+                                          )
+                                        : const SizedBox.shrink(),
+                                  ),
+                                  ExcludeFocus(
+                                    excluding:
+                                        !model.showingPortForwards ||
+                                        model.showingSettings,
+                                    child: _portForwardsOpened && !model.loading
+                                        ? PortForwardWorkspace(
+                                            hosts: model.hosts,
+                                            sessions: model.sessions,
+                                            preferences:
+                                                model.repository.preferences,
+                                            requestedSessionId:
+                                                model.portForwardSessionId,
+                                            request: model.portForwardRequest,
+                                            onConnect: _connectPortForwardHost,
+                                            onHosts: () => model.filter(),
+                                            showTitle: wide,
                                           )
                                         : const SizedBox.shrink(),
                                   ),
@@ -1140,6 +1203,7 @@ class _WorkspaceState extends State<Workspace> {
                     model.activeSessionId == null &&
                         !model.showingSettings &&
                         !model.showingFiles &&
+                        !model.showingPortForwards &&
                         !model.showingUsers &&
                         !model.favoritesOnly &&
                         !model.ungroupedOnly &&
@@ -1154,6 +1218,7 @@ class _WorkspaceState extends State<Workspace> {
                     model.activeSessionId == null &&
                         !model.showingSettings &&
                         !model.showingFiles &&
+                        !model.showingPortForwards &&
                         !model.showingUsers &&
                         model.favoritesOnly,
                     () => model.filter(favorites: true),
@@ -1166,7 +1231,8 @@ class _WorkspaceState extends State<Workspace> {
                     model.activeSessionId == null &&
                         model.showingUsers &&
                         !model.showingSettings &&
-                        !model.showingFiles,
+                        !model.showingFiles &&
+                        !model.showingPortForwards,
                     () => model.filter(users: true),
                     bottomSpacing: 0,
                   ),
@@ -1176,6 +1242,14 @@ class _WorkspaceState extends State<Workspace> {
                     '',
                     model.showingFiles && !model.showingSettings,
                     model.showFiles,
+                  ),
+                  _navItem(
+                    Icons.alt_route_rounded,
+                    '端口转发',
+                    '',
+                    model.showingPortForwards && !model.showingSettings,
+                    () => model.showPortForwards(),
+                    key: const ValueKey('sidebar-port-forwards'),
                   ),
                   _sectionLabel('标签'),
                   _navItem(
@@ -1204,6 +1278,7 @@ class _WorkspaceState extends State<Workspace> {
                       model.selectedTag == tag &&
                           !model.showingSettings &&
                           !model.showingFiles &&
+                          !model.showingPortForwards &&
                           model.activeSessionId == null &&
                           !model.showingUsers,
                       () => model.filter(tag: tag),
@@ -1278,7 +1353,8 @@ class _WorkspaceState extends State<Workspace> {
     final selected =
         model.activeSessionId == session.id &&
         !model.showingSettings &&
-        !model.showingFiles;
+        !model.showingFiles &&
+        !model.showingPortForwards;
     final select = onSelected ?? () => model.selectSession(session.id);
     return MenuAnchor(
       key: ValueKey('session-menu-${session.id}'),
@@ -1291,6 +1367,11 @@ class _WorkspaceState extends State<Workspace> {
         padding: const WidgetStatePropertyAll(EdgeInsets.all(8)),
       ),
       menuChildren: [
+        MenuItemButton(
+          onPressed: () => _openPortForwards(session),
+          leadingIcon: const Icon(Icons.alt_route_rounded, size: 20),
+          child: const Text('端口转发'),
+        ),
         MenuItemButton(
           onPressed:
               session.status == ConnectionStatus.connected ||

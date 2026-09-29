@@ -17,6 +17,8 @@ import 'ssh_ai_executor.dart';
 import 'remote_commands.dart';
 import 'remote_metrics.dart';
 import 'sftp_files.dart';
+import 'port_forward_manager.dart';
+import 'ssh_port_forward.dart';
 import '../domain/remote_file.dart';
 
 enum ConnectionStatus { connecting, connected, closed, failed }
@@ -24,6 +26,18 @@ enum ConnectionStatus { connecting, connected, closed, failed }
 class SshConnection extends ChangeNotifier {
   SshConnection({required this.id, required this.host});
   final String id;
+  late final PortForwardManager portForwards = PortForwardManager((rule) {
+    final client = _client;
+    if (client == null || _closed || status != ConnectionStatus.connected) {
+      throw StateError('SSH 会话已断开，请重新连接');
+    }
+    return startSshPortForward(
+      client,
+      rule,
+      onConnectionError: (error) =>
+          portForwards.reportConnectionError(rule.id, error),
+    );
+  });
   AiCommandExecutor createAiExecutor() => SshAiExecutor((command) async {
     final client = _client;
     if (client == null || status != ConnectionStatus.connected || _closed) {
@@ -126,6 +140,7 @@ class SshConnection extends ChangeNotifier {
       unawaited(
         client.done.then(
           (_) {
+            unawaited(portForwards.close());
             if (_shell == null) _remoteClosed();
           },
           onError: (Object e) {
@@ -478,6 +493,7 @@ class SshConnection extends ChangeNotifier {
 
   void _release() {
     _closed = true;
+    unawaited(portForwards.close());
     final sftp = _sftp;
     _sftp = null;
     if (sftp != null) {
@@ -509,6 +525,7 @@ class SshConnection extends ChangeNotifier {
     _commandHistory?.dispose();
     _release();
     inputGeneration.dispose();
+    portForwards.dispose();
     super.dispose();
   }
 }

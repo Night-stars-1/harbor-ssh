@@ -29,6 +29,7 @@ class TerminalPane extends StatefulWidget {
     this.controller,
     this.showHeader = true,
     this.onFiles,
+    this.onPortForward,
     this.headerTitle,
     this.headerActions = const [],
     this.autofocus = true,
@@ -50,6 +51,7 @@ class TerminalPane extends StatefulWidget {
   final TerminalPaneController? controller;
   final bool showHeader;
   final VoidCallback? onFiles;
+  final VoidCallback? onPortForward;
   final Widget? headerTitle;
   final List<Widget> headerActions;
   final bool autofocus;
@@ -510,6 +512,7 @@ class _TerminalPaneState extends State<TerminalPane> {
     }
     if (value == 'copy') _copy();
     if (value == 'ai') _openAi();
+    if (value == 'forward') widget.onPortForward?.call();
     if (value == 'paste') _paste();
     if (value == 'disconnect') widget.session.close();
     if (value == 'close') widget.onClose?.call();
@@ -702,6 +705,7 @@ class _TerminalPaneState extends State<TerminalPane> {
                     onSelected: _selectOption,
                     hasSelection: () => _controller.selection != null,
                     canClose: widget.onClose != null,
+                    canForward: widget.onPortForward != null,
                   ),
                 ],
               ),
@@ -964,12 +968,14 @@ class TerminalOptionsButton extends StatelessWidget {
     this.onSelected,
     this.hasSelection,
     this.canClose = false,
+    this.canForward = false,
   });
   final SshConnection session;
   final TerminalPaneController? controller;
   final ValueChanged<String>? onSelected;
   final bool Function()? hasSelection;
   final bool canClose;
+  final bool canForward;
 
   @override
   Widget build(BuildContext context) => PopupMenuButton<String>(
@@ -990,6 +996,8 @@ class TerminalOptionsButton extends StatelessWidget {
       ],
       const PopupMenuItem(value: 'larger', child: Text('增大字体')),
       const PopupMenuItem(value: 'smaller', child: Text('缩小字体')),
+      if (canForward)
+        const PopupMenuItem(value: 'forward', child: Text('端口转发')),
       if (canClose) const PopupMenuItem(value: 'close', child: Text('关闭会话')),
       if (session.status == ConnectionStatus.connected)
         const PopupMenuItem(value: 'disconnect', child: Text('断开连接')),

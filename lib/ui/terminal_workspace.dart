@@ -24,6 +24,7 @@ class TerminalWorkspace extends StatefulWidget {
     required this.onConnect,
     required this.onClose,
     required this.onFiles,
+    this.onPortForward,
     this.aiSettings,
     this.onAiSettings,
     this.aiHistoryStore,
@@ -41,6 +42,7 @@ class TerminalWorkspace extends StatefulWidget {
   final ValueChanged<String> onSelect;
   final Future<void> Function(Host) onConnect;
   final ValueChanged<SshConnection> onClose, onFiles;
+  final ValueChanged<SshConnection>? onPortForward;
   final AiSettings Function()? aiSettings;
   final VoidCallback? onAiSettings;
   final AiConversationStore? aiHistoryStore;
@@ -400,6 +402,9 @@ class _TerminalWorkspaceState extends State<TerminalWorkspace> {
                   },
                   onClose: () => widget.onClose(session),
                   onFiles: () => widget.onFiles(session),
+                  onPortForward: widget.onPortForward == null
+                      ? null
+                      : () => widget.onPortForward!(session),
                 ),
         ),
       ),

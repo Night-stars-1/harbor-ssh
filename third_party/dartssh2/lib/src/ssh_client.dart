@@ -482,7 +482,7 @@ class SSHClient {
   Future<bool> cancelForwardRemote(SSHRemoteForward forward) async {
     await _authenticated.future;
 
-    if (!_remoteForwards.remove(forward)) return false;
+    if (!_remoteForwards.contains(forward)) return false;
 
     final reply = await _sendGlobalRequest(
       SSH_Message_Global_Request.cancelTcpipForward(
@@ -495,6 +495,8 @@ class SSHClient {
       return false;
     }
 
+    _remoteForwards.remove(forward);
+    unawaited(forward._connections.close());
     return true;
   }
 
