@@ -5,6 +5,27 @@
 #include "flutter_window.h"
 #include "utils.h"
 
+namespace {
+
+void RestoreMissingScanCode(MSG* msg) {
+  if (msg->message != WM_KEYDOWN && msg->message != WM_KEYUP &&
+      msg->message != WM_SYSKEYDOWN && msg->message != WM_SYSKEYUP) {
+    return;
+  }
+  if ((static_cast<UINT_PTR>(msg->lParam) & 0x00ff0000) != 0) {
+    return;
+  }
+
+  // Windows Clipboard History sends synthetic Ctrl+V messages without scan
+  // codes. Flutter uses the scan code to identify the physical key, so restore
+  // it before translating and dispatching the message to the Flutter view.
+  const UINT scan_code =
+      ::MapVirtualKeyW(static_cast<UINT>(msg->wParam), MAPVK_VK_TO_VSC) & 0xff;
+  msg->lParam |= static_cast<LPARAM>(scan_code << 16);
+}
+
+}  // namespace
+
 int APIENTRY wWinMain(_In_ HINSTANCE instance, _In_opt_ HINSTANCE prev,
                       _In_ wchar_t *command_line, _In_ int show_command) {
   // All installations share the same credential store. Never start a second
@@ -57,6 +78,7 @@ int APIENTRY wWinMain(_In_ HINSTANCE instance, _In_opt_ HINSTANCE prev,
 
   ::MSG msg;
   while (::GetMessage(&msg, nullptr, 0, 0)) {
+    RestoreMissingScanCode(&msg);
     ::TranslateMessage(&msg);
     ::DispatchMessage(&msg);
   }
