@@ -23,6 +23,15 @@ propagation, service/account identity, and all stored values remain unchanged.
 Data-protection clients and iOS retain the upstream migration behavior.
 No entitlement, access-control list, signing identity, or data reset is added.
 
+## Enumerate file-based records without requesting all password data at once
+
+The native macOS smoke test reproduced OSStatus -50 (errSecParam) when the
+upstream readAll combines kSecMatchLimitAll with kSecReturnData. File-based
+readAll now enumerates item attributes and reads each exact account separately.
+Any read/authorization failure aborts enumeration, so the app cannot migrate
+an incomplete set of accessible credentials and treat it as a complete archive.
+The data-protection/iOS enumeration path is unchanged.
+
 ## Validation
 
 `tool/macos_keychain_smoke.swift` checks absent records, existing file-based

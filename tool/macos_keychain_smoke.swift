@@ -27,6 +27,10 @@ struct MacOSKeychainSmoke {
         }
         defer { _ = storage.deleteAll(params: params(nil)) }
 
+        let empty = storage.readAll(params: params(nil))
+        success(empty, "enumerate empty keychain service")
+        require((empty.value as? [String: String])?.isEmpty == true, "Empty service has items")
+
         // The regression: a missing bundle/journal must be null, not an
         // entitlement failure from a fallback to a different keychain.
         for key in ["harbor.secrets.bundle.v1", "harbor.sync.pending.v1"] {
@@ -48,12 +52,18 @@ struct MacOSKeychainSmoke {
             kSecValueData: Data("legacy-test-secret".utf8),
         ]
         require(SecItemAdd(legacy as CFDictionary, nil) == errSecSuccess, "Seed legacy item")
+        var secondLegacy = legacy
+        secondLegacy[kSecAttrAccount] = "harbor.credentials.second"
+        secondLegacy[kSecValueData] = Data("second-test-secret".utf8)
+        require(SecItemAdd(secondLegacy as CFDictionary, nil) == errSecSuccess, "Seed second legacy item")
         let restored = storage.read(params: params(legacyKey))
         success(restored, "read legacy item")
         require(restored.value as? String == "legacy-test-secret", "Legacy value changed")
         let all = storage.readAll(params: params(nil))
         success(all, "enumerate legacy items")
         require((all.value as? [String: String])?[legacyKey] == "legacy-test-secret", "Legacy item omitted")
+        require((all.value as? [String: String])?["harbor.credentials.second"] == "second-test-secret", "Second legacy item omitted")
+        require((all.value as? [String: String])?.count == 2, "Unexpected enumeration result")
 
         let bundle = params("harbor.secrets.bundle.v1")
         success(storage.write(params: bundle, value: "test-bundle"), "create bundle")
