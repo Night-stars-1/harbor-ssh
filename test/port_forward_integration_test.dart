@@ -114,9 +114,10 @@ void main() {
           addTearDown(socket.destroy);
           final payload = List<int>.generate(3 * 1024 * 1024, (i) => i % 251);
           final received = socket.fold<List<int>>([], (a, b) => a..addAll(b));
-          if (type == PortForwardType.dynamic) {
-            // A pipelined SOCKS greeting, CONNECT request and application data.
-            socket.add([
+          // Send one coalesced write: Linux can deliver a first socket event
+          // larger than 32 KiB, including valid SOCKS headers and payload.
+          socket.add([
+            if (type == PortForwardType.dynamic) ...[
               5,
               1,
               0,
@@ -130,11 +131,19 @@ void main() {
               1,
               server.port >> 8,
               server.port & 255,
-            ]);
-          }
-          socket.add(payload);
+            ],
+            ...payload,
+          ]);
           await socket.close();
           final response = await received.timeout(const Duration(seconds: 20));
+          if (type == PortForwardType.dynamic) {
+            expect(
+              response.length,
+              greaterThanOrEqualTo(12),
+              reason:
+                  'SOCKS greeting and CONNECT replies must arrive before EOF',
+            );
+          }
           expect(
             type == PortForwardType.dynamic ? response.sublist(12) : response,
             payload,

@@ -53,6 +53,12 @@ both directions with backpressure. TCP EOF closes only the opposite write
 side; buffered responses are flushed before full cleanup. Finished clients
 are removed from the connection set so repeated use does not exhaust it.
 
+The SOCKS parser accepts a socket event containing both headers and a large
+application payload. Protocol length fields bound incomplete headers, and
+reading pauses during dial; coalesced payload is no longer incorrectly
+rejected by a 32 KiB handshake-buffer limit. The loopback test writes the
+SOCKS greeting, CONNECT request and 3 MiB payload together to cover this.
+
 `test/port_forward_integration_test.dart` covers local, remote and SOCKS
 forwarding through a temporary loopback Paramiko server, including a 3 MiB
 response after client EOF, port reuse, cancellation rejection/retry and SSH

@@ -362,18 +362,16 @@ class _SocksConnection {
 }
 
 class _ByteBuffer {
-  static const kMaxHandshakeSize = 32768;
-
   final _data = <int>[];
   int _offset = 0;
 
   int get length => _data.length - _offset;
 
   void add(List<int> chunk) {
-    if (length + chunk.length > kMaxHandshakeSize) {
-      throw StateError(
-          'Handshake buffer overflow: $length + ${chunk.length} > $kMaxHandshakeSize');
-    }
+    // A socket event may contain both the handshake and application data.
+    // SOCKS length fields bound an incomplete greeting/request to 257/262
+    // bytes; parsing pauses the socket as soon as the CONNECT request is
+    // complete. The rest of this event is payload, not an oversized handshake.
     _data.addAll(chunk);
   }
 
