@@ -110,7 +110,9 @@ void main() {
           greaterThanOrEqualTo(tester.getBottomLeft(list).dy),
         );
       }
+      await tester.sendKeyDownEvent(LogicalKeyboardKey.altLeft);
       await tester.sendKeyEvent(LogicalKeyboardKey.arrowDown);
+      await tester.sendKeyUpEvent(LogicalKeyboardKey.altLeft);
       await tester.pumpAndSettle();
       expect(
         find.descendant(of: details, matching: find.text('create')),
@@ -219,16 +221,22 @@ void main() {
     }
     completion.select(0);
     await tester.pump();
+    await tester.sendKeyDownEvent(LogicalKeyboardKey.altLeft);
     await tester.sendKeyEvent(LogicalKeyboardKey.arrowUp);
+    await tester.sendKeyUpEvent(LogicalKeyboardKey.altLeft);
     await tester.pumpAndSettle();
     expect(completion.selected, completion.entries.length - 1);
     expect(controller.offset, controller.position.maxScrollExtent);
+    await tester.sendKeyDownEvent(LogicalKeyboardKey.altLeft);
     await tester.sendKeyEvent(LogicalKeyboardKey.arrowDown);
+    await tester.sendKeyUpEvent(LogicalKeyboardKey.altLeft);
     await tester.pumpAndSettle();
     expect(completion.selected, 0);
     expect(controller.offset, 0);
     for (var i = 0; i < 5; i++) {
+      await tester.sendKeyDownEvent(LogicalKeyboardKey.altLeft);
       await tester.sendKeyEvent(LogicalKeyboardKey.arrowDown);
+      await tester.sendKeyUpEvent(LogicalKeyboardKey.altLeft);
       await tester.pumpAndSettle();
     }
     expect(completion.selected, 5);

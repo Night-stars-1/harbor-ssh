@@ -286,7 +286,24 @@ class TerminalCompletion extends ChangeNotifier {
   KeyEventResult handleKey(KeyEvent event) {
     if (event is KeyUpEvent || entries.isEmpty) return KeyEventResult.ignored;
     final keys = HardwareKeyboard.instance;
-    if (keys.isControlPressed || keys.isAltPressed || keys.isMetaPressed) {
+    final altOnly =
+        keys.isAltPressed &&
+        !keys.isControlPressed &&
+        !keys.isMetaPressed &&
+        !keys.isShiftPressed;
+    // Keep the popup while Alt/Option is pressed so its arrow shortcut can
+    // select candidates without taking ordinary shell history keys away.
+    if (altOnly &&
+        (event.logicalKey == LogicalKeyboardKey.altLeft ||
+            event.logicalKey == LogicalKeyboardKey.altRight)) {
+      return KeyEventResult.ignored;
+    }
+    final arrow =
+        event.logicalKey == LogicalKeyboardKey.arrowDown ||
+        event.logicalKey == LogicalKeyboardKey.arrowUp;
+    final selectCandidate = altOnly && arrow;
+    if ((keys.isControlPressed || keys.isAltPressed || keys.isMetaPressed) &&
+        !selectCandidate) {
       dismiss();
       return KeyEventResult.ignored;
     }
@@ -301,8 +318,11 @@ class TerminalCompletion extends ChangeNotifier {
     if (event.logicalKey == LogicalKeyboardKey.tab && !keys.isShiftPressed) {
       return accept() ? KeyEventResult.handled : KeyEventResult.ignored;
     }
-    if (event.logicalKey == LogicalKeyboardKey.arrowDown ||
-        event.logicalKey == LogicalKeyboardKey.arrowUp) {
+    if (arrow) {
+      if (!selectCandidate) {
+        dismiss();
+        return KeyEventResult.ignored;
+      }
       _selectionMoved = true;
       selectionFromKeyboard = true;
       keyboardSelectionRevision++;
@@ -596,7 +616,9 @@ class _TerminalCompletionListState extends State<TerminalCompletionList> {
                     children: [
                       Expanded(
                         child: Text(
-                          'Tab 补全 · Esc 收起',
+                          Theme.of(context).platform == TargetPlatform.macOS
+                              ? '⌥↑↓ 选择 · Tab 补全 · Esc 收起'
+                              : 'Alt↑↓ 选择 · Tab 补全 · Esc 收起',
                           maxLines: 1,
                           overflow: TextOverflow.ellipsis,
                           style: Theme.of(context).textTheme.labelSmall

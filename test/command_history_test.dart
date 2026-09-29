@@ -110,7 +110,9 @@ void main() {
       await tester.pumpAndSettle(const Duration(milliseconds: 200));
       expect(find.text('git status'), findsOneWidget);
       expect(session.status, ConnectionStatus.connected);
+      await tester.sendKeyDownEvent(LogicalKeyboardKey.altLeft);
       await tester.sendKeyEvent(LogicalKeyboardKey.arrowDown);
+      await tester.sendKeyUpEvent(LogicalKeyboardKey.altLeft);
       await tester.sendKeyEvent(LogicalKeyboardKey.tab);
       await tester.pumpAndSettle(const Duration(milliseconds: 200));
       expect(output, [' log']);

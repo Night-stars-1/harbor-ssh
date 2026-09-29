@@ -102,7 +102,9 @@ void main() {
       expect(find.text('readme.txt'), findsNothing);
       expect(find.text('.ssh/'), findsNothing);
       expect(session.directories, ['~']);
+      await tester.sendKeyDownEvent(LogicalKeyboardKey.altLeft);
       await tester.sendKeyEvent(LogicalKeyboardKey.arrowDown);
+      await tester.sendKeyUpEvent(LogicalKeyboardKey.altLeft);
       await tester.sendKeyEvent(LogicalKeyboardKey.tab);
       await tester.pumpAndSettle(const Duration(milliseconds: 200));
       expect(output, [r'my\ dir/']);
