@@ -56,6 +56,26 @@ jobs:
           channel: stable
           cache: true
       - run: flutter pub get
+      - name: Verify macOS legacy Keychain compatibility
+        if: matrix.target == 'macos'
+        shell: bash
+        run: |
+          set -euo pipefail
+          keychain="$RUNNER_TEMP/harbor-keychain-smoke.keychain-db"
+          original_keychain="$(security default-keychain -d user | sed 's/^ *"//;s/"$//')"
+          password="$(uuidgen)"
+          security create-keychain -p "$password" "$keychain"
+          cleanup() {
+            security default-keychain -d user -s "$original_keychain" || true
+            security delete-keychain "$keychain" || true
+          }
+          trap cleanup EXIT
+          security unlock-keychain -p "$password" "$keychain"
+          security default-keychain -d user -s "$keychain"
+          xcrun swiftc \
+            third_party/flutter_secure_storage_darwin/darwin/flutter_secure_storage_darwin/Sources/flutter_secure_storage_darwin/FlutterSecureStorage.swift \
+            tool/macos_keychain_smoke.swift -o "$RUNNER_TEMP/harbor-keychain-smoke"
+          "$RUNNER_TEMP/harbor-keychain-smoke"
       - name: Prepare Android release signing
         if: matrix.target == 'apk'
         shell: bash

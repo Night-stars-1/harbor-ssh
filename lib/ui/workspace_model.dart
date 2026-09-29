@@ -11,6 +11,7 @@ import '../data/terminal_ai.dart';
 import '../data/local_files.dart';
 import '../data/local_path_access.dart';
 import '../data/ssh_connection.dart';
+import '../data/startup_failure.dart';
 import '../data/sync_storage.dart';
 import '../data/webdav_sync.dart';
 import '../domain/sync_snapshot.dart';
@@ -231,13 +232,20 @@ class WorkspaceModel extends ChangeNotifier {
     await _loadAppearance();
     await _loadAiSettings();
     await _loadHostOrder();
+    var stage = StartupStage.localDirectory;
     try {
       await LocalFiles.prepareDefaultHome(
         directoryProvider: localDocumentsDirectory,
       );
+      stage = StartupStage.recovery;
       await SyncStorage(repository).recover();
-      _hosts = await repository.loadHosts();
-      _users = await repository.loadUsers();
+      stage = StartupStage.hosts;
+      final hosts = await repository.loadHosts();
+      stage = StartupStage.users;
+      final users = await repository.loadUsers();
+      _hosts = hosts;
+      _users = users;
+      stage = StartupStage.localDirectory;
       final savedLocalPath =
           await repository.preferences.read(_localPathKey) ?? '';
       final restoredLocalPath = await LocalFiles.restoreDefaultPath(
@@ -261,8 +269,8 @@ class WorkspaceModel extends ChangeNotifier {
         rethrow;
       }
       fileWorkspace.defaultLocalPath = restoredLocalPath;
-    } catch (_) {
-      loadError = '无法读取本地连接配置，请检查存储权限后重试。';
+    } catch (error) {
+      loadError = describeStartupFailure(stage, error);
     }
     loading = false;
     await cloudSync.initialize();

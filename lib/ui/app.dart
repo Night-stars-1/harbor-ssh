@@ -1396,7 +1396,7 @@ class _WorkspaceState extends State<Workspace> {
           child: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
-              Text(model.loadError!),
+              SelectableText(model.loadError!),
               const SizedBox(height: 16),
               FilledButton(
                 onPressed: model.initialize,
