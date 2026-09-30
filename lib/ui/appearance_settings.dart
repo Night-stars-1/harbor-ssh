@@ -180,7 +180,7 @@ class _AppearanceSettingsState extends State<AppearanceSettings> {
                   child: DropdownButton<int>(
                     key: const ValueKey('status-refresh-interval'),
                     value: appearance.statusRefreshSeconds,
-                    borderRadius: BorderRadius.circular(16),
+                    borderRadius: HarborShapes.tile,
                     onChanged: _saving
                         ? null
                         : (seconds) {

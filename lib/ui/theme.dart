@@ -335,7 +335,41 @@ ThemeData harborTheme({
     ),
     popupMenuTheme: PopupMenuThemeData(
       color: colors.surfaceContainerHigh,
+      surfaceTintColor: Colors.transparent,
+      elevation: 2,
       shape: HarborShapes.superellipse(HarborShapes.tile),
+      menuPadding: const EdgeInsets.all(8),
+    ),
+    menuTheme: MenuThemeData(
+      style: MenuStyle(
+        backgroundColor: WidgetStatePropertyAll(colors.surfaceContainerHigh),
+        surfaceTintColor: const WidgetStatePropertyAll(Colors.transparent),
+        shape: WidgetStatePropertyAll(
+          HarborShapes.superellipse(HarborShapes.tile),
+        ),
+        elevation: const WidgetStatePropertyAll(2),
+        padding: const WidgetStatePropertyAll(EdgeInsets.all(8)),
+      ),
+    ),
+    menuButtonTheme: MenuButtonThemeData(
+      style: ButtonStyle(
+        shape: WidgetStatePropertyAll(
+          HarborShapes.superellipse(const BorderRadius.all(HarborShapes.sm)),
+        ),
+        overlayColor: const WidgetStatePropertyAll(Colors.transparent),
+        backgroundColor: WidgetStateProperty.resolveWith((states) {
+          if (states.contains(WidgetState.disabled)) return null;
+          if (states.contains(WidgetState.hovered) ||
+              states.contains(WidgetState.focused) ||
+              states.contains(WidgetState.pressed)) {
+            return Color.alphaBlend(
+              colors.primary.withValues(alpha: .12),
+              colors.surfaceContainerHigh,
+            );
+          }
+          return null;
+        }),
+      ),
     ),
     snackBarTheme: SnackBarThemeData(
       behavior: SnackBarBehavior.floating,
@@ -349,6 +383,69 @@ ThemeData harborTheme({
     ),
     dividerTheme: DividerThemeData(color: colors.outlineVariant, space: 1),
   );
+}
+
+/// A popup item with the same inset, rounded hover and focus treatment as
+/// [MenuItemButton]. Keep popup and anchored menus visually consistent.
+class HarborPopupMenuItem<T> extends PopupMenuItem<T> {
+  const HarborPopupMenuItem({
+    super.key,
+    super.value,
+    required super.child,
+    super.enabled,
+    super.onTap,
+    super.padding,
+    super.height = 44,
+  });
+
+  @override
+  PopupMenuItemState<T, HarborPopupMenuItem<T>> createState() =>
+      _HarborPopupMenuItemState<T>();
+}
+
+class _HarborPopupMenuItemState<T>
+    extends PopupMenuItemState<T, HarborPopupMenuItem<T>> {
+  bool _hovered = false;
+  bool _focused = false;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final colors = theme.colorScheme;
+    final highlighted = widget.enabled && (_hovered || _focused);
+    return MouseRegion(
+      onEnter: (_) => setState(() => _hovered = true),
+      onExit: (_) => setState(() => _hovered = false),
+      child: Focus(
+        skipTraversal: true,
+        onFocusChange: (value) => setState(() => _focused = value),
+        child: Padding(
+          padding: const EdgeInsets.symmetric(vertical: 2),
+          child: Material(
+            color: highlighted
+                ? Color.alphaBlend(
+                    colors.primary.withValues(alpha: .12),
+                    colors.surfaceContainerHigh,
+                  )
+                : Colors.transparent,
+            shape: HarborShapes.superellipse(
+              const BorderRadius.all(HarborShapes.sm),
+            ),
+            clipBehavior: Clip.antiAlias,
+            child: Theme(
+              data: theme.copyWith(
+                hoverColor: Colors.transparent,
+                focusColor: Colors.transparent,
+              ),
+              child: Builder(
+                builder: (innerContext) => super.build(innerContext),
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
 }
 
 Duration expressiveDuration(BuildContext context, {bool emphasized = false}) =>

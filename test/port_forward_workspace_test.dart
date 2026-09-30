@@ -446,6 +446,7 @@ void main() {
     );
     await tester.tap(find.byTooltip('启动'));
     await tester.pumpAndSettle();
+    expect(find.byType(AlertDialog), findsNothing);
     expect(find.text('认证失败'), findsOneWidget);
     expect(session.portForwards.activeCount, 0);
     await tester.tap(find.byTooltip('启动'));

@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:url_launcher/url_launcher.dart';
 
 import '../domain/host.dart';
 import '../domain/port_forward.dart';
@@ -268,12 +269,29 @@ class PortForwardRuleCard extends StatelessWidget {
     this.saving = false,
     this.blocked = false,
     this.connecting = false,
+    this.openBrowser,
   });
   final PortForwardRule rule;
   final PortForwardState state;
   final bool connected, saving, blocked, connecting;
   final String? hostLabel;
+  final Future<bool> Function(Uri)? openBrowser;
   final ValueChanged<PortForwardRule> onEdit, onDelete, onStart, onStop;
+
+  Future<void> _openInBrowser(BuildContext context, Uri uri) async {
+    try {
+      final opened =
+          await (openBrowser?.call(uri) ??
+              launchUrl(uri, mode: LaunchMode.externalApplication));
+      if (opened) return;
+    } catch (_) {
+      // The same notice also covers a missing browser or launcher failure.
+    }
+    if (context.mounted) {
+      ScaffoldMessenger.of(context)
+          .showSnackBar(const SnackBar(content: Text('无法打开浏览器，请检查默认浏览器设置')));
+    }
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -282,6 +300,7 @@ class PortForwardRuleCard extends StatelessWidget {
     final layout = context
         .dependOnInheritedWidgetOfExactType<_ForwardItemLayout>();
     final active = state.status == PortForwardStatus.running;
+    final browserUri = active ? rule.browserUri(actualPort: state.port) : null;
     final failed = state.status == PortForwardStatus.failed;
     final editable = !saving && !connecting && !state.active && !blocked;
     final toggleLabel = connecting
@@ -338,6 +357,7 @@ class PortForwardRuleCard extends StatelessWidget {
         onToggle: onToggle,
         toggleLabel: toggleLabel,
         toggleIcon: toggleIcon,
+        browserUri: browserUri,
       );
     }
     return ExpressiveActionTile(
@@ -350,18 +370,29 @@ class PortForwardRuleCard extends StatelessWidget {
       onOpen: editable ? () => onEdit(rule) : null,
       menuLabel: '管理转发规则',
       onAction: (action) {
+        if (action == 'browser') {
+          if (browserUri case final uri?) _openInBrowser(context, uri);
+          return;
+        }
         if (!editable) return;
         if (action == 'edit') onEdit(rule);
         if (action == 'delete') onDelete(rule);
       },
       menuItems: [
-        PopupMenuItem(
+        if (rule.type == PortForwardType.local)
+          HarborPopupMenuItem(
+            key: ValueKey('browser-forward-${rule.id}'),
+            value: 'browser',
+            enabled: browserUri != null,
+            child: const Text('浏览器打开'),
+          ),
+        HarborPopupMenuItem(
           key: ValueKey('edit-forward-${rule.id}'),
           value: 'edit',
           enabled: editable,
           child: const Text('编辑规则'),
         ),
-        PopupMenuItem(
+        HarborPopupMenuItem(
           key: ValueKey('delete-forward-${rule.id}'),
           value: 'delete',
           enabled: editable,
@@ -369,7 +400,7 @@ class PortForwardRuleCard extends StatelessWidget {
         ),
       ],
       details: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
+        crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
           Tooltip(
             message: routeTip,
@@ -383,11 +414,10 @@ class PortForwardRuleCard extends StatelessWidget {
               ),
             ),
           ),
-          if (state.error != null)
-            Text(
-              state.error!,
-              style: theme.textTheme.bodySmall?.copyWith(color: colors.error),
-            ),
+          if (state.error case final error?) ...[
+            const SizedBox(height: 10),
+            _ForwardInlineAlert(message: error),
+          ],
         ],
       ),
       extraBadges: [statusBadge],
@@ -407,6 +437,7 @@ class PortForwardRuleCard extends StatelessWidget {
     required VoidCallback? onToggle,
     required String toggleLabel,
     required Widget toggleIcon,
+    required Uri? browserUri,
   }) {
     final theme = Theme.of(context);
     final colors = theme.colorScheme;
@@ -416,6 +447,15 @@ class PortForwardRuleCard extends StatelessWidget {
       runSpacing: 4,
       crossAxisAlignment: WrapCrossAlignment.center,
       children: [
+        if (rule.type == PortForwardType.local)
+          IconButton(
+            key: ValueKey('browser-forward-${rule.id}'),
+            tooltip: '浏览器打开',
+            onPressed: browserUri == null
+                ? null
+                : () => _openInBrowser(context, browserUri),
+            icon: const Icon(Icons.open_in_browser_rounded, size: 20),
+          ),
         IconButton(
           key: ValueKey('edit-forward-${rule.id}'),
           tooltip: '编辑规则',
@@ -506,12 +546,9 @@ class PortForwardRuleCard extends StatelessWidget {
                 ),
                 const SizedBox(height: 18),
                 _ForwardRoute(rule: rule, state: state, stacked: compact),
-                if (state.error != null) ...[
+                if (state.error case final error?) ...[
                   const SizedBox(height: 12),
-                  Text(
-                    state.error!,
-                    style: type.bodySmall?.copyWith(color: colors.error),
-                  ),
+                  _ForwardInlineAlert(message: error),
                 ],
                 const SizedBox(height: 14),
                 if (compact)
@@ -529,6 +566,47 @@ class PortForwardRuleCard extends StatelessWidget {
             );
           },
         ),
+      ),
+    );
+  }
+}
+
+/// Inline notice: the fill is a translucent wash of the same color as the bar.
+class _ForwardInlineAlert extends StatelessWidget {
+  const _ForwardInlineAlert({required this.message});
+
+  final String message;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final accent = theme.brightness == Brightness.dark
+        ? const Color(0xFFB6B2DC)
+        : const Color(0xFF585B86);
+    return Material(
+      key: const ValueKey('forward-inline-alert'),
+      color: accent.withValues(alpha: 0.11),
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+      clipBehavior: Clip.antiAlias,
+      child: Stack(
+        children: [
+          Positioned(
+            left: 0,
+            top: 0,
+            bottom: 0,
+            width: 5,
+            child: ColoredBox(color: accent),
+          ),
+          Padding(
+            padding: const EdgeInsets.fromLTRB(20, 16, 20, 16),
+            child: Text(
+              message,
+              style: theme.textTheme.bodyMedium?.copyWith(
+                color: theme.colorScheme.onSurface,
+              ),
+            ),
+          ),
+        ],
       ),
     );
   }
@@ -913,15 +991,6 @@ class _PortForwardEditorState extends State<PortForwardEditor> {
         trailingIcon: const Icon(Icons.expand_more_rounded),
         selectedTrailingIcon: const Icon(Icons.expand_less_rounded),
         alignmentOffset: const Offset(0, 4),
-        menuStyle: MenuStyle(
-          backgroundColor: WidgetStatePropertyAll(colors.surfaceContainer),
-          surfaceTintColor: const WidgetStatePropertyAll(Colors.transparent),
-          elevation: const WidgetStatePropertyAll(2),
-          padding: const WidgetStatePropertyAll(EdgeInsets.all(8)),
-          shape: WidgetStatePropertyAll(
-            RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
-          ),
-        ),
         dropdownMenuEntries: [
           for (final entry in options.entries)
             DropdownMenuEntry<T>(
@@ -936,8 +1005,8 @@ class _PortForwardEditorState extends State<PortForwardEditor> {
                   horizontal: 12,
                   vertical: 8,
                 ),
-                shape: RoundedRectangleBorder(
-                  borderRadius: BorderRadius.circular(12),
+                shape: HarborShapes.superellipse(
+                  const BorderRadius.all(HarborShapes.sm),
                 ),
                 backgroundColor: entry.key == value
                     ? colors.secondaryContainer

@@ -37,6 +37,24 @@ class PortForwardRule {
         : '$source → ${endpoint(targetHost, targetPort)}';
   }
 
+  /// Only a local forward exposes a web endpoint on this device.
+  Uri? browserUri({int? actualPort}) {
+    if (type != PortForwardType.local) return null;
+    final port = actualPort ?? bindPort;
+    if (port < 1 || port > 65535) return null;
+    final host = switch (bindHost) {
+      '0.0.0.0' => '127.0.0.1',
+      '::' => '::1',
+      _ => bindHost,
+    };
+    return Uri(
+      scheme: targetPort == 443 || targetPort == 8443 ? 'https' : 'http',
+      host: host,
+      port: port,
+      path: '/',
+    );
+  }
+
   void validate() {
     if (id.isEmpty || name.trim().isEmpty) {
       throw const FormatException('请填写规则名称');

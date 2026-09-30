@@ -4,6 +4,7 @@ import '../data/terminal_ai.dart';
 import '../data/sync_config.dart';
 import 'settings_widgets.dart';
 import 'sync_settings_controller.dart';
+import 'theme.dart';
 
 class AiSettingsPage extends StatefulWidget {
   const AiSettingsPage({
@@ -441,17 +442,7 @@ class _AiSettingsPageState extends State<AiSettingsPage> {
   List<String> _modelsFor(String providerId) => _models[providerId] ?? const [];
 
   Widget _providerOverflow() {
-    final colors = Theme.of(context).colorScheme;
     return MenuAnchor(
-      style: MenuStyle(
-        backgroundColor: WidgetStatePropertyAll(colors.surfaceContainer),
-        surfaceTintColor: const WidgetStatePropertyAll(Colors.transparent),
-        elevation: const WidgetStatePropertyAll(2),
-        padding: const WidgetStatePropertyAll(EdgeInsets.all(8)),
-        shape: WidgetStatePropertyAll(
-          RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
-        ),
-      ),
       alignmentOffset: const Offset(0, 4),
       builder: (context, controller, child) => IconButton(
         key: const ValueKey('ai-provider-more'),
@@ -660,15 +651,6 @@ class _AiSettingsPageState extends State<AiSettingsPage> {
 
         alignmentOffset: const Offset(0, 4),
         menuHeight: 320,
-        menuStyle: MenuStyle(
-          backgroundColor: WidgetStatePropertyAll(colors.surfaceContainer),
-          surfaceTintColor: const WidgetStatePropertyAll(Colors.transparent),
-          elevation: const WidgetStatePropertyAll(2),
-          padding: const WidgetStatePropertyAll(EdgeInsets.all(8)),
-          shape: WidgetStatePropertyAll(
-            RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
-          ),
-        ),
         dropdownMenuEntries: [
           for (final entry in options.entries)
             DropdownMenuEntry(
@@ -683,8 +665,8 @@ class _AiSettingsPageState extends State<AiSettingsPage> {
                   horizontal: 12,
                   vertical: 8,
                 ),
-                shape: RoundedRectangleBorder(
-                  borderRadius: BorderRadius.circular(12),
+                shape: HarborShapes.superellipse(
+                  const BorderRadius.all(HarborShapes.sm),
                 ),
                 backgroundColor: entry.key == (controller?.text ?? value)
                     ? colors.secondaryContainer

@@ -670,10 +670,12 @@ class _RemoteSelectionToolbarController implements SelectionToolbarController {
           overlay.size.height - y,
         ),
         items: [
-          if (canEdit()) const PopupMenuItem(value: 'cut', child: Text('剪切')),
-          const PopupMenuItem(value: 'copy', child: Text('复制')),
-          if (canEdit()) const PopupMenuItem(value: 'paste', child: Text('粘贴')),
-          const PopupMenuItem(value: 'all', child: Text('全选')),
+          if (canEdit())
+            const HarborPopupMenuItem(value: 'cut', child: Text('剪切')),
+          const HarborPopupMenuItem(value: 'copy', child: Text('复制')),
+          if (canEdit())
+            const HarborPopupMenuItem(value: 'paste', child: Text('粘贴')),
+          const HarborPopupMenuItem(value: 'all', child: Text('全选')),
         ],
       );
       switch (action) {

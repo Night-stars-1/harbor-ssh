@@ -386,25 +386,12 @@ class _TerminalAiPanelState extends State<TerminalAiPanel> {
     );
   }
 
-  MenuStyle _floatingMenuStyle() {
-    final colors = Theme.of(context).colorScheme;
-    return MenuStyle(
-      backgroundColor: WidgetStatePropertyAll(colors.surfaceContainer),
-      surfaceTintColor: const WidgetStatePropertyAll(Colors.transparent),
-      elevation: const WidgetStatePropertyAll(2),
-      padding: const WidgetStatePropertyAll(EdgeInsets.all(8)),
-      shape: WidgetStatePropertyAll(
-        RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
-      ),
-    );
-  }
-
   ButtonStyle _floatingMenuItemStyle({bool selected = false}) {
     final colors = Theme.of(context).colorScheme;
     return MenuItemButton.styleFrom(
       minimumSize: const Size(0, 48),
       padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+      shape: HarborShapes.superellipse(const BorderRadius.all(HarborShapes.sm)),
       backgroundColor: selected ? colors.secondaryContainer : null,
       foregroundColor: selected ? colors.onSecondaryContainer : null,
     );
@@ -472,7 +459,6 @@ class _TerminalAiPanelState extends State<TerminalAiPanel> {
     final colors = Theme.of(context).colorScheme;
     return MenuAnchor(
       controller: _modelMenu,
-      style: _floatingMenuStyle(),
       alignmentOffset: const Offset(0, 4),
       menuChildren: [_modelMenuContent(task)],
       builder: (context, controller, child) => Tooltip(
@@ -535,7 +521,6 @@ class _TerminalAiPanelState extends State<TerminalAiPanel> {
     };
     return MenuAnchor(
       controller: _approvalMenu,
-      style: _floatingMenuStyle(),
       alignmentOffset: const Offset(0, 4),
       menuChildren: [
         for (final item in [

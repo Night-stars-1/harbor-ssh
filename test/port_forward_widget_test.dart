@@ -152,6 +152,91 @@ void main() {
     expect(context.session.handles.single.closed, isTrue);
     expect(find.text('已停止'), findsOneWidget);
   });
+  testWidgets('browser action uses the desktop button and compact menu', (
+    tester,
+  ) async {
+    tester.view.devicePixelRatio = 1;
+    tester.view.physicalSize = const Size(1200, 900);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    addTearDown(tester.view.resetPhysicalSize);
+    final opened = <Uri>[];
+
+    Future<void> show(PortForwardRule rule, PortForwardState state) async {
+      await tester.pumpWidget(
+        MaterialApp(
+          theme: harborTheme(),
+          home: Scaffold(
+            body: PortForwardRuleCard(
+              rule: rule,
+              state: state,
+              connected: true,
+              onEdit: (_) {},
+              onDelete: (_) {},
+              onStart: (_) {},
+              onStop: (_) {},
+              openBrowser: (uri) async {
+                opened.add(uri);
+                return true;
+              },
+            ),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+    }
+
+    await show(_rule, const PortForwardState());
+    const button = ValueKey('browser-forward-one');
+    expect(tester.widget<IconButton>(find.byKey(button)).onPressed, isNull);
+
+    const running = PortForwardState(
+      status: PortForwardStatus.running,
+      port: 43210,
+    );
+    await show(_rule, running);
+    await tester.tap(find.byKey(button));
+    await tester.pump();
+    expect(opened.single.toString(), 'http://127.0.0.1:43210/');
+
+    tester.view.physicalSize = const Size(390, 900);
+    await show(_rule, running);
+    expect(find.byTooltip('浏览器打开'), findsNothing);
+    expect(find.byKey(button), findsNothing);
+    await tester.tap(find.byTooltip('管理转发规则：数据库'));
+    await tester.pumpAndSettle();
+    expect(
+      tester.widget<PopupMenuItem<String>>(find.byKey(button)).enabled,
+      isTrue,
+    );
+    await tester.tap(find.text('浏览器打开'));
+    await tester.pumpAndSettle();
+    expect(opened.length, 2);
+
+    await show(_rule, const PortForwardState());
+    await tester.tap(find.byTooltip('管理转发规则：数据库'));
+    await tester.pumpAndSettle();
+    expect(
+      tester.widget<PopupMenuItem<String>>(find.byKey(button)).enabled,
+      isFalse,
+    );
+    await tester.sendKeyEvent(LogicalKeyboardKey.escape);
+    await tester.pumpAndSettle();
+    expect(tester.takeException(), isNull);
+
+    await show(
+      const PortForwardRule(
+        id: 'remote',
+        name: '远程',
+        type: PortForwardType.remote,
+        bindPort: 8080,
+        targetPort: 80,
+      ),
+      running,
+    );
+    await tester.tap(find.byTooltip('管理转发规则：远程'));
+    await tester.pumpAndSettle();
+    expect(find.text('浏览器打开'), findsNothing);
+  });
   testWidgets('add local, edit remote, delete saved rule', (tester) async {
     final context = await setup(tester, withRule: false);
     await tester.tap(find.text('添加规则'));
@@ -199,29 +284,72 @@ void main() {
     await tester.pumpAndSettle();
     expect(find.text('无认证代理只允许本机回环地址'), findsOneWidget);
   });
+  testWidgets('failed start shows an inline alert and remains retryable', (
+    tester,
+  ) async {
+    final context = await setup(tester);
+    context.session.failStart = true;
+    await tester.tap(find.byTooltip('启动'));
+    await tester.pumpAndSettle();
+    expect(find.byType(AlertDialog), findsNothing);
+    expect(find.text('端口已被占用'), findsOneWidget);
+    final alert = tester.widget<Material>(
+      find.byKey(const ValueKey('forward-inline-alert')),
+    );
+    expect(alert.shape, isA<RoundedRectangleBorder>());
+    expect(alert.clipBehavior, Clip.antiAlias);
+    expect(alert.color, const Color(0xFF585B86).withValues(alpha: 0.11));
+    expect(
+      tester
+          .widget<ColoredBox>(
+            find.descendant(
+              of: find.byKey(const ValueKey('forward-inline-alert')),
+              matching: find.byType(ColoredBox),
+            ),
+          )
+          .color,
+      const Color(0xFF585B86),
+    );
+    context.session.failStart = false;
+    await tester.tap(find.byTooltip('启动'));
+    await tester.pumpAndSettle();
+    expect(find.text('端口已被占用'), findsNothing);
+    context.session.close();
+    await tester.pumpAndSettle();
+    expect(find.text('已停止'), findsOneWidget);
+    final toggle = tester.widget(
+      find.byKey(const ValueKey('toggle-forward-one')),
+    );
+    expect(
+      toggle is IconButton
+          ? toggle.onPressed
+          : (toggle as FilledButton).onPressed,
+      isNull,
+    );
+  });
   testWidgets(
-    'failed start is visible and retryable; disconnect updates dialog',
+    'target connection error stays inline while the rule is running',
     (tester) async {
       final context = await setup(tester);
-      context.session.failStart = true;
       await tester.tap(find.byTooltip('启动'));
       await tester.pumpAndSettle();
-      expect(find.text('端口已被占用'), findsOneWidget);
-      context.session.failStart = false;
-      await tester.tap(find.byTooltip('启动'));
-      await tester.pumpAndSettle();
-      context.session.close();
-      await tester.pumpAndSettle();
-      expect(find.text('已停止'), findsOneWidget);
-      final toggle = tester.widget(
-        find.byKey(const ValueKey('toggle-forward-one')),
+
+      context.session.portForwards.reportConnectionError(
+        _rule.id,
+        StateError('Connection refused'),
       );
-      expect(
-        toggle is IconButton
-            ? toggle.onPressed
-            : (toggle as FilledButton).onPressed,
-        isNull,
+      await tester.pumpAndSettle();
+      expect(find.byType(AlertDialog), findsNothing);
+      expect(find.textContaining('目标连接失败'), findsOneWidget);
+      expect(find.text('运行中'), findsOneWidget);
+
+      context.session.portForwards.reportConnectionError(
+        _rule.id,
+        StateError('Connection refused'),
       );
+      await tester.pumpAndSettle();
+      expect(find.byType(AlertDialog), findsNothing);
+      expect(find.textContaining('目标连接失败'), findsOneWidget);
     },
   );
   testWidgets('failed save retains existing rule', (tester) async {

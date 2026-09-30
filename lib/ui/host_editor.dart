@@ -364,9 +364,7 @@ class _HostEditorState extends State<HostEditor> {
                           for (final tag in _tags)
                             _TagPill(
                               tag: tag,
-                              onDeleted: _busy
-                                  ? null
-                                  : () => _removeTag(tag),
+                              onDeleted: _busy ? null : () => _removeTag(tag),
                             ),
                         ],
                       ),
@@ -424,8 +422,8 @@ class _HostEditorState extends State<HostEditor> {
                             horizontal: 12,
                             vertical: 8,
                           ),
-                          shape: RoundedRectangleBorder(
-                            borderRadius: BorderRadius.circular(12),
+                          shape: HarborShapes.superellipse(
+                            const BorderRadius.all(HarborShapes.sm),
                           ),
                           backgroundColor: selected
                               ? colors.secondaryContainer
@@ -452,23 +450,6 @@ class _HostEditorState extends State<HostEditor> {
                           .inputDecorationTheme,
                       label: const Text('凭证（可选）'),
                       alignmentOffset: const Offset(0, 4),
-                      menuStyle: MenuStyle(
-                        backgroundColor: WidgetStatePropertyAll(
-                          colors.surfaceContainer,
-                        ),
-                        surfaceTintColor: const WidgetStatePropertyAll(
-                          Colors.transparent,
-                        ),
-                        elevation: const WidgetStatePropertyAll(2),
-                        padding: const WidgetStatePropertyAll(
-                          EdgeInsets.all(8),
-                        ),
-                        shape: WidgetStatePropertyAll(
-                          RoundedRectangleBorder(
-                            borderRadius: BorderRadius.circular(16),
-                          ),
-                        ),
-                      ),
                       dropdownMenuEntries: [
                         entry('', '不使用凭证'),
                         for (final user in _users) entry(user.id, user.name),
@@ -560,37 +541,38 @@ class _TagPill extends StatelessWidget {
       constraints: const BoxConstraints(maxWidth: double.infinity),
       child: DecoratedBox(
         decoration: ShapeDecoration(
-          color: chip.backgroundColor ?? theme.colorScheme.surfaceContainerHighest,
+          color:
+              chip.backgroundColor ?? theme.colorScheme.surfaceContainerHighest,
           shape: chip.shape ?? const StadiumBorder(),
         ),
-      child: Padding(
-        padding: const EdgeInsetsDirectional.fromSTEB(12, 4, 4, 4),
-        child: Row(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Flexible(
-              child: Padding(
-                padding: const EdgeInsets.symmetric(vertical: 4),
-                child: Text(tag, style: labelStyle),
+        child: Padding(
+          padding: const EdgeInsetsDirectional.fromSTEB(12, 4, 4, 4),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Flexible(
+                child: Padding(
+                  padding: const EdgeInsets.symmetric(vertical: 4),
+                  child: Text(tag, style: labelStyle),
+                ),
               ),
-            ),
-            IconButton(
-              tooltip: '删除标签 $tag',
-              onPressed: onDeleted,
-              icon: const Icon(Icons.close_rounded, size: 18),
-              // 主题把 IconButton 的最小尺寸定为 48，这里收回到胶囊尺寸。
-              style: IconButton.styleFrom(
-                minimumSize: const Size(32, 32),
-                visualDensity: VisualDensity.standard,
-                tapTargetSize: MaterialTapTargetSize.shrinkWrap,
-                padding: EdgeInsets.zero,
-                shape: const CircleBorder(),
+              IconButton(
+                tooltip: '删除标签 $tag',
+                onPressed: onDeleted,
+                icon: const Icon(Icons.close_rounded, size: 18),
+                // 主题把 IconButton 的最小尺寸定为 48，这里收回到胶囊尺寸。
+                style: IconButton.styleFrom(
+                  minimumSize: const Size(32, 32),
+                  visualDensity: VisualDensity.standard,
+                  tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                  padding: EdgeInsets.zero,
+                  shape: const CircleBorder(),
+                ),
               ),
-            ),
-          ],
+            ],
+          ),
         ),
       ),
-    ),
     );
   }
 }

@@ -35,6 +35,35 @@ class Handle implements PortForwardHandle {
 }
 
 void main() {
+  test(
+    'browser URL uses the live local port and reachable listener address',
+    () {
+      expect(rule().browserUri(), isNull);
+      expect(
+        rule(bindHost: '0.0.0.0').browserUri(actualPort: 43210).toString(),
+        'http://127.0.0.1:43210/',
+      );
+      expect(
+        rule(
+          bindHost: '::',
+          targetPort: 443,
+        ).browserUri(actualPort: 43211).toString(),
+        'https://[::1]:43211/',
+      );
+      expect(
+        rule(bindPort: 8080).browserUri().toString(),
+        'http://127.0.0.1:8080/',
+      );
+      expect(
+        rule(type: PortForwardType.remote, bindPort: 8080).browserUri(),
+        isNull,
+      );
+      expect(
+        rule(type: PortForwardType.dynamic, bindPort: 1080).browserUri(),
+        isNull,
+      );
+    },
+  );
   for (final type in PortForwardType.values) {
     test('round-trip ${type.name} and IPv6 route', () {
       final value = rule(type: type, bindHost: '::1');

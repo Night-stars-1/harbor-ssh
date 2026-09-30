@@ -143,9 +143,6 @@ class _FileWorkspaceState extends State<FileWorkspace> {
     enabled: !_adding,
     tooltip: '',
     position: PopupMenuPosition.under,
-    elevation: 0,
-    color: Theme.of(context).colorScheme.surfaceContainerHigh,
-    shape: HarborShapes.superellipse(),
     constraints: const BoxConstraints(minWidth: 240, maxWidth: 320),
     icon: expanded
         ? null
@@ -162,7 +159,7 @@ class _FileWorkspaceState extends State<FileWorkspace> {
         for (final host in widget.hosts) host.id: host,
       };
       return [
-        const _FileMenuItem(
+        const HarborPopupMenuItem<Object>(
           value: 'local',
           child: Row(
             children: [
@@ -173,7 +170,7 @@ class _FileWorkspaceState extends State<FileWorkspace> {
           ),
         ),
         for (final host in hosts.values)
-          _FileMenuItem(
+          HarborPopupMenuItem<Object>(
             key: ValueKey('add-file-host-$side-${host.id}'),
             value: connected[host.id] ?? host,
             child: Row(
@@ -788,12 +785,9 @@ class _FileWorkspaceState extends State<FileWorkspace> {
       // 相等的左右锚距让菜单按阅读方向从鼠标右侧展开；
       // 空间不足时 Flutter 仍会将自适应宽度的菜单限制在屏幕内。
       position: RelativeRect.fromLTRB(anchorX, point.dy, anchorX, 0),
-      color: colors.surfaceContainerHigh,
-      elevation: 0,
-      shape: HarborShapes.superellipse(),
       items: [
         if (editable)
-          _FileMenuItem(
+          HarborPopupMenuItem<Object>(
             key: const ValueKey('edit-remote-file'),
             value: 'edit',
             child: Row(
@@ -806,7 +800,7 @@ class _FileWorkspaceState extends State<FileWorkspace> {
             ),
           ),
         if (deletable)
-          _FileMenuItem(
+          HarborPopupMenuItem<Object>(
             key: const ValueKey('delete-selected-files'),
             value: 'delete',
             child: Row(
@@ -1184,63 +1178,6 @@ class _FileWorkspaceState extends State<FileWorkspace> {
                   ),
                 ),
             ],
-          ),
-        ),
-      ),
-    );
-  }
-}
-
-class _FileMenuItem extends PopupMenuItem<Object> {
-  const _FileMenuItem({super.key, required super.value, required super.child});
-
-  @override
-  PopupMenuItemState<Object, _FileMenuItem> createState() =>
-      _FileMenuItemState();
-}
-
-class _FileMenuItemState extends PopupMenuItemState<Object, _FileMenuItem> {
-  bool _hovered = false, _focused = false;
-
-  @override
-  Widget build(BuildContext context) {
-    final colors = Theme.of(context).colorScheme;
-    final selected = _hovered || _focused;
-    return Semantics(
-      button: true,
-      selected: selected,
-      child: InkWell(
-        onTap: handleTap,
-        onHover: (value) => setState(() => _hovered = value),
-        onFocusChange: (value) => setState(() => _focused = value),
-        borderRadius: const BorderRadius.all(HarborShapes.sm),
-        hoverColor: Colors.transparent,
-        focusColor: Colors.transparent,
-        child: Container(
-          constraints: const BoxConstraints(minHeight: 44),
-          margin: const EdgeInsets.symmetric(horizontal: 4, vertical: 2),
-          padding: const EdgeInsets.symmetric(horizontal: 8),
-          alignment: Alignment.centerLeft,
-          decoration: BoxDecoration(
-            color: selected
-                ? Color.alphaBlend(
-                    colors.primary.withValues(alpha: .12),
-                    colors.surfaceContainerHigh,
-                  )
-                : Colors.transparent,
-            borderRadius: const BorderRadius.all(HarborShapes.sm),
-          ),
-          child: IconTheme.merge(
-            data: IconThemeData(
-              color: selected ? colors.primary : colors.onSurfaceVariant,
-            ),
-            child: DefaultTextStyle(
-              style: Theme.of(context).textTheme.bodyMedium!.copyWith(
-                color: colors.onSurface,
-                fontWeight: FontWeight.w500,
-              ),
-              child: widget.child!,
-            ),
           ),
         ),
       ),

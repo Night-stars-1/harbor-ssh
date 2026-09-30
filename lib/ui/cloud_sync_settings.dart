@@ -6,6 +6,7 @@ import '../domain/sync_snapshot.dart';
 import 'sync_settings_controller.dart';
 import 'settings_widgets.dart';
 import 'github_sign_in.dart';
+import 'theme.dart';
 
 bool get preferGitHubSync =>
     defaultTargetPlatform == TargetPlatform.android ||
@@ -252,21 +253,6 @@ class _CloudSyncSettingsState extends State<CloudSyncSettings> {
                     trailingIcon: const Icon(Icons.expand_more_rounded),
                     selectedTrailingIcon: const Icon(Icons.expand_less_rounded),
                     alignmentOffset: const Offset(0, 4),
-                    menuStyle: MenuStyle(
-                      backgroundColor: WidgetStatePropertyAll(
-                        colors.surfaceContainer,
-                      ),
-                      surfaceTintColor: const WidgetStatePropertyAll(
-                        Colors.transparent,
-                      ),
-                      elevation: const WidgetStatePropertyAll(2),
-                      padding: const WidgetStatePropertyAll(EdgeInsets.all(8)),
-                      shape: WidgetStatePropertyAll(
-                        RoundedRectangleBorder(
-                          borderRadius: BorderRadius.circular(16),
-                        ),
-                      ),
-                    ),
                     dropdownMenuEntries: [
                       for (final provider
                           in preferGitHubSync
@@ -286,8 +272,8 @@ class _CloudSyncSettingsState extends State<CloudSyncSettings> {
                               horizontal: 12,
                               vertical: 8,
                             ),
-                            shape: RoundedRectangleBorder(
-                              borderRadius: BorderRadius.circular(12),
+                            shape: HarborShapes.superellipse(
+                              const BorderRadius.all(HarborShapes.sm),
                             ),
                             backgroundColor: provider == _provider
                                 ? colors.secondaryContainer

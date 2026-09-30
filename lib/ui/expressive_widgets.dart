@@ -119,14 +119,14 @@ class ExpressiveHostCard extends StatelessWidget {
       }
     },
     menuItems: [
-      PopupMenuItem(
+      HarborPopupMenuItem(
         value: 'favorite',
         enabled: onFavorite != null,
         child: Text(host.favorite ? '取消收藏' : '收藏'),
       ),
-      const PopupMenuItem(value: 'edit', child: Text('编辑连接')),
-      const PopupMenuItem(value: 'forget', child: Text('重置主机指纹')),
-      const PopupMenuItem(value: 'delete', child: Text('删除连接')),
+      const HarborPopupMenuItem(value: 'edit', child: Text('编辑连接')),
+      const HarborPopupMenuItem(value: 'forget', child: Text('重置主机指纹')),
+      const HarborPopupMenuItem(value: 'delete', child: Text('删除连接')),
     ],
   );
 }
@@ -163,9 +163,12 @@ class ExpressiveUserCard extends StatelessWidget {
     menuItems: [
       // 旧版密码凭证没有可安装的公钥，因此没有这个入口。
       if (user.authMethod == AuthMethod.privateKey)
-        const PopupMenuItem(value: 'installKey', child: Text('将公钥安装到服务器')),
-      const PopupMenuItem(value: 'edit', child: Text('编辑凭证')),
-      const PopupMenuItem(value: 'delete', child: Text('删除凭证')),
+        const HarborPopupMenuItem(
+          value: 'installKey',
+          child: Text('将公钥安装到服务器'),
+        ),
+      const HarborPopupMenuItem(value: 'edit', child: Text('编辑凭证')),
+      const HarborPopupMenuItem(value: 'delete', child: Text('删除凭证')),
     ],
   );
 }

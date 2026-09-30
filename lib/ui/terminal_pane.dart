@@ -17,6 +17,7 @@ import 'terminal_ai_panel.dart';
 import 'terminal_links.dart';
 import 'terminal_completion.dart';
 import 'terminal_theme.dart';
+import 'theme.dart';
 import 'file_browser.dart';
 
 class TerminalPane extends StatefulWidget {
@@ -983,24 +984,25 @@ class TerminalOptionsButton extends StatelessWidget {
     onSelected: onSelected ?? controller!.selectOption,
     itemBuilder: (_) => [
       if (MediaQuery.sizeOf(context).width < 900) ...[
-        PopupMenuItem(
+        HarborPopupMenuItem(
           value: 'copy',
           enabled: (hasSelection?.call() ?? controller?.hasSelection ?? false),
           child: const Text('复制'),
         ),
-        PopupMenuItem(
+        HarborPopupMenuItem(
           value: 'paste',
           enabled: session.status == ConnectionStatus.connected,
           child: const Text('粘贴'),
         ),
       ],
-      const PopupMenuItem(value: 'larger', child: Text('增大字体')),
-      const PopupMenuItem(value: 'smaller', child: Text('缩小字体')),
+      const HarborPopupMenuItem(value: 'larger', child: Text('增大字体')),
+      const HarborPopupMenuItem(value: 'smaller', child: Text('缩小字体')),
       if (canForward)
-        const PopupMenuItem(value: 'forward', child: Text('端口转发')),
-      if (canClose) const PopupMenuItem(value: 'close', child: Text('关闭会话')),
+        const HarborPopupMenuItem(value: 'forward', child: Text('端口转发')),
+      if (canClose)
+        const HarborPopupMenuItem(value: 'close', child: Text('关闭会话')),
       if (session.status == ConnectionStatus.connected)
-        const PopupMenuItem(value: 'disconnect', child: Text('断开连接')),
+        const HarborPopupMenuItem(value: 'disconnect', child: Text('断开连接')),
     ],
   );
 }

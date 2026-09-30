@@ -223,9 +223,6 @@ class _TerminalWorkspaceState extends State<TerminalWorkspace> {
   Widget _splitButton(int side) => PopupMenuButton<String>(
     key: ValueKey('terminal-split-menu-$side'),
     tooltip: '',
-    elevation: 0,
-    color: Theme.of(context).colorScheme.surfaceContainerHigh,
-    shape: HarborShapes.superellipse(),
     icon: const Icon(
       Icons.splitscreen_rounded,
       size: 20,
@@ -233,11 +230,11 @@ class _TerminalWorkspaceState extends State<TerminalWorkspace> {
     ),
     onSelected: (value) => _split(side, value),
     itemBuilder: (_) => [
-      const PopupMenuItem(value: 'horizontal', child: Text('左右分屏')),
-      const PopupMenuItem(value: 'vertical', child: Text('上下分屏')),
+      const HarborPopupMenuItem(value: 'horizontal', child: Text('左右分屏')),
+      const HarborPopupMenuItem(value: 'vertical', child: Text('上下分屏')),
       if (_layout is _TerminalSplit) ...[
-        const PopupMenuItem(value: 'remove', child: Text('关闭此分屏')),
-        const PopupMenuItem(value: 'single', child: Text('取消分屏')),
+        const HarborPopupMenuItem(value: 'remove', child: Text('关闭此分屏')),
+        const HarborPopupMenuItem(value: 'single', child: Text('取消分屏')),
       ],
     ],
   );
@@ -245,10 +242,7 @@ class _TerminalWorkspaceState extends State<TerminalWorkspace> {
   Widget _sessionPicker(int side, String title) => PopupMenuButton<Object>(
     key: ValueKey('terminal-session-picker-$side'),
     tooltip: '',
-    elevation: 0,
     position: PopupMenuPosition.under,
-    shape: HarborShapes.superellipse(),
-    color: Theme.of(context).colorScheme.surfaceContainerHigh,
     onSelected: (value) {
       if (value is SshConnection) {
         _assign(side, value.id);
@@ -259,7 +253,7 @@ class _TerminalWorkspaceState extends State<TerminalWorkspace> {
     },
     itemBuilder: (_) => [
       for (final session in _sessions.values)
-        PopupMenuItem(
+        HarborPopupMenuItem(
           value: session,
           child: Row(
             children: [
@@ -276,7 +270,7 @@ class _TerminalWorkspaceState extends State<TerminalWorkspace> {
           ),
         ),
       for (final host in widget.hosts)
-        PopupMenuItem(
+        HarborPopupMenuItem(
           value: host,
           child: Row(
             children: [

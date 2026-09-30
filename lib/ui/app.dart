@@ -1358,14 +1358,6 @@ class _WorkspaceState extends State<Workspace> {
     final select = onSelected ?? () => model.selectSession(session.id);
     return MenuAnchor(
       key: ValueKey('session-menu-${session.id}'),
-      style: MenuStyle(
-        backgroundColor: WidgetStatePropertyAll(colors.surfaceContainer),
-        shape: WidgetStatePropertyAll(
-          RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
-        ),
-        elevation: const WidgetStatePropertyAll(2),
-        padding: const WidgetStatePropertyAll(EdgeInsets.all(8)),
-      ),
       menuChildren: [
         MenuItemButton(
           onPressed: () => _openPortForwards(session),
