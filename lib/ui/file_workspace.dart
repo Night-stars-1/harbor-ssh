@@ -34,6 +34,7 @@ class FileWorkspace extends StatefulWidget {
 class _FileWorkspaceState extends State<FileWorkspace> {
   bool _adding = false;
   bool _editing = false;
+  final _reconnecting = <String>{};
   final _searching = <String>{};
   final _tabKeys = <String, GlobalKey>{};
   final _activeStrips = <int, String?>{};
@@ -249,6 +250,55 @@ class _FileWorkspaceState extends State<FileWorkspace> {
       }
     } finally {
       if (mounted) setState(() => _adding = false);
+    }
+  }
+
+  Future<void> _retry(FileLocationTab tab) async {
+    if (_reconnecting.contains(tab.id) ||
+        tab.loading ||
+        model.locked(tab) ||
+        !model.tabs.contains(tab)) {
+      return;
+    }
+    if (tab.connected) {
+      await tab.browse();
+      return;
+    }
+    final previous = tab.session;
+    if (previous == null) return;
+    setState(() => _reconnecting.add(tab.id));
+    SshConnection? ownedSession;
+    try {
+      final host =
+          widget.hosts
+              .where((host) => host.id == previous.host.id)
+              .firstOrNull ??
+          previous.host;
+      final reusable = widget.sessions
+          .where(
+            (session) =>
+                session.host.id == host.id &&
+                session.status == ConnectionStatus.connected,
+          )
+          .lastOrNull;
+      if (reusable == null) ownedSession = await widget.onConnect(host);
+      final session = reusable ?? ownedSession;
+      if (!mounted || session == null) return;
+      if (model.replaceConnection(
+        tab,
+        session,
+        ownsSession: reusable == null,
+      )) {
+        ownedSession = null;
+      }
+    } catch (error) {
+      if (mounted) {
+        ScaffoldMessenger.of(context)
+            .showSnackBar(SnackBar(content: Text(fileError(error))));
+      }
+    } finally {
+      ownedSession?.dispose();
+      if (mounted) setState(() => _reconnecting.remove(tab.id));
     }
   }
 
@@ -628,7 +678,8 @@ class _FileWorkspaceState extends State<FileWorkspace> {
   }
 
   Widget _browser(int side, FileLocationTab tab, {bool clipboardMode = false}) {
-    final enabled = !tab.loading && tab.connected && !model.locked(tab);
+    final loading = tab.loading || _reconnecting.contains(tab.id);
+    final enabled = !loading && tab.connected && !model.locked(tab);
     final entries = tab.visibleEntries;
     final copying = tab.selected.isNotEmpty;
     final showAction = clipboardMode && (copying || model.clipboard != null);
@@ -636,7 +687,7 @@ class _FileWorkspaceState extends State<FileWorkspace> {
       children: [
         _browserToolbar(tab, enabled),
         Expanded(
-          child: tab.loading
+          child: loading
               ? const Center(child: CircularProgressIndicator())
               : tab.error != null
               ? Center(
@@ -648,8 +699,9 @@ class _FileWorkspaceState extends State<FileWorkspace> {
                         children: [
                           Text(tab.error!, textAlign: TextAlign.center),
                           TextButton(
-                            onPressed: tab.connected && !model.locked(tab)
-                                ? () => tab.browse()
+                            key: ValueKey('retry-file-tab-${tab.id}'),
+                            onPressed: !model.locked(tab)
+                                ? () => _retry(tab)
                                 : null,
                             child: const Text('重试'),
                           ),

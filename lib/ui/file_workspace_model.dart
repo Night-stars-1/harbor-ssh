@@ -62,7 +62,7 @@ class FileLocationTab extends ChangeNotifier {
     error = null;
     notifyListeners();
     try {
-      if (!connected) throw StateError('连接已断开，请重新添加 SFTP 标签');
+      if (!connected) throw StateError('连接已断开，点击重试以重新连接');
       final directory = await files.browse(target);
       if (_disposed || request != _request) return;
       if (path != directory.path) {
@@ -169,7 +169,7 @@ class FileLocationTab extends ChangeNotifier {
     if (!connected) {
       _request++;
       loading = false;
-      error = '连接已断开，请重新添加 SFTP 标签';
+      error = '连接已断开，点击重试以重新连接';
     }
     notifyListeners();
   }
@@ -339,6 +339,42 @@ class FileWorkspaceModel extends ChangeNotifier {
     _notify();
     unawaited(tab.browse());
     return tab;
+  }
+
+  bool replaceConnection(
+    FileLocationTab tab,
+    SshConnection session, {
+    required bool ownsSession,
+  }) {
+    if (_disposed ||
+        locked(tab) ||
+        session.status != ConnectionStatus.connected) {
+      return false;
+    }
+    final side = sideOf(tab);
+    if (side < 0) return false;
+    final pane = panes[side];
+    final index = pane.tabs.indexOf(tab);
+    final replacement =
+        FileLocationTab(
+            id: tab.id,
+            name: session.host.name,
+            files: session.files,
+            initialPath: tab.initialPath,
+            session: session,
+            ownsSession: ownsSession,
+          )
+          ..path = tab.path
+          ..query = tab.query
+          ..showHidden = tab.showHidden;
+    pane.tabs[index] = replacement;
+    if (clipboard?.source == tab) clipboard = null;
+    tab.removeListener(_notify);
+    tab.dispose();
+    replacement.addListener(_notify);
+    _notify();
+    unawaited(replacement.browse());
+    return true;
   }
 
   void activate(int side, String id) {
