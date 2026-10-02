@@ -10,6 +10,7 @@ import '../domain/appearance.dart';
 import 'ai_window_bridge.dart';
 import 'host_editor.dart';
 import 'host_identity_dialog.dart';
+import 'localization.dart';
 import 'port_forward_workspace.dart';
 import 'expressive_widgets.dart';
 import 'public_key_target_dialog.dart';
@@ -65,6 +66,9 @@ class _HarborAppState extends State<HarborApp> {
       valueListenable: widget.model.appearance,
       builder: (context, appearance, _) => MaterialApp(
         title: 'Harbor SSH',
+        locale: harborLocale,
+        supportedLocales: harborSupportedLocales,
+        localizationsDelegates: harborLocalizationDelegates,
         debugShowCheckedModeBanner: false,
         theme: harborTheme(
           dynamicScheme: SystemColorScope.of(context)?.light,

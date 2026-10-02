@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 
 import 'settings_page.dart';
+import 'localization.dart';
 import 'settings_window_bridge.dart';
 import 'theme.dart';
 import 'window_frame.dart';
@@ -27,6 +28,9 @@ class _SettingsWindowAppState extends State<SettingsWindowApp> {
       listenable: controller,
       builder: (context, _) => MaterialApp(
         title: '设置 · Harbor SSH',
+        locale: harborLocale,
+        supportedLocales: harborSupportedLocales,
+        localizationsDelegates: harborLocalizationDelegates,
         debugShowCheckedModeBanner: false,
         theme: harborTheme(
           color: controller.appearance.color,

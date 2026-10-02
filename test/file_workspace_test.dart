@@ -15,6 +15,7 @@ import 'package:harbor_ssh/domain/host.dart';
 import 'package:harbor_ssh/ui/app.dart';
 import 'package:harbor_ssh/ui/file_workspace.dart';
 import 'package:harbor_ssh/ui/file_workspace_model.dart';
+import 'package:harbor_ssh/ui/localization.dart';
 import 'package:harbor_ssh/ui/theme.dart';
 import 'package:harbor_ssh/ui/transfer_speed.dart';
 import 'package:harbor_ssh/ui/workspace_model.dart';
@@ -175,6 +176,9 @@ void main() {
     final tab = model.add(0, name: 'SFTP', files: files);
     await tester.pumpWidget(
       MaterialApp(
+        locale: harborLocale,
+        supportedLocales: harborSupportedLocales,
+        localizationsDelegates: harborLocalizationDelegates,
         theme: harborTheme().copyWith(platform: TargetPlatform.android),
         home: Scaffold(
           body: FileWorkspace(

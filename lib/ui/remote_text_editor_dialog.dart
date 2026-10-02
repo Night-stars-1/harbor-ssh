@@ -661,6 +661,7 @@ class _RemoteSelectionToolbarController implements SelectionToolbarController {
       final point = overlay.globalToLocal(anchor);
       final x = point.dx.clamp(0.0, overlay.size.width);
       final y = point.dy.clamp(0.0, overlay.size.height);
+      final localizations = MaterialLocalizations.of(context);
       final action = await showMenu<String>(
         context: context,
         position: RelativeRect.fromLTRB(
@@ -671,11 +672,23 @@ class _RemoteSelectionToolbarController implements SelectionToolbarController {
         ),
         items: [
           if (canEdit())
-            const HarborPopupMenuItem(value: 'cut', child: Text('剪切')),
-          const HarborPopupMenuItem(value: 'copy', child: Text('复制')),
+            HarborPopupMenuItem(
+              value: 'cut',
+              child: Text(localizations.cutButtonLabel),
+            ),
+          HarborPopupMenuItem(
+            value: 'copy',
+            child: Text(localizations.copyButtonLabel),
+          ),
           if (canEdit())
-            const HarborPopupMenuItem(value: 'paste', child: Text('粘贴')),
-          const HarborPopupMenuItem(value: 'all', child: Text('全选')),
+            HarborPopupMenuItem(
+              value: 'paste',
+              child: Text(localizations.pasteButtonLabel),
+            ),
+          HarborPopupMenuItem(
+            value: 'all',
+            child: Text(localizations.selectAllButtonLabel),
+          ),
         ],
       );
       switch (action) {

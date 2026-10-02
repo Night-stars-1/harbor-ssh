@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 
 import 'ai_window_bridge.dart';
+import 'localization.dart';
 import 'system_color_scope.dart';
 import 'terminal_ai_panel.dart';
 import 'theme.dart';
@@ -41,6 +42,9 @@ class _AiWindowAppState extends State<AiWindowApp> {
         final system = SystemColorScope.of(context);
         return MaterialApp(
           title: 'AI 助手 · Harbor SSH',
+          locale: harborLocale,
+          supportedLocales: harborSupportedLocales,
+          localizationsDelegates: harborLocalizationDelegates,
           debugShowCheckedModeBanner: false,
           theme: harborTheme(
             color: appearance.color,
