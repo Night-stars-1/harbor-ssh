@@ -265,7 +265,9 @@ class _FileWorkspaceState extends State<FileWorkspace> {
       return;
     }
     final previous = tab.session;
-    if (previous == null) return;
+    if (previous == null || previous.status == ConnectionStatus.connecting) {
+      return;
+    }
     setState(() => _reconnecting.add(tab.id));
     SshConnection? ownedSession;
     try {
@@ -678,7 +680,10 @@ class _FileWorkspaceState extends State<FileWorkspace> {
   }
 
   Widget _browser(int side, FileLocationTab tab, {bool clipboardMode = false}) {
-    final loading = tab.loading || _reconnecting.contains(tab.id);
+    final loading =
+        tab.loading ||
+        _reconnecting.contains(tab.id) ||
+        tab.session?.status == ConnectionStatus.connecting;
     final enabled = !loading && tab.connected && !model.locked(tab);
     final entries = tab.visibleEntries;
     final copying = tab.selected.isNotEmpty;

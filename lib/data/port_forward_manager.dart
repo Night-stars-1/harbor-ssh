@@ -118,6 +118,12 @@ class PortForwardManager extends ChangeNotifier {
     await Future.wait(_runs.keys.toList().map(stop));
   }
 
+  /// Wait for the previous transport's listeners to stop before accepting runs.
+  Future<void> reopen() async {
+    await close();
+    if (!_disposed) _closed = false;
+  }
+
   void _notify() {
     if (!_disposed) notifyListeners();
   }

@@ -87,6 +87,139 @@ void main() {
         await eventually(() => connection.status == ConnectionStatus.closed);
         expect(connection.terminal.buffer.getText(), contains('FINAL-OUTPUT'));
       });
+      test('远程退出后原会话重连，保留终端与历史并恢复输入和 SFTP', () async {
+        final connection = SshConnection(id: 'same-session', host: host());
+        addTearDown(connection.dispose);
+        final repository = memoryRepository();
+        const credentials = Credentials(password: 'fixture-password');
+        await connection.connect(credentials, repository, (_, _) async => true);
+        final terminal = connection.terminal;
+        final history = connection.commandHistory;
+        history.add('preserved-command');
+        await connection.listDirectory('~');
+        connection.send('before-reconnect\r');
+        await eventually(
+          () => terminal.buffer.getText().contains('ECHO=before-reconnect'),
+        );
+        connection.send('exit\r');
+        await eventually(() => connection.status == ConnectionStatus.closed);
+        final before = terminal.buffer.getText();
+        final statuses = <ConnectionStatus>[];
+        connection.addListener(() => statuses.add(connection.status));
+        await connection.reconnect(
+          credentials,
+          repository,
+          (_, _) async => true,
+        );
+        expect(
+          connection.status,
+          ConnectionStatus.connected,
+          reason: connection.error,
+        );
+        expect(connection.id, 'same-session');
+        expect(connection.terminal, same(terminal));
+        expect(connection.commandHistory, same(history));
+        expect(history.matching('preserved'), contains('preserved-command'));
+        expect(terminal.buffer.getText(), contains(before));
+        expect(statuses, [
+          ConnectionStatus.connecting,
+          ConnectionStatus.connected,
+        ]);
+        connection.send('after-reconnect\r');
+        await eventually(
+          () => terminal.buffer.getText().contains('ECHO=after-reconnect'),
+        );
+        expect(await connection.listDirectory('~'), isNotEmpty);
+        final callback = terminal.onOutput;
+        await connection.reconnect(
+          credentials,
+          repository,
+          (_, _) async => true,
+        );
+        expect(terminal.onOutput, same(callback));
+        connection.send('exit\r');
+        await eventually(() => connection.status == ConnectionStatus.closed);
+      });
+
+      test('重连失败仍可再次重试，清除上次错误', () async {
+        final connection = SshConnection(id: 'retry-failure', host: host());
+        addTearDown(connection.dispose);
+        final repository = memoryRepository();
+        await connection.connect(
+          const Credentials(password: 'wrong'),
+          repository,
+          (_, _) async => true,
+        );
+        expect(connection.status, ConnectionStatus.failed);
+        expect(connection.error, isNotNull);
+        await connection.reconnect(
+          const Credentials(password: 'wrong'),
+          repository,
+          (_, _) async => true,
+        );
+        expect(connection.status, ConnectionStatus.failed);
+        await connection.reconnect(
+          const Credentials(password: 'fixture-password'),
+          repository,
+          (_, _) async => true,
+        );
+        expect(
+          connection.status,
+          ConnectionStatus.connected,
+          reason: connection.error,
+        );
+        expect(connection.error, isNull);
+        connection.send('retry-success\r');
+        await eventually(
+          () => connection.terminal.buffer.getText().contains(
+            'ECHO=retry-success',
+          ),
+        );
+      });
+
+      test('取消旧重连后再次连接，迟到的指纹确认不会关闭新连接', () async {
+        final connection = SshConnection(id: 'stale-reconnect', host: host());
+        addTearDown(connection.dispose);
+        connection.close();
+        final opened = Completer<void>();
+        final decision = Completer<bool>();
+        const credentials = Credentials(password: 'fixture-password');
+        final previous = connection.reconnect(credentials, memoryRepository(), (
+          _,
+          _,
+        ) {
+          opened.complete();
+          return decision.future;
+        });
+        await opened.future.timeout(const Duration(seconds: 10));
+        connection.close();
+        await connection.reconnect(
+          credentials,
+          memoryRepository(),
+          (_, _) async => true,
+        );
+        expect(connection.status, ConnectionStatus.connected);
+        decision.complete(true);
+        await previous;
+        await Future<void>.delayed(const Duration(milliseconds: 100));
+        expect(connection.status, ConnectionStatus.connected);
+        connection.send('new-transport\r');
+        await eventually(
+          () => connection.terminal.buffer.getText().contains(
+            'ECHO=new-transport',
+          ),
+        );
+        connection.close();
+        final closing = connection.reconnect(
+          credentials,
+          memoryRepository(),
+          (_, _) async => true,
+        );
+        connection.close();
+        await closing;
+        expect(connection.status, ConnectionStatus.closed);
+      });
+
       test('已加密私钥认证', () async {
         final connection = SshConnection(
           id: '2',

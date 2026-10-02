@@ -1,7 +1,10 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter/gestures.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:harbor_ssh/ui/app.dart';
+import 'package:harbor_ssh/ui/terminal_pane.dart';
 import 'package:harbor_ssh/data/host_repository.dart';
 import 'package:harbor_ssh/data/public_key_install.dart';
 import 'package:harbor_ssh/data/ssh_connection.dart';
@@ -13,6 +16,62 @@ import 'package:harbor_ssh/ui/workspace_model.dart';
 import 'support.dart';
 
 void main() {
+  for (final width in [390.0, 1200.0]) {
+    testWidgets('重新连接保留当前 SSH 会话和终端，使用最新配置且不重复建连 $width', (tester) async {
+      tester.view.physicalSize = Size(width, 900);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+      final session = _ReconnectSession();
+      final model = _SidebarWorkspaceModel([session]);
+      final savedHost = Host.fromJson({
+        ...testHost.toJson(),
+        'name': '更新后的主机',
+        'address': 'updated.example.com',
+      });
+      await model.repository.saveHosts([savedHost]);
+      await model.repository.saveCredentials(
+        savedHost.id,
+        const Credentials(password: 'saved-password'),
+      );
+      await tester.pumpWidget(HarborApp(model: model));
+      await tester.pumpAndSettle();
+      final view = find.byType(TerminalView);
+      final state = tester.state(view);
+      final terminal = session.terminal;
+      final callback = tester
+          .widget<TerminalPane>(find.byType(TerminalPane))
+          .onReconnect;
+      await tester.tap(find.text('重新连接'));
+      callback();
+      await tester.pump();
+      expect(session.requests, 1);
+      expect(session.requestedHost?.address, savedHost.address);
+      expect(session.credentials?.password, 'saved-password');
+      expect(model.sessions, [session]);
+      expect(find.text('重新连接'), findsNothing);
+
+      session.finish(success: false);
+      await tester.pumpAndSettle();
+      expect(find.text('重新连接'), findsOneWidget);
+      expect(model.sessions, [session]);
+      expect(tester.state(view), same(state));
+      await tester.tap(find.text('重新连接'));
+      await tester.pump();
+      expect(session.requests, 2);
+      session.finish(success: true);
+      await tester.pumpAndSettle();
+      expect(model.sessions, [session]);
+      expect(model.activeSession, same(session));
+      expect(session.terminal, same(terminal));
+      expect(terminal.buffer.getText(), contains('保留的终端记录'));
+      expect(tester.state(view), same(state));
+      expect(find.text('重新连接'), findsNothing);
+      expect(tester.takeException(), isNull);
+      await tester.pumpWidget(const SizedBox.shrink());
+    });
+  }
+
   for (final width in [320.0, 390.0]) {
     testWidgets('手机可从首页找回会话并在终端中切换 $width', (tester) async {
       tester.view.physicalSize = Size(width, 900);
@@ -759,7 +818,9 @@ void main() {
       expect(find.textContaining('复用已连接的会话'), findsNothing);
       await tester.tap(find.byKey(const ValueKey('public-key-target-host-1')));
       await tester.pumpAndSettle();
-      await tester.tap(find.byKey(const ValueKey('public-key-install-confirm')));
+      await tester.tap(
+        find.byKey(const ValueKey('public-key-install-confirm')),
+      );
       await tester.pumpAndSettle();
       // 没有可用的登录凭证，于是要求先配置，绝不把公钥交给旧会话。
       expect(session.installed, isEmpty);
@@ -791,10 +852,7 @@ void main() {
     await tester.pumpAndSettle();
     await tester.tap(find.byKey(const ValueKey('public-key-install-confirm')));
     await tester.pumpAndSettle();
-    expect(
-      find.text('「开发服务器」：请填写连接密码。'),
-      findsOneWidget,
-    );
+    expect(find.text('「开发服务器」：请填写连接密码。'), findsOneWidget);
     expect(find.textContaining('已把「生产部署」的公钥安装到'), findsNothing);
     expect(tester.takeException(), isNull);
     await tester.pumpWidget(const SizedBox.shrink());
@@ -1010,6 +1068,42 @@ class _FakeInstallSession extends SshConnection {
     if (error != null) throw error;
     installed.add(publicKey);
     return result;
+  }
+}
+
+class _ReconnectSession extends SshConnection {
+  _ReconnectSession() : super(id: 'reconnect-existing', host: testHost) {
+    status = ConnectionStatus.closed;
+    terminal.write('保留的终端记录\r\n');
+  }
+  int requests = 0;
+  Host? requestedHost;
+  Credentials? credentials;
+  Completer<void>? _pending;
+
+  @override
+  Future<void> reconnect(
+    Credentials credentials,
+    HostRepository repository,
+    TrustHost prompt, {
+    Host? host,
+    ConfirmHostKeyChange? confirmKeyChange,
+  }) async {
+    requests++;
+    this.credentials = credentials;
+    requestedHost = host;
+    status = ConnectionStatus.connecting;
+    error = null;
+    _pending = Completer<void>();
+    notifyListeners();
+    await _pending!.future;
+  }
+
+  void finish({required bool success}) {
+    status = success ? ConnectionStatus.connected : ConnectionStatus.failed;
+    error = success ? null : '测试连接失败';
+    notifyListeners();
+    _pending!.complete();
   }
 }
 

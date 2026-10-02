@@ -141,6 +141,30 @@ void main() {
     await manager.start(rule());
     expect(manager.state('one').status, PortForwardStatus.running);
   });
+  test('reconnect waits for late old bind and permits a new forward', () async {
+    final pending = Completer<PortForwardHandle>();
+    var starts = 0;
+    final fresh = Handle();
+    final manager = PortForwardManager((_) {
+      starts++;
+      return starts == 1 ? pending.future : Future.value(fresh);
+    });
+    addTearDown(manager.dispose);
+    final starting = manager.start(rule());
+    var reopened = false;
+    final reopening = manager.reopen().then((_) => reopened = true);
+    await Future<void>.delayed(Duration.zero);
+    expect(reopened, isFalse);
+    final old = Handle();
+    pending.complete(old);
+    await Future.wait([starting, reopening]);
+    expect(old.closes, 1);
+    expect(manager.activeCount, 0);
+    await manager.start(rule());
+    expect(starts, 2);
+    expect(manager.activeCount, 1);
+    expect(fresh.closes, 0);
+  });
   for (final disconnect in [false, true]) {
     test(
       'late bind cleaned after ${disconnect ? 'disconnect' : 'stop'}',

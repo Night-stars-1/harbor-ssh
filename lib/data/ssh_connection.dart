@@ -24,7 +24,9 @@ import '../domain/remote_file.dart';
 enum ConnectionStatus { connecting, connected, closed, failed }
 
 class SshConnection extends ChangeNotifier {
-  SshConnection({required this.id, required this.host});
+  SshConnection({required this.id, required Host host}) {
+    _host = host;
+  }
   final String id;
   late final PortForwardManager portForwards = PortForwardManager((rule) {
     final client = _client;
@@ -46,7 +48,8 @@ class SshConnection extends ChangeNotifier {
     return client.execute(command);
   });
   RemoteFileSystem get files => SftpFiles(_openSftp);
-  final Host host;
+  late Host _host;
+  Host get host => _host;
   final Terminal terminal = Terminal(maxLines: 10000);
   final inputGeneration = ValueNotifier<int>(0);
   ConnectionStatus status = ConnectionStatus.connecting;
@@ -63,6 +66,7 @@ class SshConnection extends ChangeNotifier {
   DateTime? _commandsLoadedAt;
   bool _closed = false;
   bool _disposed = false;
+  int _generation = 0;
   int _openOutputStreams = 0;
   final List<StreamSubscription<String>> _subscriptions = [];
   String get statusLabel => switch (status) {
@@ -71,6 +75,46 @@ class SshConnection extends ChangeNotifier {
     ConnectionStatus.closed => '已断开',
     ConnectionStatus.failed => '连接失败',
   };
+
+  bool _current(int generation) =>
+      !_disposed && !_closed && generation == _generation;
+
+  /// Keep the session identity, terminal buffer and pane while replacing only
+  /// its closed transport. Old asynchronous callbacks cannot affect the retry.
+  Future<void> reconnect(
+    Credentials credentials,
+    HostRepository repository,
+    TrustHost prompt, {
+    Host? host,
+    ConfirmHostKeyChange? confirmKeyChange,
+  }) async {
+    if (_disposed ||
+        status == ConnectionStatus.connecting ||
+        status == ConnectionStatus.connected) {
+      return;
+    }
+    _release();
+    final generation = _generation;
+    _closed = false;
+    _host = host ?? _host;
+    _remoteHome = null;
+    _historyLoad = null;
+    _availableCommands = null;
+    _commandsLoadedAt = null;
+    _openOutputStreams = 0;
+    error = null;
+    status = ConnectionStatus.connecting;
+    _notify();
+    await portForwards.reopen();
+    if (!_current(generation)) return;
+    await connect(
+      credentials,
+      repository,
+      prompt,
+      confirmKeyChange: confirmKeyChange,
+    );
+  }
+
   Future<void> connect(
     Credentials credentials,
     HostRepository repository,
@@ -78,6 +122,8 @@ class SshConnection extends ChangeNotifier {
     bool openShell = true,
     ConfirmHostKeyChange? confirmKeyChange,
   }) async {
+    final generation = _generation;
+    if (!_current(generation)) return;
     Object? verificationError;
     try {
       final identities = host.authMethod == AuthMethod.privateKey
@@ -91,7 +137,7 @@ class SshConnection extends ChangeNotifier {
         host.port,
         timeout: const Duration(seconds: 15),
       );
-      if (_closed) {
+      if (!_current(generation)) {
         socket.destroy();
         return;
       }
@@ -107,27 +153,27 @@ class SshConnection extends ChangeNotifier {
             : null,
         keepAliveInterval: const Duration(seconds: 20),
         onVerifyHostKey: (type, bytes) async {
-          if (_closed) return false;
+          if (!_current(generation)) return false;
           try {
             return await repository.verifyHost(
               host,
               type,
               utf8.decode(bytes),
               (t, f) async {
-                if (_closed) return false;
+                if (!_current(generation)) return false;
                 final accepted = await prompt(t, f);
-                return !_closed && accepted;
+                return _current(generation) && accepted;
               },
               confirmKeyChange: confirmKeyChange == null
                   ? null
                   : (t, f, previousKey) async {
-                      if (_closed) return false;
+                      if (!_current(generation)) return false;
                       final accepted = await confirmKeyChange(
                         t,
                         f,
                         previousKey,
                       );
-                      return !_closed && accepted;
+                      return _current(generation) && accepted;
                     },
             );
           } catch (e) {
@@ -140,16 +186,19 @@ class SshConnection extends ChangeNotifier {
       unawaited(
         client.done.then(
           (_) {
+            if (!_current(generation)) return;
             unawaited(portForwards.close());
             if (_shell == null) _remoteClosed();
           },
           onError: (Object e) {
-            if (status == ConnectionStatus.connected) _fail(e);
+            if (_current(generation) && status == ConnectionStatus.connected) {
+              _fail(e);
+            }
           },
         ),
       );
       await client.authenticated;
-      if (_closed) return;
+      if (!_current(generation)) return;
       if (!openShell) {
         status = ConnectionStatus.connected;
         _notify();
@@ -163,20 +212,20 @@ class SshConnection extends ChangeNotifier {
             ),
           )
           .timeout(const Duration(seconds: 15));
-      if (_closed) {
+      if (!_current(generation)) {
         shell.close();
         return;
       }
       _shell = shell;
       terminal.onOutput = (data) {
-        if (status == ConnectionStatus.connected) {
+        if (_current(generation) && status == ConnectionStatus.connected) {
           commandHistory.observeInput(data);
           inputGeneration.value++;
           shell.write(Uint8List.fromList(utf8.encode(data)));
         }
       };
       terminal.onResize = (width, height, pixelWidth, pixelHeight) {
-        if (status == ConnectionStatus.connected) {
+        if (_current(generation) && status == ConnectionStatus.connected) {
           shell.resizeTerminal(width, height, pixelWidth, pixelHeight);
         }
       };
@@ -187,9 +236,14 @@ class SshConnection extends ChangeNotifier {
               .cast<List<int>>()
               .transform(const Utf8Decoder(allowMalformed: true))
               .listen(
-                terminal.write,
-                onError: (Object e) => _fail(e),
+                (data) {
+                  if (_current(generation)) terminal.write(data);
+                },
+                onError: (Object e) {
+                  if (_current(generation)) _fail(e);
+                },
                 onDone: () {
+                  if (!_current(generation)) return;
                   _openOutputStreams--;
                   if (_openOutputStreams == 0) _remoteClosed();
                 },
@@ -201,11 +255,13 @@ class SshConnection extends ChangeNotifier {
       unawaited(
         shell.done.then(
           (_) {}, // Output streams may still contain the final packet.
-          onError: (Object e) => _fail(e),
+          onError: (Object e) {
+            if (_current(generation)) _fail(e);
+          },
         ),
       );
     } catch (e) {
-      if (!_closed) _fail(verificationError ?? e);
+      if (_current(generation)) _fail(verificationError ?? e);
     }
   }
 
@@ -215,7 +271,7 @@ class SshConnection extends ChangeNotifier {
     final client = _client;
     if (client == null || _closed) throw StateError('SSH is disconnected');
     final sftp = await client.sftp();
-    if (_closed) {
+    if (_closed || _client != client) {
       await sftp.close();
       throw StateError('SSH is disconnected');
     }
@@ -244,6 +300,7 @@ class SshConnection extends ChangeNotifier {
   }
 
   Future<List<String>> _readAvailableCommands() async {
+    final generation = _generation;
     final client = _client;
     if (client == null) return const [];
     SSHSession? query;
@@ -259,7 +316,7 @@ class SshConnection extends ChangeNotifier {
         );
         rethrow;
       }
-      if (_closed) return const [];
+      if (!_current(generation)) return const [];
       final bytes = BytesBuilder(copy: false);
       await Future.wait<void>([
         query.stdout.forEach((chunk) {
@@ -271,7 +328,7 @@ class SshConnection extends ChangeNotifier {
         query.stderr.drain<void>(),
         query.done.then((_) {}),
       ]).timeout(const Duration(seconds: 5));
-      if (_closed || query.exitCode != 0) return const [];
+      if (!_current(generation) || query.exitCode != 0) return const [];
       return parseRemoteCommands(
         utf8.decode(bytes.takeBytes(), allowMalformed: true),
       );
@@ -290,6 +347,7 @@ class SshConnection extends ChangeNotifier {
   /// non-Linux host, a non-zero exit status, a timeout, or output that fails
   /// strict validation.
   Future<RemoteMetricsSample?> readRemoteMetrics() async {
+    final generation = _generation;
     final client = _client;
     if (client == null || _closed || status != ConnectionStatus.connected) {
       return null;
@@ -307,7 +365,7 @@ class SshConnection extends ChangeNotifier {
         );
         rethrow;
       }
-      if (_closed) return null;
+      if (!_current(generation)) return null;
       unawaited(query.stdin.close().catchError((Object _) {}));
       final bytes = BytesBuilder(copy: false);
       await Future.wait<void>([
@@ -322,7 +380,7 @@ class SshConnection extends ChangeNotifier {
         query.stderr.drain<void>(),
         query.done.then((_) {}),
       ]).timeout(const Duration(seconds: 5));
-      if (_closed || query.exitCode != 0) return null;
+      if (!_current(generation) || query.exitCode != 0) return null;
       return parseRemoteMetrics(
         utf8.decode(bytes.takeBytes(), allowMalformed: true),
       );
@@ -336,18 +394,21 @@ class SshConnection extends ChangeNotifier {
   }
 
   Future<void> _readCommandHistory() async {
+    final generation = _generation;
     try {
       final sftp = await (_sftp ??= _openSftp()).timeout(
         const Duration(seconds: 5),
       );
-      _remoteHome ??= await sftp
-          .absolute('.')
-          .timeout(const Duration(seconds: 5));
+      final home =
+          _remoteHome ??
+          await sftp.absolute('.').timeout(const Duration(seconds: 5));
+      if (!_current(generation)) return;
+      _remoteHome = home;
       final histories = <({int modified, List<String> commands})>[];
       for (final name in ['.bash_history', '.zsh_history']) {
         SftpFile? file;
         try {
-          final path = '$_remoteHome/$name';
+          final path = '$home/$name';
           final attributes = await sftp
               .stat(path)
               .timeout(const Duration(seconds: 3));
@@ -389,7 +450,7 @@ class SshConnection extends ChangeNotifier {
         }
       }
       histories.sort((a, b) => a.modified.compareTo(b.modified));
-      if (!_closed && !_disposed) {
+      if (_current(generation)) {
         commandHistory.mergeOlder(
           histories.expand((history) => history.commands),
         );
@@ -401,16 +462,19 @@ class SshConnection extends ChangeNotifier {
 
   /// Read through a separate SFTP channel; never run commands in the user's PTY.
   Future<List<RemotePathEntry>> listDirectory(String path) async {
+    final generation = _generation;
     if (status != ConnectionStatus.connected) return const [];
     try {
       final sftp = await (_sftp ??= _openSftp()).timeout(
         const Duration(seconds: 5),
       );
       if (path == '~' || path.startsWith('~/')) {
-        _remoteHome ??= await sftp
-            .absolute('.')
-            .timeout(const Duration(seconds: 5));
-        path = '$_remoteHome${path.substring(1)}';
+        final home =
+            _remoteHome ??
+            await sftp.absolute('.').timeout(const Duration(seconds: 5));
+        if (!_current(generation)) return const [];
+        _remoteHome = home;
+        path = '$home${path.substring(1)}';
       }
       final entries = await sftp
           .listdir(path)
@@ -438,7 +502,7 @@ class SshConnection extends ChangeNotifier {
         }
         result.add(RemotePathEntry(name, isDirectory: isDirectory));
       }
-      return result;
+      return _current(generation) ? result : const [];
     } catch (_) {
       // Servers may disable SFTP. Completion must not interrupt terminal input.
       return const [];
@@ -492,6 +556,7 @@ class SshConnection extends ChangeNotifier {
   }
 
   void _release() {
+    _generation++;
     _closed = true;
     unawaited(portForwards.close());
     final sftp = _sftp;
@@ -508,7 +573,9 @@ class SshConnection extends ChangeNotifier {
     }
     _subscriptions.clear();
     _shell?.close();
+    _shell = null;
     final client = _client;
+    _client = null;
     if (client != null) {
       // Peer disconnects can make flushing the final close packet fail.
       unawaited(client.close().catchError((Object _) {}));

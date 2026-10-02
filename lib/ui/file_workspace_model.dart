@@ -20,6 +20,7 @@ class FileLocationTab extends ChangeNotifier {
     this.session,
     this.ownsSession = false,
   }) {
+    _wasConnected = connected;
     session?.addListener(_connectionChanged);
   }
   final String id, name, initialPath;
@@ -33,6 +34,7 @@ class FileLocationTab extends ChangeNotifier {
   bool loading = false, showHidden = false, _disposed = false;
   String? error;
   int _request = 0;
+  late bool _wasConnected;
   bool get connected =>
       session == null || session!.status == ConnectionStatus.connected;
   List<RemoteFile> get visibleEntries => entries
@@ -166,10 +168,16 @@ class FileLocationTab extends ChangeNotifier {
 
   void _connectionChanged() {
     if (_disposed) return;
+    final reconnected = !_wasConnected && connected;
+    _wasConnected = connected;
     if (!connected) {
       _request++;
       loading = false;
       error = '连接已断开，点击重试以重新连接';
+    }
+    if (reconnected) {
+      unawaited(browse());
+      return;
     }
     notifyListeners();
   }

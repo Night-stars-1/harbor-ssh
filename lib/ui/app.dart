@@ -256,6 +256,40 @@ class _WorkspaceState extends State<Workspace> {
     }
   }
 
+  Future<void> _reconnect(SshConnection session) async {
+    if (_opening ||
+        !model.sessions.contains(session) ||
+        session.status == ConnectionStatus.connecting ||
+        session.status == ConnectionStatus.connected) {
+      return;
+    }
+    _opening = true;
+    try {
+      final host =
+          model.hosts.where((host) => host.id == session.host.id).firstOrNull ??
+          session.host;
+      final credentials = await _loginCredentialsFor(host);
+      if (!mounted || !model.sessions.contains(session)) return;
+      if (credentials == null) {
+        _opening = false;
+        await _requestMissingCredentials(host);
+        return;
+      }
+      await session.reconnect(
+        credentials,
+        model.repository,
+        (type, fingerprint) => _trustHost(host, type, fingerprint),
+        host: host,
+        confirmKeyChange: (type, fingerprint, previousKey) =>
+            _trustHost(host, type, fingerprint, previousKey: previousKey),
+      );
+    } catch (_) {
+      if (mounted) _message('重新连接失败，请检查凭据及系统安全存储权限。');
+    } finally {
+      _opening = false;
+    }
+  }
+
   Future<void> _testConnection(Host host, Credentials credentials) async {
     final connection = SshConnection(id: 'connection-test', host: host);
     try {
@@ -1009,6 +1043,7 @@ class _WorkspaceState extends State<Workspace> {
                                                 _terminalController,
                                             onSelect: model.selectSession,
                                             onConnect: _connect,
+                                            onReconnect: _reconnect,
                                             onClose: _closeSession,
                                             onFiles: _openSessionFiles,
                                             onPortForward: _openPortForwards,

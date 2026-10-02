@@ -22,6 +22,7 @@ class TerminalWorkspace extends StatefulWidget {
     required this.mobileController,
     required this.onSelect,
     required this.onConnect,
+    required this.onReconnect,
     required this.onClose,
     required this.onFiles,
     this.onPortForward,
@@ -41,6 +42,7 @@ class TerminalWorkspace extends StatefulWidget {
   final TerminalPaneController mobileController;
   final ValueChanged<String> onSelect;
   final Future<void> Function(Host) onConnect;
+  final Future<void> Function(SshConnection) onReconnect;
   final ValueChanged<SshConnection> onClose, onFiles;
   final ValueChanged<SshConnection>? onPortForward;
   final AiSettings Function()? aiSettings;
@@ -392,7 +394,7 @@ class _TerminalWorkspaceState extends State<TerminalWorkspace> {
                       : const [],
                   onReconnect: () {
                     _activate(side);
-                    widget.onConnect(session.host);
+                    widget.onReconnect(session);
                   },
                   onClose: () => widget.onClose(session),
                   onFiles: () => widget.onFiles(session),

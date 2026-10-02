@@ -11,6 +11,51 @@ import 'package:harbor_ssh/ui/theme.dart';
 import 'file_browser_test.dart' show FileTestSession;
 
 void main() {
+  testWidgets('终端原会话重连后自动恢复其 SFTP 标签和原目录', (tester) async {
+    final session = _TrackedSession();
+    final model = FileWorkspaceModel();
+    addTearDown(session.dispose);
+    addTearDown(model.dispose);
+    final tab = model.add(
+      1,
+      name: session.host.name,
+      files: session.files,
+      session: session,
+    );
+    var requests = 0;
+    await _showWorkspace(
+      tester,
+      model,
+      sessions: [session],
+      onConnect: (_) async {
+        requests++;
+        return null;
+      },
+    );
+    await tab.browse('/home/tester/documents');
+    tab.filter('report');
+    tab.toggleHidden();
+    session.close();
+    await tester.pumpAndSettle();
+    expect(tab.error, isNotNull);
+    session.status = ConnectionStatus.connecting;
+    session.notifyListeners();
+    await tester.pump();
+    expect(find.byType(CircularProgressIndicator), findsOneWidget);
+    expect(find.text('重试'), findsNothing);
+    session.status = ConnectionStatus.connected;
+    session.notifyListeners();
+    await tester.pumpAndSettle();
+    expect(model.tabs.single, same(tab));
+    expect(tab.session, same(session));
+    expect(tab.path, '/home/tester/documents');
+    expect(tab.query, 'report');
+    expect(tab.showHidden, isTrue);
+    expect(tab.error, isNull);
+    expect(requests, 0);
+    expect(tester.takeException(), isNull);
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
   for (final width in [320.0, 1100.0]) {
     testWidgets('断线重试在原标签重连并保留目录，连续点击只连接一次 $width', (tester) async {
       tester.view.physicalSize = Size(width, 740);

@@ -10,6 +10,43 @@ import 'package:xterm/xterm.dart';
 import 'support.dart';
 
 void main() {
+  testWidgets('分屏重新连接只作用于原会话，保留位置和终端状态', (tester) async {
+    tester.view.physicalSize = const Size(1200, 800);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    final sessions = [_Session('left'), _Session('right')];
+    for (final session in sessions) {
+      addTearDown(session.dispose);
+    }
+    final key = GlobalKey<_HarnessState>();
+    await tester.pumpWidget(_Harness(key: key, sessions: sessions));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const ValueKey('terminal-split-menu-0')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('左右分屏'));
+    await tester.pumpAndSettle();
+    final right = find.byKey(const ValueKey('terminal-region-1'));
+    final rect = tester.getRect(right);
+    final view = find.descendant(
+      of: right,
+      matching: find.byType(TerminalView),
+    );
+    final state = tester.state(view);
+    sessions[1].status = ConnectionStatus.closed;
+    key.currentState!.refresh();
+    await tester.pumpAndSettle();
+    await tester.tap(find.descendant(of: right, matching: find.text('重新连接')));
+    await tester.pumpAndSettle();
+    expect(key.currentState!.reconnected, [sessions[1]]);
+    expect(key.currentState!.sessions, sessions);
+    expect(tester.getRect(right), rect);
+    expect(tester.state(view), same(state));
+    expect(sessions[1].terminal.buffer.getText(), contains('right output'));
+    expect(find.byType(TerminalView), findsNWidgets(2));
+    expect(tester.takeException(), isNull);
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
   testWidgets('六个分屏保持最小宽度，可滚动定位并关闭空面板', (tester) async {
     tester.view.physicalSize = const Size(1000, 700);
     tester.view.devicePixelRatio = 1;
@@ -252,6 +289,7 @@ class _HarnessState extends State<_Harness> {
   late final sessions = [...widget.sessions];
   late _Session active = sessions.first;
   final controller = TerminalPaneController();
+  final reconnected = <SshConnection>[];
   void refresh() => setState(() {});
   void add(_Session session) => setState(() {
     sessions.add(session);
@@ -277,6 +315,11 @@ class _HarnessState extends State<_Harness> {
           onSelect: (id) =>
               setState(() => active = sessions.firstWhere((s) => s.id == id)),
           onConnect: (Host host) async => add(_Session('created')),
+          onReconnect: (session) async {
+            reconnected.add(session);
+            session.status = ConnectionStatus.connected;
+            refresh();
+          },
           onClose: remove,
           onFiles: (_) {},
         ),
