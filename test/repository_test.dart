@@ -8,6 +8,35 @@ import 'support.dart';
 
 void main() {
   group('登录凭证解析', () {
+    test('免密码连接无需存储凭证，也不使用遗留密码或私钥', () async {
+      final repository = memoryRepository();
+      const target = Host(
+        id: 'cnb',
+        name: 'CNB',
+        address: 'cnb.space',
+        username: 'cnb-token',
+        authMethod: AuthMethod.none,
+        userId: 'stale-key',
+      );
+      Future<void> check() async {
+        final credentials = await repository.loginCredentials(target);
+        expect(credentials, isNotNull);
+        expect(credentials!.password, isEmpty);
+        expect(credentials.privateKey, isEmpty);
+      }
+
+      await check();
+      await repository.saveCredentials(
+        target.id,
+        const Credentials(password: 'stale-password'),
+      );
+      await repository.saveUserCredentials(
+        target.userId,
+        const Credentials(privateKey: 'stale-key'),
+      );
+      await check();
+    });
+
     const host = Host(
       id: 'key-host',
       name: 'Server',

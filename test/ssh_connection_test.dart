@@ -51,9 +51,56 @@ void main() {
         name: 'Fixture',
         address: '127.0.0.1',
         port: port,
-        username: 'tester',
+        username: method == AuthMethod.none ? 'cnb-fixture-token' : 'tester',
         authMethod: method,
       );
+      test('免密码认证可打开终端和 SFTP，拒绝不允许免密码的账户', () async {
+        final connection = SshConnection(
+          id: 'no-password',
+          host: host(method: AuthMethod.none),
+        );
+        addTearDown(connection.dispose);
+        await connection.connect(
+          const Credentials(),
+          memoryRepository(),
+          (_, _) async => true,
+        );
+        expect(
+          connection.status,
+          ConnectionStatus.connected,
+          reason: connection.error,
+        );
+        await eventually(
+          () => connection.terminal.buffer.getText().contains('测试 connected'),
+        );
+        expect((await connection.files.browse('~')).entries, isNotEmpty);
+        connection.send('no-password-session\r');
+        await eventually(
+          () => connection.terminal.buffer.getText().contains(
+            'ECHO=no-password-session',
+          ),
+        );
+
+        final rejected = SshConnection(
+          id: 'password-required',
+          host: Host(
+            id: 'rejected',
+            name: 'Password required',
+            address: '127.0.0.1',
+            port: port,
+            username: 'tester',
+            authMethod: AuthMethod.none,
+          ),
+        );
+        addTearDown(rejected.dispose);
+        await rejected.connect(
+          const Credentials(),
+          memoryRepository(),
+          (_, _) async => true,
+        );
+        expect(rejected.status, ConnectionStatus.failed);
+      });
+
       test('密码认证、UTF-8 输出、键盘输入、窗口缩放和远程退出', () async {
         final connection = SshConnection(id: '1', host: host());
         addTearDown(connection.dispose);
@@ -668,12 +715,16 @@ void main() {
           addTearDown(connection.dispose);
           final repository = memoryRepository();
           await connection.connect(
-            method == AuthMethod.password
-                ? const Credentials(password: 'fixture-password')
-                : Credentials(
-                    privateKey: privateKey,
-                    passphrase: 'fixture-passphrase',
-                  ),
+            switch (method) {
+              AuthMethod.password => const Credentials(
+                password: 'fixture-password',
+              ),
+              AuthMethod.privateKey => Credentials(
+                privateKey: privateKey,
+                passphrase: 'fixture-passphrase',
+              ),
+              AuthMethod.none => const Credentials(),
+            },
             repository,
             (_, _) async => true,
             openShell: false,

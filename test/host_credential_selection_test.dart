@@ -295,7 +295,7 @@ void main() {
     await tester.ensureVisible(find.text('保存连接'));
     await tester.tap(find.text('保存连接'));
     await tester.pumpAndSettle();
-    expect(model.hosts.single.authMethod, AuthMethod.password);
+    expect(model.hosts.single.authMethod, AuthMethod.none);
     expect(model.hosts.single.userId, isEmpty);
     await tester.pumpWidget(const SizedBox.shrink());
   });

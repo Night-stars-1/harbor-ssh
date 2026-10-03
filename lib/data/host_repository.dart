@@ -175,6 +175,7 @@ class HostRepository {
   /// A saved label or a credential for another authentication method is not
   /// sufficient to log in. Keep this resolution shared by terminal and SFTP.
   Future<Credentials?> loginCredentials(Host host) async {
+    if (host.authMethod == AuthMethod.none) return const Credentials();
     bool usable(Credentials? value) =>
         value != null &&
         (host.authMethod == AuthMethod.password

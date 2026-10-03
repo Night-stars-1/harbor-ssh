@@ -7,6 +7,83 @@ import 'package:harbor_ssh/ui/host_editor.dart';
 import 'support.dart';
 
 void main() {
+  testWidgets('密码留空时测试和保存免密码连接，重新编辑可改用密码', (tester) async {
+    final repository = memoryRepository();
+    const username =
+        'cnb-kvr-1k40i3ljv-001.36fec6bd-9fc0-43ae-9f78-3de159c9cf4e-p13';
+    const cnbHost = Host(
+      id: 'cnb-host',
+      name: 'CNB',
+      address: 'cnb.space',
+      username: username,
+    );
+    Host? tested;
+    Credentials? testedCredentials;
+    Future<void> open(Host host) async {
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Scaffold(
+            body: Builder(
+              builder: (context) => TextButton(
+                onPressed: () => showDialog<void>(
+                  context: context,
+                  builder: (_) => HostEditor(
+                    host: host,
+                    onSave: (host, credentials) async {
+                      await repository.saveHosts([host]);
+                      await repository.saveCredentials(host.id, credentials);
+                    },
+                    onTest: (host, credentials) async {
+                      tested = host;
+                      testedCredentials = credentials;
+                    },
+                  ),
+                ),
+                child: const Text('编辑'),
+              ),
+            ),
+          ),
+        ),
+      );
+      await tester.tap(find.text('编辑'));
+      await tester.pumpAndSettle();
+    }
+
+    await open(cnbHost);
+    expect(find.text('留空时尝试免密码连接'), findsOneWidget);
+    await tester.ensureVisible(find.text('测试连接'));
+    await tester.tap(find.text('测试连接'));
+    await tester.pumpAndSettle();
+    expect(tested?.authMethod, AuthMethod.none);
+    expect(tested?.username, username);
+    expect(testedCredentials?.password, isEmpty);
+    expect(testedCredentials?.privateKey, isEmpty);
+    expect(find.text('连接成功，SSH 身份验证已通过。'), findsOneWidget);
+    await tester.ensureVisible(find.text('保存连接'));
+    await tester.tap(find.text('保存连接'));
+    await tester.pumpAndSettle();
+    final saved = (await repository.loadHosts()).single;
+    expect(saved.authMethod, AuthMethod.none);
+    expect(saved.userId, isEmpty);
+    expect(await repository.credentials(saved.id), isNull);
+    expect(await repository.loginCredentials(saved), isNotNull);
+
+    await open(saved);
+    await tester.enterText(
+      find.widgetWithText(TextFormField, '密码'),
+      'new-password',
+    );
+    await tester.ensureVisible(find.text('保存连接'));
+    await tester.tap(find.text('保存连接'));
+    await tester.pumpAndSettle();
+    expect(
+      (await repository.loadHosts()).single.authMethod,
+      AuthMethod.password,
+    );
+    expect((await repository.credentials(saved.id))?.password, 'new-password');
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
+
   testWidgets('新建凭证默认展示密钥操作，生成后保存私钥和公钥', (tester) async {
     SshUser? savedUser;
     Credentials? savedCredentials;

@@ -1,6 +1,6 @@
 import 'package:flutter/foundation.dart';
 
-enum AuthMethod { password, privateKey }
+enum AuthMethod { password, privateKey, none }
 
 @immutable
 class Host {

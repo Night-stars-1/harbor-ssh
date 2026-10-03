@@ -44,9 +44,10 @@ class _HostEditorState extends State<HostEditor> {
     text: widget.host?.username ?? 'root',
   );
   late final _password = TextEditingController(
-    text:
-        widget.credentials?.password ??
-        widget.userCredentials[widget.host?.userId]?.password,
+    text: widget.host?.authMethod == AuthMethod.none
+        ? ''
+        : widget.credentials?.password ??
+              widget.userCredentials[widget.host?.userId]?.password,
   );
   late AuthMethod _auth = widget.host?.authMethod ?? AuthMethod.password;
   bool _passwordVisible = false;
@@ -69,7 +70,7 @@ class _HostEditorState extends State<HostEditor> {
     if (_userId.isNotEmpty && _users.every((user) => user.id != _userId)) {
       _userId = '';
     }
-    if (_auth == AuthMethod.password) _userId = '';
+    if (_auth != AuthMethod.privateKey) _userId = '';
   }
 
   @override
@@ -139,9 +140,9 @@ class _HostEditorState extends State<HostEditor> {
   SshUser? get _selectedUser =>
       _users.where((user) => user.id == _userId).firstOrNull;
 
-  Credentials? get _connectionCredentials => _auth == AuthMethod.password
-      ? (_password.text.isEmpty ? null : Credentials(password: _password.text))
-      : _userCredentials[_userId];
+  Credentials? get _connectionCredentials => _auth == AuthMethod.privateKey
+      ? _userCredentials[_userId]
+      : Credentials(password: _password.text);
 
   String? _required(String? value) =>
       value == null || value.trim().isEmpty ? '请填写此项' : null;
@@ -174,15 +175,9 @@ class _HostEditorState extends State<HostEditor> {
     if (_busy) return;
     if (!_form.currentState!.validate()) return;
     final credentials = _connectionCredentials;
-    if ((test || _auth == AuthMethod.privateKey) &&
-        (credentials == null ||
-            (_auth == AuthMethod.privateKey &&
-                credentials.privateKey.trim().isEmpty))) {
-      setState(
-        () => _error = _auth == AuthMethod.password
-            ? '请输入密码后测试连接。'
-            : '请先在凭证页补全所选凭证的私钥。',
-      );
+    if (_auth == AuthMethod.privateKey &&
+        (credentials == null || credentials.privateKey.trim().isEmpty)) {
+      setState(() => _error = '请先在凭证页补全所选凭证的私钥。');
       return;
     }
     setState(() {
@@ -197,7 +192,11 @@ class _HostEditorState extends State<HostEditor> {
       port: int.parse(_port.text),
       username: _username.text.trim(),
       tags: _collectTags(),
-      authMethod: _auth,
+      authMethod: _auth == AuthMethod.privateKey
+          ? AuthMethod.privateKey
+          : _password.text.isEmpty
+          ? AuthMethod.none
+          : AuthMethod.password,
       favorite: widget.host?.favorite ?? false,
       userId: _auth == AuthMethod.privateKey ? _userId : '',
     );
@@ -208,7 +207,7 @@ class _HostEditorState extends State<HostEditor> {
       } else {
         await widget.onSave(
           host,
-          _auth == AuthMethod.password ? credentials : null,
+          host.authMethod == AuthMethod.password ? credentials : null,
         );
         if (mounted) Navigator.of(context).pop();
       }
@@ -380,7 +379,7 @@ class _HostEditorState extends State<HostEditor> {
                   validator: _required,
                 ),
                 const SizedBox(height: 16),
-                if (_auth == AuthMethod.password)
+                if (_auth != AuthMethod.privateKey)
                   TextFormField(
                     controller: _password,
                     enabled: !_busy,
@@ -389,6 +388,8 @@ class _HostEditorState extends State<HostEditor> {
                     enableSuggestions: false,
                     decoration: InputDecoration(
                       labelText: '密码',
+                      hintText: '可留空',
+                      helperText: '留空时尝试免密码连接',
                       suffixIcon: IconButton(
                         tooltip: _passwordVisible ? '隐藏密码' : '显示密码',
                         onPressed: _busy
@@ -404,7 +405,7 @@ class _HostEditorState extends State<HostEditor> {
                       ),
                     ),
                   ),
-                if (_auth == AuthMethod.password) const SizedBox(height: 16),
+                if (_auth != AuthMethod.privateKey) const SizedBox(height: 16),
                 LayoutBuilder(
                   builder: (context, constraints) {
                     final colors = Theme.of(context).colorScheme;

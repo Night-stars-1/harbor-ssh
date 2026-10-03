@@ -241,6 +241,8 @@ class Server(paramiko.ServerInterface):
         self.metrics_queries = 0
     def get_allowed_auths(self, username):
         return "password,publickey"
+    def check_auth_none(self, username):
+        return paramiko.AUTH_SUCCESSFUL if username == "cnb-fixture-token" else paramiko.AUTH_FAILED
     def check_auth_password(self, username, password):
         return paramiko.AUTH_SUCCESSFUL if (username, password) == ("tester", "fixture-password") else paramiko.AUTH_FAILED
     def check_auth_publickey(self, username, key):
