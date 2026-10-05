@@ -1,7 +1,10 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:harbor_ssh/data/ssh_connection.dart';
+import 'package:harbor_ssh/data/terminal_ai.dart';
 import 'package:harbor_ssh/domain/host.dart';
+import 'package:harbor_ssh/ui/ai_task_controller.dart';
+import 'package:harbor_ssh/ui/terminal_ai_panel.dart';
 import 'package:harbor_ssh/ui/terminal_pane.dart';
 import 'package:harbor_ssh/ui/terminal_workspace.dart';
 import 'package:harbor_ssh/ui/theme.dart';
@@ -267,6 +270,102 @@ void main() {
     expect(tester.takeException(), isNull);
     await tester.pumpWidget(const SizedBox.shrink());
   });
+
+  for (final width in [390.0, 1200.0]) {
+    testWidgets('切回已打开 AI 的终端时面板和对话还在 $width', (tester) async {
+      tester.view.physicalSize = Size(width, 800);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+      final first = _Session('first');
+      final second = _Session('second');
+      addTearDown(first.dispose);
+      addTearDown(second.dispose);
+      final key = GlobalKey<_HarnessState>();
+      await tester.pumpWidget(
+        _Harness(
+          key: key,
+          sessions: [first, second],
+          aiSettings: () => const AiSettings(
+            baseUrl: 'https://ai.example.com/v1',
+            model: 'test',
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      Future<void> openAi() async {
+        if (width < 900) {
+          key.currentState!.controller.selectOption('ai');
+        } else {
+          await tester.tap(find.byKey(const ValueKey('terminal-ai')));
+        }
+        await tester.pumpAndSettle();
+      }
+
+      await openAi();
+      expect(find.byType(TerminalAiPanel), findsOneWidget);
+      final task =
+          tester.widget<TerminalAiPanel>(find.byType(TerminalAiPanel)).task
+            ..entries.add(AiTaskEntry('保留的对话', user: true))
+            ..running = true;
+      task.notifyListeners();
+      await tester.pump();
+      expect(find.text('保留的对话'), findsOneWidget);
+
+      key.currentState!.select('second');
+      await tester.pumpAndSettle();
+      expect(find.byType(TerminalAiPanel), findsNothing);
+      expect(task.running, isTrue);
+
+      // The pane is gone, but the parked assistant still hears the disconnect.
+      first.status = ConnectionStatus.closed;
+      first.notifyListeners();
+      await tester.pump();
+      expect(task.running, isFalse);
+      expect(task.status, 'SSH 已断开，AI 任务已停止');
+
+      first.status = ConnectionStatus.connected;
+      first.notifyListeners();
+      key.currentState!.select('first');
+      await tester.pumpAndSettle();
+      expect(find.byType(TerminalAiPanel), findsOneWidget);
+      expect(find.text('保留的对话'), findsOneWidget);
+      expect(
+        tester.widget<TerminalAiPanel>(find.byType(TerminalAiPanel)).task,
+        same(task),
+      );
+
+      await tester.tap(
+        find.descendant(
+          of: find.byType(TerminalAiPanel),
+          matching: find.byIcon(Icons.close_rounded),
+        ),
+      );
+      await tester.pumpAndSettle();
+      expect(find.byType(TerminalAiPanel), findsNothing);
+      key.currentState!.select('second');
+      await tester.pumpAndSettle();
+      key.currentState!.select('first');
+      await tester.pumpAndSettle();
+      expect(find.byType(TerminalAiPanel), findsNothing);
+
+      await openAi();
+      expect(find.text('保留的对话'), findsOneWidget);
+      expect(
+        tester.widget<TerminalAiPanel>(find.byType(TerminalAiPanel)).task,
+        same(task),
+      );
+
+      key.currentState!.select('second');
+      await tester.pumpAndSettle();
+      key.currentState!.remove(first);
+      await tester.pumpAndSettle();
+      expect(() => task.notifyListeners(), throwsFlutterError);
+      expect(tester.takeException(), isNull);
+      await tester.pumpWidget(const SizedBox.shrink());
+    });
+  }
 }
 
 class _Session extends SshConnection {
@@ -279,8 +378,9 @@ class _Session extends SshConnection {
 }
 
 class _Harness extends StatefulWidget {
-  const _Harness({super.key, required this.sessions});
+  const _Harness({super.key, required this.sessions, this.aiSettings});
   final List<_Session> sessions;
+  final AiSettings Function()? aiSettings;
   @override
   State<_Harness> createState() => _HarnessState();
 }
@@ -291,6 +391,9 @@ class _HarnessState extends State<_Harness> {
   final controller = TerminalPaneController();
   final reconnected = <SshConnection>[];
   void refresh() => setState(() {});
+  void select(String id) => setState(() {
+    active = sessions.firstWhere((session) => session.id == id);
+  });
   void add(_Session session) => setState(() {
     sessions.add(session);
     active = session;
@@ -312,6 +415,7 @@ class _HarnessState extends State<_Harness> {
           desktop: constraints.maxWidth >= 900,
           visible: true,
           mobileController: controller,
+          aiSettings: widget.aiSettings,
           onSelect: (id) =>
               setState(() => active = sessions.firstWhere((s) => s.id == id)),
           onConnect: (Host host) async => add(_Session('created')),

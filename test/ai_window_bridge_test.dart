@@ -8,6 +8,8 @@ import 'package:harbor_ssh/data/ai_image.dart';
 import 'package:harbor_ssh/data/terminal_ai.dart';
 import 'package:harbor_ssh/domain/appearance.dart';
 import 'package:harbor_ssh/ui/ai_task_controller.dart';
+import 'package:harbor_ssh/ui/ai_markdown_code_block.dart';
+import 'package:harbor_ssh/ui/ai_markdown_table.dart';
 import 'package:harbor_ssh/ui/ai_window_bridge.dart';
 import 'package:harbor_ssh/ui/terminal_ai_panel.dart';
 import 'package:harbor_ssh/ui/theme.dart';
@@ -412,6 +414,18 @@ void main() {
     h.host.register('s1', h.task, '生产服务器', onDock: h.dock);
     h.task.entries.add(AiTaskEntry('已连接生产服务器', user: true));
     h.task.entries.add(AiTaskEntry('准备就绪'));
+    h.task.entries.add(
+      AiTaskEntry('''用 `bash` 运行：
+
+```bash
+bash deploy-marzban.sh 1
+```
+
+| 命令 | 作用 |
+| --- | --- |
+| `bash deploy-marzban.sh 1` | 安装主面板 |
+'''),
+    );
     await h.host.open('s1');
     await h.remote.initialize();
 
@@ -426,6 +440,12 @@ void main() {
     await tester.pumpAndSettle();
     expect(find.text('已连接生产服务器'), findsOneWidget);
     expect(find.text('准备就绪'), findsOneWidget);
+    expect(find.byType(AiMarkdownCodeBlock), findsOneWidget);
+    expect(find.text('Bash'), findsOneWidget);
+    expect(find.byType(AiMarkdownTable), findsOneWidget);
+    expect(find.text('命令'), findsOneWidget);
+    expect(find.text('作用'), findsOneWidget);
+    expect(find.text('安装主面板'), findsOneWidget);
 
     await tester.ensureVisible(find.byKey(const ValueKey('ai-task-input')));
     await tester.enterText(

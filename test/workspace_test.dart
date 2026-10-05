@@ -1088,6 +1088,8 @@ class _ReconnectSession extends SshConnection {
     TrustHost prompt, {
     Host? host,
     ConfirmHostKeyChange? confirmKeyChange,
+    TrustJumpHost? trustJumpHost,
+    ConfirmJumpHostKeyChange? confirmJumpHostKeyChange,
   }) async {
     requests++;
     this.credentials = credentials;

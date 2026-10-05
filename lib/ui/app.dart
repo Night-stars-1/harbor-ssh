@@ -197,6 +197,7 @@ class _WorkspaceState extends State<Workspace> {
           host: host,
           credentials: credentials,
           users: model.users,
+          hosts: model.hosts,
           userCredentials: userCredentials,
           onSave: model.saveHost,
           onTest: _testConnection,
@@ -284,6 +285,8 @@ class _WorkspaceState extends State<Workspace> {
         model.repository,
         (type, fingerprint) => _trustHost(host, type, fingerprint),
         host: host,
+        trustJumpHost: _trustHost,
+        confirmJumpHostKeyChange: _confirmJumpHostKeyChange,
         confirmKeyChange: (type, fingerprint, previousKey) =>
             _trustHost(host, type, fingerprint, previousKey: previousKey),
       );
@@ -302,6 +305,8 @@ class _WorkspaceState extends State<Workspace> {
         model.repository,
         (type, fingerprint) => _trustHost(host, type, fingerprint),
         openShell: false,
+        trustJumpHost: _trustHost,
+        confirmJumpHostKeyChange: _confirmJumpHostKeyChange,
         confirmKeyChange: (type, fingerprint, previousKey) =>
             _trustHost(host, type, fingerprint, previousKey: previousKey),
       );
@@ -318,6 +323,8 @@ class _WorkspaceState extends State<Workspace> {
       host,
       credentials,
       (type, fingerprint) => _trustHost(host, type, fingerprint),
+      trustJumpHost: _trustHost,
+      confirmJumpHostKeyChange: _confirmJumpHostKeyChange,
       confirmKeyChange: (type, fingerprint, previousKey) =>
           _trustHost(host, type, fingerprint, previousKey: previousKey),
     );
@@ -374,6 +381,8 @@ class _WorkspaceState extends State<Workspace> {
       model.repository,
       (type, fingerprint) => _trustHost(host, type, fingerprint),
       openShell: false,
+      trustJumpHost: _trustHost,
+      confirmJumpHostKeyChange: _confirmJumpHostKeyChange,
       confirmKeyChange: (type, fingerprint, previousKey) =>
           _trustHost(host, type, fingerprint, previousKey: previousKey),
     );
@@ -385,6 +394,13 @@ class _WorkspaceState extends State<Workspace> {
     }
     return session;
   }
+
+  Future<bool> _confirmJumpHostKeyChange(
+    Host host,
+    String type,
+    String fingerprint,
+    String previousKey,
+  ) => _trustHost(host, type, fingerprint, previousKey: previousKey);
 
   Future<bool> _trustHost(
     Host host,
@@ -478,7 +494,8 @@ class _WorkspaceState extends State<Workspace> {
       final live = session.host;
       if (live.id == host.id &&
           live.endpoint == host.endpoint &&
-          live.username == host.username) {
+          live.username == host.username &&
+          live.jumpHostId == host.jumpHostId) {
         return session;
       }
     }
@@ -581,6 +598,22 @@ class _WorkspaceState extends State<Workspace> {
             return accepted;
           },
           openShell: false,
+          trustJumpHost: (jump, type, fingerprint) async {
+            final accepted = await _trustHost(jump, type, fingerprint);
+            declined = !accepted;
+            return accepted;
+          },
+          confirmJumpHostKeyChange:
+              (jump, type, fingerprint, previousKey) async {
+                final accepted = await _trustHost(
+                  jump,
+                  type,
+                  fingerprint,
+                  previousKey: previousKey,
+                );
+                declined = !accepted;
+                return accepted;
+              },
           confirmKeyChange: (type, fingerprint, previousKey) async {
             final accepted = await _trustHost(
               target,

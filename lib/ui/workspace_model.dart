@@ -495,6 +495,8 @@ class WorkspaceModel extends ChangeNotifier {
     Credentials credentials,
     TrustHost prompt, {
     ConfirmHostKeyChange? confirmKeyChange,
+    TrustJumpHost? trustJumpHost,
+    ConfirmJumpHostKeyChange? confirmJumpHostKeyChange,
   }) {
     showingSettings = false;
     showingFiles = false;
@@ -513,6 +515,8 @@ class WorkspaceModel extends ChangeNotifier {
         repository,
         prompt,
         confirmKeyChange: confirmKeyChange,
+        trustJumpHost: trustJumpHost,
+        confirmJumpHostKeyChange: confirmJumpHostKeyChange,
       ),
     );
   }

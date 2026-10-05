@@ -54,6 +54,230 @@ void main() {
         username: method == AuthMethod.none ? 'cnb-fixture-token' : 'tester',
         authMethod: method,
       );
+      test('保存两级中转，独立认证和指纹，终端与 SFTP 工作并可重连', () async {
+        Future<(Process, int)> gateway() async {
+          final process = await Process.start(
+            'python',
+            ['tool/port_forward_fixture.py'],
+            environment: {
+              'HARBOR_FIXTURE_PUBLIC_KEY': publicKey,
+              'PYTHONUTF8': '1',
+            },
+          );
+          addTearDown(() async {
+            process.kill();
+            await process.exitCode;
+          });
+          final ready = Completer<int>();
+          process.stdout
+              .transform(utf8.decoder)
+              .transform(const LineSplitter())
+              .listen((line) {
+                if (!ready.isCompleted) {
+                  ready.complete((jsonDecode(line) as Map)['port'] as int);
+                }
+              });
+          process.stderr.transform(utf8.decoder).listen((line) {
+            if (!ready.isCompleted) ready.completeError(StateError(line));
+          });
+          return (
+            process,
+            await ready.future.timeout(const Duration(seconds: 20)),
+          );
+        }
+
+        final outerProcess = await gateway();
+        final innerProcess = await gateway();
+        final outer = Host(
+          id: 'outer',
+          name: '公网堡垒机',
+          address: '127.0.0.1',
+          port: outerProcess.$2,
+          username: 'tester',
+        );
+        final inner = Host(
+          id: 'inner',
+          name: '内网堡垒机',
+          address: 'jump-fixture.invalid',
+          port: innerProcess.$2,
+          username: 'tester',
+          authMethod: AuthMethod.privateKey,
+          userId: 'gateway-key',
+          jumpHostId: outer.id,
+        );
+        final target = Host(
+          id: 'target',
+          name: '目标服务器',
+          address: 'jump-fixture.invalid',
+          port: port,
+          username: 'cnb-fixture-token',
+          authMethod: AuthMethod.none,
+          jumpHostId: inner.id,
+        );
+        final repository = memoryRepository();
+        await repository.saveHosts([outer, inner, target]);
+        await repository.saveCredentials(
+          outer.id,
+          const Credentials(password: 'fixture-password'),
+        );
+        await repository.saveUserCredentials(
+          'gateway-key',
+          Credentials(privateKey: privateKey, passphrase: 'fixture-passphrase'),
+        );
+        final saved = (await repository.loadHosts()).last;
+        expect(saved.jumpHostId, inner.id);
+        expect(saved.withFavorite(true).jumpHostId, inner.id);
+        final trusted = <String>[];
+        final fingerprints = <String>[];
+        final connection = SshConnection(id: 'jump-session', host: saved);
+        addTearDown(connection.dispose);
+        await connection.connect(
+          (await repository.loginCredentials(saved))!,
+          repository,
+          (_, fingerprint) async {
+            trusted.add(target.id);
+            fingerprints.add(fingerprint);
+            return true;
+          },
+          trustJumpHost: (hop, _, fingerprint) async {
+            trusted.add(hop.id);
+            fingerprints.add(fingerprint);
+            return true;
+          },
+        );
+        expect(
+          connection.status,
+          ConnectionStatus.connected,
+          reason: connection.error,
+        );
+        expect(trusted, [outer.id, inner.id, target.id]);
+        expect(fingerprints.toSet(), hasLength(3));
+        connection.send('jump-session\r');
+        await eventually(
+          () => connection.terminal.buffer.getText().contains(
+            'ECHO=jump-session',
+          ),
+        );
+        final listing = await connection.files.browse('~');
+        final path = '${listing.path}/jump-transfer.txt';
+        final content = Uint8List.fromList(utf8.encode('中转 SFTP transfer'));
+        await connection.files.upload(
+          path,
+          Stream.value(content),
+          cancellation: TransferCancellation(),
+          onProgress: (_) {},
+        );
+        final received = <int>[];
+        await connection.files.download(
+          path,
+          (bytes) async => received.addAll(bytes),
+          cancellation: TransferCancellation(),
+          onProgress: (_) {},
+        );
+        expect(received, content);
+        connection.send('exit\r');
+        await eventually(() => connection.status == ConnectionStatus.closed);
+        await connection.reconnect(
+          const Credentials(),
+          repository,
+          (_, _) async => fail('目标指纹已保存，不应重复确认'),
+          trustJumpHost: (_, _, _) async => fail('中转指纹已保存，不应重复确认'),
+        );
+        expect(
+          connection.status,
+          ConnectionStatus.connected,
+          reason: connection.error,
+        );
+        connection.send('jump-reconnected\r');
+        await eventually(
+          () => connection.terminal.buffer.getText().contains(
+            'ECHO=jump-reconnected',
+          ),
+        );
+        expect((await connection.files.browse('~')).entries, isNotEmpty);
+
+        // A changed gateway key must be confirmed against that gateway, not
+        // against the target. Rejecting it must stop the whole route.
+        connection.close();
+        await repository.forgetHostKey(outer);
+        await repository.verifyHost(
+          outer,
+          'ssh-rsa',
+          'changed-key',
+          (_, _) async => true,
+        );
+        Host? changedHop;
+        await connection.reconnect(
+          const Credentials(),
+          repository,
+          (_, _) async => fail('拒绝中转指纹后不应连接目标'),
+          confirmJumpHostKeyChange: (hop, _, _, previous) async {
+            changedHop = hop;
+            expect(previous, 'ssh-rsa changed-key');
+            return false;
+          },
+        );
+        expect(changedHop?.id, outer.id);
+        expect(connection.status, ConnectionStatus.failed);
+        expect(connection.error, contains(outer.name));
+
+        await repository.saveUserCredentials('gateway-key', null);
+        await connection.reconnect(
+          const Credentials(),
+          repository,
+          (_, _) async => fail('缺少中转凭证时不应连接目标'),
+          trustJumpHost: (_, _, _) async => fail('缺少中转凭证时不应开始认证'),
+        );
+        expect(connection.status, ConnectionStatus.failed);
+        expect(connection.error, contains('缺少登录凭证'));
+        expect(connection.error, contains(inner.name));
+        await repository.saveUserCredentials(
+          'gateway-key',
+          Credentials(privateKey: privateKey, passphrase: 'fixture-passphrase'),
+        );
+
+        // Restoring trust and retrying preserves the same terminal session.
+        await repository.forgetHostKey(outer);
+        await connection.reconnect(
+          const Credentials(),
+          repository,
+          (_, _) async => true,
+          trustJumpHost: (_, _, _) async => true,
+        );
+        expect(
+          connection.status,
+          ConnectionStatus.connected,
+          reason: connection.error,
+        );
+        outerProcess.$1.kill();
+        await outerProcess.$1.exitCode;
+        await eventually(() => connection.status != ConnectionStatus.connected);
+
+        // Invalid routes fail before any dial and never fall back to direct.
+        for (final configuration in [
+          [target],
+          [
+            Host(
+              id: inner.id,
+              name: inner.name,
+              address: inner.address,
+              port: inner.port,
+              username: inner.username,
+              jumpHostId: target.id,
+            ),
+            target,
+          ],
+        ]) {
+          await repository.saveHosts(configuration);
+          await connection.reconnect(
+            const Credentials(),
+            repository,
+            (_, _) async => fail('无效中转配置不应产生指纹请求'),
+          );
+          expect(connection.status, ConnectionStatus.failed);
+          expect(connection.error, contains('中转主机'));
+        }
+      });
       test('免密码认证可打开终端和 SFTP，拒绝不允许免密码的账户', () async {
         final connection = SshConnection(
           id: 'no-password',

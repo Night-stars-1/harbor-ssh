@@ -14,8 +14,9 @@ class Host {
     this.authMethod = AuthMethod.password,
     this.favorite = false,
     this.userId = '',
+    this.jumpHostId = '',
   });
-  final String id, name, address, username, userId;
+  final String id, name, address, username, userId, jumpHostId;
   final List<String> tags;
   final int port;
   final AuthMethod authMethod;
@@ -33,6 +34,7 @@ class Host {
     authMethod: authMethod,
     favorite: value,
     userId: userId,
+    jumpHostId: jumpHostId,
   );
   Map<String, Object> toJson() => {
     'id': id,
@@ -44,6 +46,7 @@ class Host {
     'authMethod': authMethod.name,
     'favorite': favorite,
     'userId': userId,
+    if (jumpHostId.isNotEmpty) 'jumpHostId': jumpHostId,
   };
   factory Host.fromJson(Map<String, dynamic> json) => Host(
     id: json['id'] as String,
@@ -55,6 +58,7 @@ class Host {
     authMethod: AuthMethod.values.byName(json['authMethod'] as String),
     favorite: json['favorite'] as bool? ?? false,
     userId: json['userId'] as String? ?? '',
+    jumpHostId: json['jumpHostId'] as String? ?? '',
   );
 
   /// `tags` 数组优先；仅当字段缺失（或为 null）时才把旧数据的
@@ -81,6 +85,27 @@ class Host {
       tags.add(tag);
     }
     return tags;
+  }
+}
+
+/// Resolve the outermost jump host first, keeping the supplied target's edits.
+/// Missing references and cycles must never fall back to a direct connection.
+List<Host> resolveSshRoute(Host target, Iterable<Host> hosts) {
+  final byId = {for (final host in hosts) host.id: host};
+  final visited = <String>{};
+  final route = <Host>[];
+  var current = target;
+  while (true) {
+    if (!visited.add(current.id)) {
+      throw const FormatException('中转主机存在循环引用，请修改连接配置。');
+    }
+    route.add(current);
+    if (current.jumpHostId.isEmpty) return route.reversed.toList();
+    final next = byId[current.jumpHostId];
+    if (next == null) {
+      throw FormatException('「${current.name}」的中转主机已不存在，请重新选择。');
+    }
+    current = next;
   }
 }
 

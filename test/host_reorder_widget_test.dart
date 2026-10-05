@@ -24,6 +24,8 @@ class _RecordingWorkspace extends WorkspaceModel {
     Credentials credentials,
     TrustHost prompt, {
     ConfirmHostKeyChange? confirmKeyChange,
+    TrustJumpHost? trustJumpHost,
+    ConfirmJumpHostKeyChange? confirmJumpHostKeyChange,
   }) {
     connections++;
   }

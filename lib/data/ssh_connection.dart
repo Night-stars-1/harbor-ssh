@@ -55,6 +55,8 @@ class SshConnection extends ChangeNotifier {
   ConnectionStatus status = ConnectionStatus.connecting;
   String? error;
   SSHClient? _client;
+  final _routeClients = <SSHClient>[];
+  SSHSocket? _pendingSocket;
   SSHSession? _shell;
   Future<SftpClient>? _sftp;
   String? _remoteHome;
@@ -87,6 +89,8 @@ class SshConnection extends ChangeNotifier {
     TrustHost prompt, {
     Host? host,
     ConfirmHostKeyChange? confirmKeyChange,
+    TrustJumpHost? trustJumpHost,
+    ConfirmJumpHostKeyChange? confirmJumpHostKeyChange,
   }) async {
     if (_disposed ||
         status == ConnectionStatus.connecting ||
@@ -112,6 +116,8 @@ class SshConnection extends ChangeNotifier {
       repository,
       prompt,
       confirmKeyChange: confirmKeyChange,
+      trustJumpHost: trustJumpHost,
+      confirmJumpHostKeyChange: confirmJumpHostKeyChange,
     );
   }
 
@@ -121,84 +127,134 @@ class SshConnection extends ChangeNotifier {
     TrustHost prompt, {
     bool openShell = true,
     ConfirmHostKeyChange? confirmKeyChange,
+    TrustJumpHost? trustJumpHost,
+    ConfirmJumpHostKeyChange? confirmJumpHostKeyChange,
   }) async {
     final generation = _generation;
     if (!_current(generation)) return;
     Object? verificationError;
+    Host? connectingHost;
     try {
-      final identities = host.authMethod == AuthMethod.privateKey
-          ? SSHKeyPair.fromPem(
-              credentials.privateKey,
-              credentials.passphrase.isEmpty ? null : credentials.passphrase,
-            )
-          : null;
-      final socket = await SSHSocket.connect(
-        host.address,
-        host.port,
-        timeout: const Duration(seconds: 15),
+      final route = resolveSshRoute(
+        host,
+        host.jumpHostId.isEmpty ? const [] : await repository.loadHosts(),
       );
-      if (!_current(generation)) {
-        socket.destroy();
-        return;
+      if (!_current(generation)) return;
+      final credentialsByHost = <String, Credentials>{host.id: credentials};
+      for (final hop in route.take(route.length - 1)) {
+        final stored = await repository.loginCredentials(hop);
+        if (!_current(generation)) return;
+        if (stored == null) {
+          throw StateError('中转主机「${hop.name}」缺少登录凭证，请先配置它的密码或私钥。');
+        }
+        credentialsByHost[hop.id] = stored;
       }
-      final client = SSHClient(
-        socket,
-        username: host.username,
-        algorithms: harborSshAlgorithms,
-        handshakeTimeout: const Duration(minutes: 5),
-        authTimeout: const Duration(seconds: 30),
-        identities: identities,
-        onPasswordRequest: host.authMethod == AuthMethod.password
-            ? () => credentials.password
-            : null,
-        keepAliveInterval: const Duration(seconds: 20),
-        onVerifyHostKey: (type, bytes) async {
-          if (!_current(generation)) return false;
-          try {
-            return await repository.verifyHost(
-              host,
-              type,
-              utf8.decode(bytes),
-              (t, f) async {
-                if (!_current(generation)) return false;
-                final accepted = await prompt(t, f);
-                return _current(generation) && accepted;
-              },
-              confirmKeyChange: confirmKeyChange == null
-                  ? null
-                  : (t, f, previousKey) async {
-                      if (!_current(generation)) return false;
-                      final accepted = await confirmKeyChange(
-                        t,
-                        f,
-                        previousKey,
-                      );
-                      return _current(generation) && accepted;
-                    },
-            );
-          } catch (e) {
-            verificationError = e;
-            return false;
-          }
-        },
-      );
-      _client = client;
-      unawaited(
-        client.done.then(
-          (_) {
-            if (!_current(generation)) return;
-            unawaited(portForwards.close());
-            if (_shell == null) _remoteClosed();
-          },
-          onError: (Object e) {
-            if (_current(generation) && status == ConnectionStatus.connected) {
-              _fail(e);
+      SSHClient? previous;
+      for (final hop in route) {
+        connectingHost = hop;
+        final hopCredentials = credentialsByHost[hop.id]!;
+        final isTarget = hop.id == host.id;
+        final identities = hop.authMethod == AuthMethod.privateKey
+            ? SSHKeyPair.fromPem(
+                hopCredentials.privateKey,
+                hopCredentials.passphrase.isEmpty
+                    ? null
+                    : hopCredentials.passphrase,
+              )
+            : null;
+        final socket = previous == null
+            ? await SSHSocket.connect(
+                hop.address,
+                hop.port,
+                timeout: const Duration(seconds: 15),
+              )
+            : await previous
+                  .forwardLocal(hop.address, hop.port)
+                  .timeout(const Duration(seconds: 15));
+        if (!_current(generation)) {
+          socket.destroy();
+          return;
+        }
+        _pendingSocket = socket;
+        final client = SSHClient(
+          socket,
+          username: hop.username,
+          algorithms: harborSshAlgorithms,
+          handshakeTimeout: const Duration(minutes: 5),
+          authTimeout: const Duration(seconds: 30),
+          identities: identities,
+          onPasswordRequest: hop.authMethod == AuthMethod.password
+              ? () => hopCredentials.password
+              : null,
+          keepAliveInterval: const Duration(seconds: 20),
+          onVerifyHostKey: (type, bytes) async {
+            if (!_current(generation)) return false;
+            try {
+              return await repository.verifyHost(
+                hop,
+                type,
+                utf8.decode(bytes),
+                (t, f) async {
+                  if (!_current(generation)) return false;
+                  final accepted = isTarget
+                      ? await prompt(t, f)
+                      : await (trustJumpHost?.call(hop, t, f) ??
+                            Future.value(false));
+                  return _current(generation) && accepted;
+                },
+                confirmKeyChange:
+                    (isTarget
+                        ? confirmKeyChange == null
+                        : confirmJumpHostKeyChange == null)
+                    ? null
+                    : (t, f, previousKey) async {
+                        if (!_current(generation)) return false;
+                        final accepted = isTarget
+                            ? await confirmKeyChange!(t, f, previousKey)
+                            : await confirmJumpHostKeyChange!(
+                                hop,
+                                t,
+                                f,
+                                previousKey,
+                              );
+                        return _current(generation) && accepted;
+                      },
+              );
+            } catch (e) {
+              verificationError = e;
+              return false;
             }
           },
-        ),
-      );
-      await client.authenticated;
-      if (!_current(generation)) return;
+        );
+        _pendingSocket = null;
+        _routeClients.add(client);
+        if (isTarget) _client = client;
+        unawaited(
+          client.done.then(
+            (_) {
+              if (!_current(generation)) return;
+              if (!isTarget) {
+                if (status == ConnectionStatus.connected) {
+                  _fail(StateError('中转主机「${hop.name}」已断开。'));
+                }
+                return;
+              }
+              unawaited(portForwards.close());
+              if (_shell == null) _remoteClosed();
+            },
+            onError: (Object e) {
+              if (_current(generation) &&
+                  status == ConnectionStatus.connected) {
+                _fail(isTarget ? e : StateError('中转主机「${hop.name}」已断开：$e'));
+              }
+            },
+          ),
+        );
+        await client.authenticated;
+        if (!_current(generation)) return;
+        previous = client;
+      }
+      final client = _client!;
       if (!openShell) {
         status = ConnectionStatus.connected;
         _notify();
@@ -261,7 +317,15 @@ class SshConnection extends ChangeNotifier {
         ),
       );
     } catch (e) {
-      if (_current(generation)) _fail(verificationError ?? e);
+      if (_current(generation)) {
+        final failure = verificationError ?? e;
+        final failedHost = connectingHost;
+        _fail(
+          failedHost != null && failedHost.id != host.id
+              ? StateError('中转主机「${failedHost.name}」连接失败：$failure')
+              : failure,
+        );
+      }
     }
   }
 
@@ -574,12 +638,14 @@ class SshConnection extends ChangeNotifier {
     _subscriptions.clear();
     _shell?.close();
     _shell = null;
-    final client = _client;
     _client = null;
-    if (client != null) {
+    _pendingSocket?.destroy();
+    _pendingSocket = null;
+    for (final client in _routeClients.reversed) {
       // Peer disconnects can make flushing the final close packet fail.
       unawaited(client.close().catchError((Object _) {}));
     }
+    _routeClients.clear();
   }
 
   void _notify() {

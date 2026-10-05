@@ -62,6 +62,9 @@ class _TerminalWorkspaceState extends State<TerminalWorkspace> {
   final _keys = <String, GlobalKey>{};
   final _paneKeys = <int, GlobalKey>{};
   final _controllers = <String, TerminalPaneController>{};
+  late final _aiRetention = TerminalAiRetention(
+    (id) => _sessions.containsKey(id),
+  );
   _TerminalLayout? _root;
   int _nextSplit = 0;
   int _focused = 0;
@@ -112,6 +115,11 @@ class _TerminalWorkspaceState extends State<TerminalWorkspace> {
 
   void _sync() {
     final sessions = _sessions;
+    for (final id in _aiRetention.parkedIds.toList()) {
+      if (sessions.containsKey(id)) continue;
+      widget.aiWindow?.unregister(id);
+      _aiRetention.drop(id);
+    }
     for (final side in _layout.panes.toList()) {
       final id = _slots[side];
       if (id != null && !sessions.containsKey(id)) {
@@ -146,6 +154,15 @@ class _TerminalWorkspaceState extends State<TerminalWorkspace> {
           ?.requestFocus();
       _revealPane(_focused);
     });
+  }
+
+  @override
+  void dispose() {
+    for (final id in _aiRetention.parkedIds.toList()) {
+      widget.aiWindow?.unregister(id);
+    }
+    _aiRetention.dispose();
+    super.dispose();
   }
 
   void _revealPane(int side) {
@@ -366,6 +383,7 @@ class _TerminalWorkspaceState extends State<TerminalWorkspace> {
                   onAiSettings: widget.onAiSettings,
                   aiHistoryStore: widget.aiHistoryStore,
                   aiWindow: widget.aiWindow,
+                  aiRetention: _aiRetention,
                   controller: !widget.desktop && _focused == side
                       ? widget.mobileController
                       : _controllers.putIfAbsent(

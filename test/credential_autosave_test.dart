@@ -7,6 +7,94 @@ import 'package:harbor_ssh/ui/host_editor.dart';
 import 'support.dart';
 
 void main() {
+  testWidgets('选择中转主机、保存重开、取消中转并拦截循环配置', (tester) async {
+    final repository = memoryRepository();
+    const gateway = Host(
+      id: 'gateway',
+      name: '公网堡垒机',
+      address: 'gateway.example.com',
+      username: 'deploy',
+    );
+    const dependent = Host(
+      id: 'dependent',
+      name: '依赖目标的主机',
+      address: '10.0.0.3',
+      username: 'root',
+      jumpHostId: 'target',
+    );
+    const target = Host(
+      id: 'target',
+      name: '内网服务器',
+      address: '10.0.0.8',
+      username: 'root',
+    );
+    await repository.saveHosts([gateway, dependent, target]);
+    Host? tested;
+    Future<void> open(Host current) async {
+      final hosts = await repository.loadHosts();
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Scaffold(
+            body: Builder(
+              builder: (context) => TextButton(
+                onPressed: () => showDialog<void>(
+                  context: context,
+                  builder: (_) => HostEditor(
+                    host: current,
+                    hosts: hosts,
+                    onSave: (host, credentials) async {
+                      await repository.saveHosts([gateway, dependent, host]);
+                      await repository.saveCredentials(host.id, credentials);
+                    },
+                    onTest: (host, _) async => tested = host,
+                  ),
+                ),
+                child: const Text('编辑'),
+              ),
+            ),
+          ),
+        ),
+      );
+      await tester.tap(find.text('编辑'));
+      await tester.pumpAndSettle();
+    }
+
+    Future<void> select(String name) async {
+      final menu = find.byType(DropdownMenuFormField<Host>);
+      await tester.ensureVisible(menu);
+      await tester.tap(menu);
+      await tester.pumpAndSettle();
+      await tester.tap(find.text(name).last);
+      await tester.pumpAndSettle();
+    }
+
+    Future<void> save() async {
+      await tester.ensureVisible(find.text('保存连接'));
+      await tester.tap(find.text('保存连接'));
+      await tester.pumpAndSettle();
+    }
+
+    await open(target);
+    await select('公网堡垒机');
+    await tester.ensureVisible(find.text('测试连接'));
+    await tester.tap(find.text('测试连接'));
+    await tester.pumpAndSettle();
+    expect(tested?.jumpHostId, gateway.id);
+    await save();
+    final saved = (await repository.loadHosts()).last;
+    expect(saved.jumpHostId, gateway.id);
+
+    await open(saved);
+    expect(find.text('公网堡垒机'), findsWidgets);
+    await select('依赖目标的主机');
+    await save();
+    expect(find.text('中转主机存在循环引用，请修改连接配置。'), findsOneWidget);
+    expect((await repository.loadHosts()).last.jumpHostId, gateway.id);
+    await select('直接连接');
+    await save();
+    expect((await repository.loadHosts()).last.jumpHostId, isEmpty);
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
   testWidgets('密码留空时测试和保存免密码连接，重新编辑可改用密码', (tester) async {
     final repository = memoryRepository();
     const username =
@@ -50,7 +138,6 @@ void main() {
     }
 
     await open(cnbHost);
-    expect(find.text('留空时尝试免密码连接'), findsOneWidget);
     await tester.ensureVisible(find.text('测试连接'));
     await tester.tap(find.text('测试连接'));
     await tester.pumpAndSettle();

@@ -1,8 +1,16 @@
 """Loopback-only SSH forwarding fixture; no user credentials or files are read."""
 import json
+import logging
+import os
+from pathlib import Path
 import socket
+import sys
 import threading
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / ".tools" / "python"))
 import paramiko
+
+logging.getLogger("paramiko").setLevel(logging.CRITICAL)
 
 
 def bridge(left, right):
@@ -51,9 +59,18 @@ class Server(paramiko.ServerInterface):
         return paramiko.AUTH_SUCCESSFUL if password == 'fixture-password' else paramiko.AUTH_FAILED
 
     def get_allowed_auths(self, username):
-        return 'password'
+        return 'publickey,password'
+
+    def check_auth_publickey(self, username, key):
+        expected = os.environ.get('HARBOR_FIXTURE_PUBLIC_KEY', '').split()
+        accepted = username == 'tester' and len(expected) >= 2 and key.get_base64() == expected[1]
+        return paramiko.AUTH_SUCCESSFUL if accepted else paramiko.AUTH_FAILED
 
     def check_channel_direct_tcpip_request(self, channel_id, origin, destination):
+        # This alias cannot resolve on the client. Only the gateway translates
+        # it, proving that SSH jumps pass target names to the forwarding peer.
+        if destination[0] == 'jump-fixture.invalid':
+            destination = ('127.0.0.1', destination[1])
         if destination[0] not in ('127.0.0.1', 'localhost', '::1'):
             return paramiko.OPEN_FAILED_ADMINISTRATIVELY_PROHIBITED
         self.targets[channel_id] = destination

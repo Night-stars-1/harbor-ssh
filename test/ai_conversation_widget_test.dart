@@ -8,12 +8,175 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:harbor_ssh/data/ai_conversation_store.dart';
 import 'package:harbor_ssh/data/terminal_ai.dart';
 import 'package:harbor_ssh/ui/ai_task_controller.dart';
+import 'package:harbor_ssh/ui/ai_markdown_code_block.dart';
+import 'package:harbor_ssh/ui/ai_markdown_table.dart';
 import 'package:harbor_ssh/ui/terminal_ai_panel.dart';
 import 'package:harbor_ssh/ui/theme.dart';
 
 import 'support.dart';
 
 void main() {
+  for (final (width, scale) in [(390.0, 1.0), (240.0, 2.0), (800.0, 1.0)]) {
+    testWidgets('回复代码复制与折叠，长命令表格始终能看到作用 $width', (tester) async {
+      tester.view.physicalSize = Size(width, 1100);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+      String? copied;
+      tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+        SystemChannels.platform,
+        (call) async {
+          if (call.method == 'Clipboard.setData') {
+            copied = (call.arguments as Map)['text'] as String;
+          }
+          return null;
+        },
+      );
+      addTearDown(
+        () => tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+          SystemChannels.platform,
+          null,
+        ),
+      );
+      final client = _Client();
+      final task = AiTaskController(
+        settings: () =>
+            const AiSettings(baseUrl: 'https://example.com/v1', model: 'test'),
+        executorFactory: _Executor.new,
+        connected: () => true,
+        clientFactory: () => client,
+      );
+      await tester.pumpWidget(
+        MaterialApp(
+          theme: harborTheme(brightness: Brightness.dark),
+          builder: (context, child) => MediaQuery(
+            data: MediaQuery.of(context)
+                .copyWith(textScaler: TextScaler.linear(scale)),
+            child: child!,
+          ),
+          home: Scaffold(
+            body: TerminalAiPanel(task: task, hostName: 'server'),
+          ),
+        ),
+      );
+      Future<void> send(String text) async {
+        final input = find.byKey(const ValueKey('ai-task-input'));
+        await tester.ensureVisible(input);
+        await tester.enterText(input, text);
+        await tester.pump();
+        final button = find.byKey(const ValueKey('ai-send'));
+        await tester.ensureVisible(button);
+        await tester.tap(button);
+        await tester.pump();
+      }
+
+      const code =
+          'curl -fsSL -o deploy.sh https://example.com/deploy.sh\nchmod +x deploy.sh\nbash deploy.sh';
+      const command = 'bash deploy-marzban.sh 1 管理员密码 面板域名';
+      const purposes = [
+        '安装主面板',
+        '更新 Xray 内核',
+        '设置 Cloudflare 中转',
+        '安装 Marzban Node',
+        '用 Cloudflare DNS-01 申请 TLS 证书',
+      ];
+      await send('告诉我脚本用法');
+      client.reply.complete(
+        AiReply({
+          'role': 'assistant',
+          'content':
+              '先下载脚本：\n\n```bash\n$code\n```\n\n'
+              '| 命令 | 作用 |\n| --- | --- |\n'
+              '| `$command` | 安装主面板 |\n'
+              '| `bash deploy-marzban.sh 2` | 更新 Xray 内核 |\n'
+              '| `bash deploy-marzban.sh 3 域名` | 设置 Cloudflare 中转 |\n'
+              '| `bash deploy-marzban.sh 4` | 安装 Marzban Node |\n'
+              '| `bash deploy-marzban.sh 5 域名` | 用 Cloudflare DNS-01 申请 TLS 证书 |',
+        }, []),
+      );
+      await tester.pumpAndSettle();
+      expect(find.byType(AiMarkdownCodeBlock), findsOneWidget);
+      expect(find.text('Bash'), findsOneWidget);
+      expect(find.text('1\n2\n3'), findsOneWidget);
+      expect(find.text(code), findsOneWidget);
+      expect(find.text(command), findsOneWidget);
+      expect(find.byType(AiMarkdownTable), findsOneWidget);
+      expect(find.text('命令'), findsOneWidget);
+      expect(find.text('作用'), findsOneWidget);
+      final grid = tester.widget<Table>(
+        find.descendant(
+          of: find.byType(AiMarkdownTable),
+          matching: find.byType(Table),
+        ),
+      );
+      expect(grid.children.length, 6);
+      expect(grid.children.every((row) => row.children.length == 2), isTrue);
+      final tableRect = tester.getRect(find.byType(AiMarkdownTable));
+      for (final purpose in purposes) {
+        final field = find.text(purpose);
+        expect(field, findsOneWidget);
+        await Scrollable.ensureVisible(tester.element(field), alignment: 0.5);
+        await tester.pumpAndSettle();
+        final fieldRect = tester.getRect(field);
+        expect(fieldRect.left, greaterThanOrEqualTo(tableRect.left));
+        expect(fieldRect.right, lessThanOrEqualTo(tableRect.right));
+        expect(fieldRect.left, greaterThanOrEqualTo(0));
+        expect(fieldRect.right, lessThanOrEqualTo(width));
+        expect(fieldRect.center.dy, inInclusiveRange(0, 1100));
+      }
+      // The narrow layout keeps the first command and its purpose in the same
+      // row, with columns aligned to the header instead of stacked cards.
+      expect(
+        tester.getCenter(find.text(command)).dy,
+        closeTo(tester.getCenter(find.text(purposes.first)).dy, 0.5),
+      );
+      expect(
+        tester.getRect(find.text(command)).right,
+        lessThan(tester.getRect(find.text(purposes.first)).left),
+      );
+      await Scrollable.ensureVisible(
+        tester.element(find.byTooltip('复制代码')),
+        alignment: 0.5,
+      );
+      await tester.pumpAndSettle();
+      await tester.tap(find.byTooltip('复制代码'));
+      await tester.pump();
+      expect(copied, code);
+      await tester.tap(find.byTooltip('折叠代码'));
+      await tester.pumpAndSettle();
+      expect(find.text(code), findsNothing);
+      expect(find.text(command), findsOneWidget);
+
+      expect(find.byTooltip('展开代码'), findsOneWidget);
+      await Scrollable.ensureVisible(
+        tester.element(find.byTooltip('展开代码')),
+        alignment: 0.5,
+      );
+      await tester.pumpAndSettle();
+      await tester.tap(find.byTooltip('展开代码'));
+      await tester.pumpAndSettle();
+      expect(find.text(code), findsOneWidget);
+
+      // Continue the conversation, then scroll back to the earlier reply.
+      client.reply = Completer<AiReply>();
+      await send('继续说明');
+      client.reply.complete(
+        const AiReply({'role': 'assistant', 'content': '运行前先检查配置。'}, []),
+      );
+      await tester.pumpAndSettle();
+      expect(find.text('运行前先检查配置。'), findsOneWidget);
+      tester
+          .widget<ListView>(find.byKey(const ValueKey('ai-transcript')))
+          .controller!
+          .jumpTo(0);
+      await tester.pumpAndSettle();
+      expect(find.byType(AiMarkdownCodeBlock), findsOneWidget);
+      expect(find.text(code), findsOneWidget);
+      expect(tester.takeException(), isNull);
+      await tester.pumpWidget(const SizedBox.shrink());
+      task.dispose();
+    });
+  }
   testWidgets('Enter 发送、Shift+Enter 换行，输入法候选与连按不误发', (tester) async {
     final client = _Client();
     final task = AiTaskController(
@@ -848,7 +1011,7 @@ void main() {
                 {'name': 'shot.png', 'mime': 'image/png', 'bytes': _png},
               ],
             },
-            {'text': '磁盘输出如下', 'model': 'qwen-test'},
+            {'text': '磁盘输出如下\n\n```bash\ndf -h\n```', 'model': 'qwen-test'},
             {
               'text': 'df -h',
               'command': true,
@@ -908,6 +1071,10 @@ void main() {
     );
 
     // 工具卡可展开，长文与输出一起在预览里滚动
+    expect(
+      find.descendant(of: preview, matching: find.byType(AiMarkdownCodeBlock)),
+      findsOneWidget,
+    );
     await tester.tap(
       find.descendant(of: preview, matching: find.byType(ExpansionTile)),
     );

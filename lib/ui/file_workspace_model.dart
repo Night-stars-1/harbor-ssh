@@ -524,7 +524,7 @@ class FileWorkspaceModel extends ChangeNotifier {
   String? _sftpIdentity(FileLocationTab tab) {
     final host = tab.session?.host;
     if (host == null) return null;
-    return '${host.address.toLowerCase()}:${host.port}\x00${host.username}';
+    return '${host.address.toLowerCase()}:${host.port}\x00${host.username}\x00${host.jumpHostId}';
   }
 
   bool _sameDirectory(

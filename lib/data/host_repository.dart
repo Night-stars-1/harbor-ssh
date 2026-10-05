@@ -137,6 +137,17 @@ typedef ConfirmHostKeyChange = Future<bool> Function(
   String fingerprint,
   String previousKey,
 );
+typedef TrustJumpHost = Future<bool> Function(
+  Host host,
+  String type,
+  String fingerprint,
+);
+typedef ConfirmJumpHostKeyChange = Future<bool> Function(
+  Host host,
+  String type,
+  String fingerprint,
+  String previousKey,
+);
 
 class HostRepository {
   HostRepository({required this.preferences, required this.secrets});

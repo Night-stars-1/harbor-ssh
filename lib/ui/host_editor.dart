@@ -19,6 +19,7 @@ class HostEditor extends StatefulWidget {
     this.host,
     this.credentials,
     this.users = const [],
+    this.hosts = const [],
     this.userCredentials = const {},
     required this.onSave,
     required this.onTest,
@@ -26,6 +27,7 @@ class HostEditor extends StatefulWidget {
   final Host? host;
   final Credentials? credentials;
   final List<SshUser> users;
+  final List<Host> hosts;
   final Map<String, Credentials> userCredentials;
   final SaveHost onSave;
   final TestHost onTest;
@@ -56,6 +58,7 @@ class _HostEditorState extends State<HostEditor> {
       .toList();
   late final _userCredentials = {...widget.userCredentials};
   late String _userId = widget.host?.userId ?? '';
+  late String _jumpHostId = widget.host?.jumpHostId ?? '';
   late final String _id =
       widget.host?.id ?? DateTime.now().microsecondsSinceEpoch.toString();
   bool _saving = false, _testing = false;
@@ -171,6 +174,50 @@ class _HostEditorState extends State<HostEditor> {
     ];
   }
 
+  DropdownMenuEntry<T> _connectionMenuEntry<T>(
+    T value,
+    String label, {
+    required bool selected,
+  }) {
+    final theme = Theme.of(context);
+    final colors = theme.colorScheme;
+    return DropdownMenuEntry<T>(
+      value: value,
+      label: label,
+      trailingIcon: selected ? const Icon(Icons.check_rounded, size: 20) : null,
+      style: MenuItemButton.styleFrom(
+        minimumSize: const Size(0, 48),
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+        shape: HarborShapes.superellipse(
+          const BorderRadius.all(HarborShapes.sm),
+        ),
+        backgroundColor: selected ? colors.secondaryContainer : null,
+        foregroundColor: selected
+            ? colors.onSecondaryContainer
+            : colors.onSurface,
+        textStyle: theme.textTheme.bodyLarge,
+      ),
+    );
+  }
+
+  String? _validateJumpHost() {
+    try {
+      resolveSshRoute(
+        Host(
+          id: _id,
+          name: _name.text.trim(),
+          address: '',
+          username: '',
+          jumpHostId: _jumpHostId,
+        ),
+        widget.hosts,
+      );
+      return null;
+    } on FormatException catch (error) {
+      return error.message;
+    }
+  }
+
   Future<void> _submit({required bool test}) async {
     if (_busy) return;
     if (!_form.currentState!.validate()) return;
@@ -199,6 +246,7 @@ class _HostEditorState extends State<HostEditor> {
           : AuthMethod.password,
       favorite: widget.host?.favorite ?? false,
       userId: _auth == AuthMethod.privateKey ? _userId : '',
+      jumpHostId: _jumpHostId,
     );
     try {
       if (test) {
@@ -331,6 +379,60 @@ class _HostEditorState extends State<HostEditor> {
                   },
                 ),
                 const SizedBox(height: 16),
+                LayoutBuilder(
+                  builder: (context, constraints) {
+                    final choices = [
+                      const Host(
+                        id: '',
+                        name: '直接连接',
+                        address: '',
+                        username: '',
+                      ),
+                      ...widget.hosts.where((host) => host.id != _id),
+                      if (_jumpHostId.isNotEmpty &&
+                          widget.hosts.every(
+                            (host) => host.id != _jumpHostId || host.id == _id,
+                          ))
+                        Host(
+                          id: _jumpHostId,
+                          name: '中转主机不可用，请重新选择',
+                          address: '',
+                          username: '',
+                        ),
+                    ];
+                    return DropdownMenuFormField<Host>(
+                      key: ValueKey('jump-$_jumpHostId'),
+                      initialSelection: choices
+                          .where((host) => host.id == _jumpHostId)
+                          .firstOrNull,
+                      width: constraints.maxWidth,
+                      menuHeight: 320,
+                      enabled: !_busy,
+                      selectOnly: true,
+                      requestFocusOnTap: true,
+                      enableSearch: false,
+                      textStyle: Theme.of(context).textTheme.bodyLarge,
+                      inputDecorationTheme: Theme.of(context)
+                          .inputDecorationTheme,
+                      label: const Text('中转主机（可选）'),
+                      alignmentOffset: const Offset(0, 4),
+                      dropdownMenuEntries: [
+                        for (final host in choices)
+                          _connectionMenuEntry(
+                            host,
+                            host.name,
+                            selected: host.id == _jumpHostId,
+                          ),
+                      ],
+                      onSelected: (host) => setState(() {
+                        _jumpHostId = host?.id ?? '';
+                        _error = null;
+                      }),
+                      validator: (_) => _validateJumpHost(),
+                    );
+                  },
+                ),
+                const SizedBox(height: 16),
                 Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
@@ -389,7 +491,6 @@ class _HostEditorState extends State<HostEditor> {
                     decoration: InputDecoration(
                       labelText: '密码',
                       hintText: '可留空',
-                      helperText: '留空时尝试免密码连接',
                       suffixIcon: IconButton(
                         tooltip: _passwordVisible ? '隐藏密码' : '显示密码',
                         onPressed: _busy
@@ -408,32 +509,11 @@ class _HostEditorState extends State<HostEditor> {
                 if (_auth != AuthMethod.privateKey) const SizedBox(height: 16),
                 LayoutBuilder(
                   builder: (context, constraints) {
-                    final colors = Theme.of(context).colorScheme;
                     DropdownMenuEntry<String> entry(String id, String name) {
-                      final selected = id == _userId;
-                      return DropdownMenuEntry(
-                        value: id,
-                        label: name,
-                        trailingIcon: selected
-                            ? const Icon(Icons.check_rounded, size: 20)
-                            : null,
-                        style: MenuItemButton.styleFrom(
-                          minimumSize: const Size(0, 48),
-                          padding: const EdgeInsets.symmetric(
-                            horizontal: 12,
-                            vertical: 8,
-                          ),
-                          shape: HarborShapes.superellipse(
-                            const BorderRadius.all(HarborShapes.sm),
-                          ),
-                          backgroundColor: selected
-                              ? colors.secondaryContainer
-                              : null,
-                          foregroundColor: selected
-                              ? colors.onSecondaryContainer
-                              : colors.onSurface,
-                          textStyle: Theme.of(context).textTheme.bodyLarge,
-                        ),
+                      return _connectionMenuEntry(
+                        id,
+                        name,
+                        selected: id == _userId,
                       );
                     }
 

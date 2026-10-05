@@ -13,6 +13,9 @@ import '../data/ai_image_input.dart';
 import '../data/terminal_ai.dart';
 
 import 'ai_task_controller.dart';
+import 'ai_markdown_code_block.dart';
+import 'ai_markdown_style.dart';
+import 'ai_markdown_table.dart';
 import 'theme.dart';
 
 class TerminalAiPanel extends StatefulWidget {
@@ -1210,7 +1213,7 @@ class _AiMessageBubble extends StatefulWidget {
 class _AiMessageBubbleState extends State<_AiMessageBubble> {
   /// Tool disclosures the user opened, keyed by entry so incoming output does
   /// not collapse them again.
-  final _expandedTools = Expando<bool>();
+  late final _expandedTools = Expando<bool>();
 
   void _linkFailure() {
     if (!mounted) return;
@@ -1220,32 +1223,30 @@ class _AiMessageBubbleState extends State<_AiMessageBubble> {
 
   Widget _markdown(String text) {
     final theme = Theme.of(context);
+    void onTapLink(String text, String? href, String title) async {
+      final uri = Uri.tryParse(href ?? '');
+      if (uri == null ||
+          !const ['https', 'http', 'mailto'].contains(uri.scheme)) {
+        return;
+      }
+      try {
+        if (!await launchUrl(uri)) _linkFailure();
+      } catch (_) {
+        _linkFailure();
+      }
+    }
+
     return MarkdownBody(
       data: text,
       selectable: true,
-      styleSheet: MarkdownStyleSheet.fromTheme(theme).copyWith(
-        p: theme.textTheme.bodyMedium,
-        code: theme.textTheme.bodyMedium?.copyWith(
-          fontFamily: 'monospace',
-          backgroundColor: theme.colorScheme.surfaceContainerHighest,
-        ),
-        codeblockDecoration: BoxDecoration(
-          color: theme.colorScheme.surfaceContainerLow,
-          borderRadius: BorderRadius.circular(8),
-        ),
-      ),
-      onTapLink: (_, href, _) async {
-        final uri = Uri.tryParse(href ?? '');
-        if (uri == null ||
-            !const ['https', 'http', 'mailto'].contains(uri.scheme)) {
-          return;
-        }
-        try {
-          if (!await launchUrl(uri)) _linkFailure();
-        } catch (_) {
-          _linkFailure();
-        }
+      fitContent: false,
+      blockSyntaxes: const [AiMarkdownTableSyntax()],
+      builders: {
+        'pre': AiMarkdownCodeBuilder(),
+        AiMarkdownTableSyntax.tag: AiMarkdownTableBuilder(onTapLink: onTapLink),
       },
+      styleSheet: aiMarkdownStyle(theme),
+      onTapLink: onTapLink,
     );
   }
 

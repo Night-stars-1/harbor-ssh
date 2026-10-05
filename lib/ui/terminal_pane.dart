@@ -44,6 +44,7 @@ class TerminalPane extends StatefulWidget {
     this.onAiSettings,
     this.aiHistoryStore,
     this.aiWindow,
+    this.aiRetention,
   });
   final SshConnection session;
   final VoidCallback onReconnect;
@@ -69,6 +70,10 @@ class TerminalPane extends StatefulWidget {
   final VoidCallback? onAiSettings;
   final AiConversationStore? aiHistoryStore;
   final AiWindowHost? aiWindow;
+
+  /// When set, the assistant controller and whether its panel is open survive
+  /// this pane being unmounted, so switching back to the session restores them.
+  final TerminalAiRetention? aiRetention;
   @override
   State<TerminalPane> createState() => _TerminalPaneState();
 }
@@ -97,16 +102,104 @@ class _TerminalPaneState extends State<TerminalPane> {
 
   void _ensureAi() {
     if (_ai != null) return;
-    _ai = AiTaskController(
-      settings: () => widget.aiSettings!(),
-      executorFactory: () => widget.session.createAiExecutor(),
-      connected: () => widget.session.status == ConnectionStatus.connected,
-      historyStore: widget.aiHistoryStore,
-      historyScope: widget.aiHistoryStore == null
-          ? null
-          : '${widget.session.host.id}|${widget.session.host.endpoint}|${widget.session.host.username}',
-    );
+    final settings = widget.aiSettings;
+    if (settings == null) return;
+    final session = widget.session;
+    final retention = widget.aiRetention;
+    final historyStore = widget.aiHistoryStore;
+    final historyScope = historyStore == null
+        ? null
+        : '${session.host.id}|${session.host.endpoint}|${session.host.username}';
+    if (retention == null) {
+      _ai = AiTaskController(
+        settings: () => widget.aiSettings!(),
+        executorFactory: () => widget.session.createAiExecutor(),
+        connected: () => widget.session.status == ConnectionStatus.connected,
+        historyStore: historyStore,
+        historyScope: historyScope,
+      );
+    } else {
+      // Closures capture the session object, not this State: the controller
+      // keeps running after the pane is unmounted.
+      _ai = retention.create(
+        sessionId: session.id,
+        settings: settings,
+        executorFactory: () => session.createAiExecutor(),
+        connected: () => session.status == ConnectionStatus.connected,
+        historyStore: historyStore,
+        historyScope: historyScope,
+      );
+    }
     _registerAi();
+  }
+
+  void _claimAi() {
+    final retention = widget.aiRetention;
+    if (retention == null) return;
+    final session = widget.session;
+    final restored = retention.claim(
+      session.id,
+      settings: widget.aiSettings,
+      executorFactory: () => session.createAiExecutor(),
+      connected: () => session.status == ConnectionStatus.connected,
+    );
+    if (restored == null) return;
+    _ai = restored.task;
+    _aiOpen = restored.open;
+    _aiDetached = widget.aiWindow?.isDetached(session.id) ?? restored.detached;
+    _registerAi();
+  }
+
+  void _retargetAi() {
+    final retention = widget.aiRetention;
+    final session = widget.session;
+    if (retention == null || _ai == null) return;
+    retention.retarget(
+      session.id,
+      settings: widget.aiSettings,
+      executorFactory: () => session.createAiExecutor(),
+      connected: () => session.status == ConnectionStatus.connected,
+    );
+  }
+
+  /// Parks a still-living session's assistant, or tears it down when the
+  /// session itself is gone. The session is explicit because a pane can be
+  /// handed a different connection before this runs.
+  void _releaseAi(
+    SshConnection session, {
+    required TerminalAiRetention? retention,
+    required AiWindowHost? host,
+    required VoidCallback? onSettings,
+    required AiSettings Function()? settings,
+  }) {
+    final task = _ai;
+    if (retention != null && task != null && retention.keeps(session.id)) {
+      retention.park(
+        session.id,
+        open: _aiOpen,
+        detached: _aiDetached,
+        session: session,
+        settings: settings,
+        executorFactory: () => session.createAiExecutor(),
+        connected: () => session.status == ConnectionStatus.connected,
+      );
+      host?.register(
+        session.id,
+        task,
+        session.host.name,
+        onDock: () => retention.noteDocked(session.id),
+        onSettings: onSettings,
+      );
+    } else if (retention != null && task != null) {
+      host?.unregister(session.id);
+      retention.drop(session.id);
+    } else {
+      host?.unregister(session.id);
+      task?.dispose();
+    }
+    _ai = null;
+    _aiOpen = false;
+    _aiDetached = false;
   }
 
   void _registerAi() {
@@ -342,6 +435,7 @@ class _TerminalPaneState extends State<TerminalPane> {
     _listenForLinkHover();
     _applyLineWrap();
     _syncMetrics();
+    _claimAi();
   }
 
   void _reportFocus() {
@@ -393,11 +487,14 @@ class _TerminalPaneState extends State<TerminalPane> {
     if (oldWidget.session != widget.session) {
       oldWidget.session.removeListener(_connectionChanged);
       widget.session.addListener(_connectionChanged);
-      oldWidget.aiWindow?.unregister(oldWidget.session.id);
-      _ai?.dispose();
-      _ai = null;
-      _aiOpen = false;
-      _aiDetached = false;
+      _releaseAi(
+        oldWidget.session,
+        retention: oldWidget.aiRetention,
+        host: oldWidget.aiWindow,
+        onSettings: oldWidget.onAiSettings,
+        settings: oldWidget.aiSettings,
+      );
+      _claimAi();
       _completion?.dispose();
       _completion = null;
       _bindCompletion();
@@ -419,6 +516,7 @@ class _TerminalPaneState extends State<TerminalPane> {
       _aiDetached = false;
       _registerAi();
     }
+    if (oldWidget.session == widget.session) _retargetAi();
   }
 
   void _applyLineWrap() {
@@ -447,8 +545,13 @@ class _TerminalPaneState extends State<TerminalPane> {
   void dispose() {
     _stopMetrics(notify: false);
     widget.session.removeListener(_connectionChanged);
-    widget.aiWindow?.unregister(widget.session.id);
-    _ai?.dispose();
+    _releaseAi(
+      widget.session,
+      retention: widget.aiRetention,
+      host: widget.aiWindow,
+      onSettings: widget.onAiSettings,
+      settings: widget.aiSettings,
+    );
     _focus.removeListener(_completionChanged);
     _scrollController.removeListener(_queueCompletionGeometry);
     _completion?.dispose();
@@ -950,6 +1053,170 @@ class _TerminalPaneState extends State<TerminalPane> {
           ),
       ],
     );
+  }
+}
+
+/// Keeps one SSH session's assistant alive while its terminal pane is not
+/// mounted. Switching sessions unmounts the pane; the controller, the open
+/// panel and a running turn stay here until that session comes back or closes.
+class TerminalAiRetention {
+  TerminalAiRetention(this._alive);
+  final bool Function(String sessionId) _alive;
+  final _slots = <String, _RetainedAi>{};
+
+  bool keeps(String sessionId) => _alive(sessionId);
+
+  Iterable<String> get parkedIds => [
+    for (final entry in _slots.entries)
+      if (entry.value.parked) entry.key,
+  ];
+
+  AiTaskController create({
+    required String sessionId,
+    required AiSettings Function() settings,
+    required AiCommandExecutor Function() executorFactory,
+    required bool Function() connected,
+    required AiConversationStore? historyStore,
+    required String? historyScope,
+  }) {
+    final existing = _slots[sessionId];
+    if (existing != null) {
+      retarget(
+        sessionId,
+        settings: settings,
+        executorFactory: executorFactory,
+        connected: connected,
+      );
+      return existing.task;
+    }
+    final hook = _AiHook()
+      ..settings = settings
+      ..executorFactory = executorFactory
+      ..connected = connected;
+    final task = AiTaskController(
+      settings: () => hook.settings!(),
+      executorFactory: () => hook.executorFactory!(),
+      connected: () => hook.connected!(),
+      historyStore: historyStore,
+      historyScope: historyScope,
+    );
+    _slots[sessionId] = _RetainedAi(task, hook);
+    return task;
+  }
+
+  /// Restores a parked assistant and points it at the pane that is showing
+  /// [sessionId] again. Null when this session has never opened the panel.
+  ({AiTaskController task, bool open, bool detached})? claim(
+    String sessionId, {
+    required AiSettings Function()? settings,
+    required AiCommandExecutor Function() executorFactory,
+    required bool Function() connected,
+  }) {
+    final slot = _slots[sessionId];
+    if (slot == null) return null;
+    slot.parked = false;
+    slot.unwatch();
+    retarget(
+      sessionId,
+      settings: settings,
+      executorFactory: executorFactory,
+      connected: connected,
+    );
+    return (task: slot.task, open: slot.open, detached: slot.detached);
+  }
+
+  void retarget(
+    String sessionId, {
+    required AiSettings Function()? settings,
+    required AiCommandExecutor Function() executorFactory,
+    required bool Function() connected,
+  }) {
+    final slot = _slots[sessionId];
+    if (slot == null) return;
+    if (settings != null) slot.hook.settings = settings;
+    slot.hook.executorFactory = executorFactory;
+    slot.hook.connected = connected;
+  }
+
+  void park(
+    String sessionId, {
+    required bool open,
+    required bool detached,
+    required SshConnection session,
+    required AiSettings Function()? settings,
+    required AiCommandExecutor Function() executorFactory,
+    required bool Function() connected,
+  }) {
+    final slot = _slots[sessionId];
+    if (slot == null) return;
+    slot
+      ..open = open
+      ..detached = detached
+      ..parked = true;
+    retarget(
+      sessionId,
+      settings: settings,
+      executorFactory: executorFactory,
+      connected: connected,
+    );
+    slot.watch(session);
+  }
+
+  /// The detached window was docked while its pane was off screen.
+  void noteDocked(String sessionId) {
+    final slot = _slots[sessionId];
+    if (slot == null || !slot.parked) return;
+    slot
+      ..open = true
+      ..detached = false;
+  }
+
+  void drop(String sessionId) {
+    final slot = _slots.remove(sessionId);
+    if (slot == null) return;
+    slot.unwatch();
+    slot.task.dispose();
+  }
+
+  void dispose() {
+    for (final id in _slots.keys.toList()) {
+      drop(id);
+    }
+  }
+}
+
+class _AiHook {
+  AiSettings Function()? settings;
+  AiCommandExecutor Function()? executorFactory;
+  bool Function()? connected;
+}
+
+class _RetainedAi {
+  _RetainedAi(this.task, this.hook);
+  final AiTaskController task;
+  final _AiHook hook;
+  bool open = false;
+  bool detached = false;
+  bool parked = false;
+  SshConnection? _session;
+
+  void watch(SshConnection session) {
+    if (identical(_session, session)) return;
+    unwatch();
+    _session = session;
+    session.addListener(_onSession);
+  }
+
+  void unwatch() {
+    _session?.removeListener(_onSession);
+    _session = null;
+  }
+
+  void _onSession() {
+    final session = _session;
+    if (session != null && session.status != ConnectionStatus.connected) {
+      task.stop(message: 'SSH 已断开，AI 任务已停止');
+    }
   }
 }
 
