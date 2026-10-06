@@ -297,7 +297,8 @@ const _commandSchema = {
   'required': ['command', 'reason', 'requires_approval'],
   'additionalProperties': false,
 };
-const _commandDescription = '在当前 SSH 服务器的独立非交互通道执行命令，返回输出和退出码。单条最长 60 秒。';
+const _commandDescription =
+    '在当前 SSH 服务器的独立非交互通道执行命令，等待命令结束后返回输出和退出码。运行没有固定时限，用户可手动停止。';
 
 const _readOnlyTools = [
   {

@@ -279,13 +279,25 @@ class Server(paramiko.ServerInterface):
             "\n"
         )
     def check_channel_exec_request(self, channel, command):
-        if command in (b"harbor-ai-fixture-success", b"harbor-ai-fixture-fail", b"harbor-ai-fixture-large", b"harbor-ai-fixture-wait"):
+        if command in (b"harbor-ai-fixture-success", b"harbor-ai-fixture-fail", b"harbor-ai-fixture-large", b"harbor-ai-fixture-wait", b"harbor-ai-fixture-slow"):
             def ai_reply():
                 try:
                     # Virtual AI results only; never run commands on the host.
                     channel.sendall("AI 测试输出\n".encode())
                     if command == b"harbor-ai-fixture-wait":
                         return  # Remains open until the client cancels the channel.
+                    if command == b"harbor-ai-fixture-slow":
+                        def finish_slow():
+                            try:
+                                channel.sendall("慢命令完成\n".encode())
+                                channel.send_exit_status(0)
+                                channel.close()
+                            except (EOFError, OSError, paramiko.SSHException):
+                                pass
+                        # Real elapsed time, including a quiet interval longer
+                        # than the former command timeout. No OS command is run.
+                        threading.Timer(65, finish_slow).start()
+                        return
                     if command == b"harbor-ai-fixture-large":
                         channel.sendall(b"x" * 40000)
                     if command == b"harbor-ai-fixture-fail":

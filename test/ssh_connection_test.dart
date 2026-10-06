@@ -11,6 +11,7 @@ import 'package:harbor_ssh/data/terminal_ai.dart';
 import 'package:harbor_ssh/domain/host.dart';
 import 'package:harbor_ssh/domain/remote_file.dart';
 import 'package:harbor_ssh/data/file_copy.dart';
+import 'package:harbor_ssh/ui/ai_task_controller.dart';
 
 import 'support.dart';
 
@@ -551,6 +552,122 @@ void main() {
           () => connection.terminal.buffer.getText().contains('ECHO=after-ai'),
         );
       });
+      test('AI 完整流程：静默命令超过一分钟仍继续，停止后可再执行且终端可用', () async {
+        final connection = SshConnection(id: 'ai-slow-task', host: host());
+        addTearDown(connection.dispose);
+        await connection.connect(
+          const Credentials(password: 'fixture-password'),
+          memoryRepository(),
+          (_, _) async => true,
+        );
+        expect(connection.status, ConnectionStatus.connected);
+        await eventually(
+          () => connection.terminal.buffer.getText().contains('测试 connected'),
+        );
+        final terminalBefore = connection.terminal.buffer.getText();
+        final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+        addTearDown(() => server.close(force: true));
+        final requests = <Map<String, dynamic>>[];
+        // Local protocol responses stand in for the model; the HTTP client,
+        // task loop and SSH command channels are the production implementations.
+        server.listen((request) async {
+          final body = jsonDecode(
+            await utf8.decoder.bind(request).join(),
+          ) as Map<String, dynamic>;
+          requests.add(body);
+          expect(body['stream'], isTrue);
+          final tools = body['tools'] as List;
+          expect(
+            tools.first['function']['description'],
+            isNot(contains('最长 60 秒')),
+          );
+          final command = switch (requests.length) {
+            1 => 'harbor-ai-fixture-slow',
+            2 || 5 => 'harbor-ai-fixture-success',
+            4 => 'harbor-ai-fixture-wait',
+            _ => null,
+          };
+          request.response.headers.contentType = ContentType.json;
+          request.response.write(
+            jsonEncode({
+              'choices': [
+                {
+                  'message': {
+                    'role': 'assistant',
+                    'content': command == null ? '流程完成' : null,
+                    if (command != null)
+                      'tool_calls': [
+                        {
+                          'id': 'step-${requests.length}',
+                          'type': 'function',
+                          'function': {
+                            'name': 'run_command',
+                            'arguments': jsonEncode({
+                              'command': command,
+                              'reason': '验证完整执行流程',
+                              'requires_approval': false,
+                            }),
+                          },
+                        },
+                      ],
+                  },
+                },
+              ],
+            }),
+          );
+          await request.response.close();
+        });
+        final task = AiTaskController(
+          settings: () => AiSettings(
+            baseUrl: 'http://127.0.0.1:${server.port}/v1',
+            model: 'loopback-model',
+          ),
+          executorFactory: connection.createAiExecutor,
+          connected: () => connection.status == ConnectionStatus.connected,
+        );
+        addTearDown(task.dispose);
+        final elapsed = Stopwatch()..start();
+        await task.start('执行慢命令，再检查结果');
+        expect(elapsed.elapsed, greaterThan(const Duration(seconds: 60)));
+        expect(task.failure, isNull);
+        expect(task.status, '已完成');
+        expect(requests, hasLength(3));
+        final slowResult = jsonDecode(
+          (requests[1]['messages'] as List).singleWhere(
+                (message) => message['role'] == 'tool',
+              )['content']
+              as String,
+        ) as Map;
+        expect(slowResult['exitCode'], 0);
+        expect(slowResult['output'], contains('慢命令完成'));
+        final commands = task.entries.where((entry) => entry.command).toList();
+        expect(commands, hasLength(2));
+        expect(commands.every((entry) => entry.finished), isTrue);
+        expect(task.entries.last.text, '流程完成');
+
+        final waiting = task.start('执行一个等待中的命令');
+        await eventually(
+          () =>
+              task.entries.last.command &&
+              task.entries.last.output.contains('AI 测试输出'),
+        );
+        task.stop();
+        await waiting.timeout(const Duration(seconds: 5));
+        expect(task.running, isFalse);
+        expect(requests, hasLength(4));
+        expect(connection.status, ConnectionStatus.connected);
+        expect(connection.terminal.buffer.getText(), terminalBefore);
+        await task.start('停止后重新检查');
+        expect(task.failure, isNull);
+        expect(task.status, '已完成');
+        expect(requests, hasLength(6));
+        connection.send('after-slow-ai\r');
+        await eventually(
+          () => connection.terminal.buffer.getText().contains(
+            'ECHO=after-slow-ai',
+          ),
+        );
+      }, timeout: const Timeout(Duration(minutes: 2)));
       test('远端状态经独立 exec 通道采样，交互终端不收到监控命令', () async {
         final connection = SshConnection(id: 'metrics-exec', host: host());
         addTearDown(connection.dispose);

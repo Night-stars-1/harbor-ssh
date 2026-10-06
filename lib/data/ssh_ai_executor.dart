@@ -77,12 +77,14 @@ class SshAiExecutor implements AiCommandExecutor {
       }
       // No interactive stdin: commands such as sudo/read must fail rather than hang.
       unawaited(session.stdin.close().catchError((Object _) {}));
+      // Downloads, installs and quiet commands may take arbitrarily long.
+      // Keep the channel alive until it exits, disconnects or the user stops it.
       await Future.any([
         Future.wait([...done, session.done]),
         _cancelled.future.then<List<void>>(
           (_) => throw const AiFailure('任务已停止'),
         ),
-      ]).timeout(const Duration(seconds: 60));
+      ]);
       if (_cancelled.isCompleted) throw const AiFailure('任务已停止');
       return AiCommandResult(
         output.toString(),
@@ -91,7 +93,7 @@ class SshAiExecutor implements AiCommandExecutor {
       );
     } on TimeoutException {
       if (session != null) _terminate(session);
-      throw const AiFailure('命令超时，已请求终止；请检查服务器上的进程状态');
+      throw const AiFailure('SSH 命令通道建立超时，请检查连接后重试');
     } on AiFailure {
       rethrow;
     } catch (_) {
