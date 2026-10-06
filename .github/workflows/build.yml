@@ -7,15 +7,15 @@ permissions:
   contents: write
 jobs:
   verify:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: subosito/flutter-action@v2
         with:
           flutter-version: '3.47.4'
           channel: stable
           cache: true
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: '3.12'
       - run: flutter pub get
@@ -34,18 +34,18 @@ jobs:
             target: windows
             output: build/windows/x64/runner/Release/
             asset: harbor-ssh-windows-setup.exe
-          - os: macos-latest
+          - os: macos-15-intel
             target: macos
             output: build/macos/Build/Products/Release/*.app
             asset: harbor-ssh-macos.dmg
-          - os: ubuntu-latest
+          - os: ubuntu-24.04
             target: apk
             output: build/app/outputs/flutter-apk/app-*-release.apk
             asset: harbor-ssh-android-*.apk
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-java@v4
+      - uses: actions/checkout@v5
+      - uses: actions/setup-java@v5
         if: matrix.target == 'apk'
         with:
           distribution: temurin
@@ -105,6 +105,19 @@ jobs:
             build_args+=(--split-per-abi)
           fi
           flutter build ${{ matrix.target }} --release "${build_args[@]}" "${oauth_args[@]}"
+      - name: Verify macOS universal binary
+        if: matrix.target == 'macos'
+        shell: bash
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          apps=(build/macos/Build/Products/Release/*.app)
+          if [[ ${#apps[@]} -ne 1 ]]; then
+            echo 'Expected one macOS release app' >&2
+            exit 1
+          fi
+          executable="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "${apps[0]}/Contents/Info.plist")"
+          xcrun lipo -verify_arch arm64 x86_64 "${apps[0]}/Contents/MacOS/$executable"
       - name: Verify Android release certificate
         if: matrix.target == 'apk'
         shell: bash
@@ -129,7 +142,7 @@ jobs:
             fi
             echo "Verified release certificate: $apk"
           done
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v6
         with:
           name: harbor-ssh-${{ matrix.target }}
           path: ${{ matrix.output }}
