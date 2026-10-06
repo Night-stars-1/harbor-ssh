@@ -117,7 +117,7 @@ jobs:
             exit 1
           fi
           executable="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "${apps[0]}/Contents/Info.plist")"
-          xcrun lipo -verify_arch arm64 x86_64 "${apps[0]}/Contents/MacOS/$executable"
+          xcrun lipo "${apps[0]}/Contents/MacOS/$executable" -verify_arch arm64 x86_64
       - name: Verify Android release certificate
         if: matrix.target == 'apk'
         shell: bash
