@@ -4,10 +4,11 @@ import 'package:file_picker/file_picker.dart';
 import 'package:flutter/services.dart';
 
 class UploadFile {
-  const UploadFile(this.name, this.size, this.openRead);
+  const UploadFile(this.name, this.size, this.openRead, {this.path});
   final String name;
   final int? size;
   final Stream<Uint8List> Function() openRead;
+  final String? path;
 }
 
 abstract interface class DownloadTarget {
@@ -30,7 +31,12 @@ class NativeLocalTransfer implements LocalTransfer {
     final picked = await FilePicker.pickFiles(dialogTitle: '选择要上传的文件');
     return [
       for (final file in picked)
-        UploadFile(file.name, await file.length(), file.readAsByteStream),
+        UploadFile(
+          file.name,
+          await file.length(),
+          file.readAsByteStream,
+          path: file.path,
+        ),
     ];
   }
 

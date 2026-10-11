@@ -9,7 +9,7 @@ import 'download_stream.dart';
 import 'public_key_install.dart';
 
 /// Each operation owns its channel, independently of the terminal/completion.
-class SftpFiles implements RemoteFileSystem {
+class SftpFiles implements ResumableFileSystem {
   SftpFiles(this.openChannel);
   final Future<SftpClient> Function() openChannel;
   static const _timeout = Duration(seconds: 20);
@@ -230,6 +230,110 @@ class SftpFiles implements RemoteFileSystem {
   @override
   Future<void> deleteFile(String path) =>
       _run((client) => client.remove(path).timeout(_timeout));
+
+  @override
+  Future<RemoteFile> statFile(String path) => _run((client) async {
+    final attrs = await client.stat(path, followLink: false).timeout(_timeout);
+    if (!attrs.isFile || attrs.isSymbolicLink) {
+      throw StateError('只能续传普通文件');
+    }
+    return RemoteFile(
+      name: path.split('/').last,
+      path: path,
+      size: attrs.size,
+      modified: attrs.modifyTime == null
+          ? null
+          : DateTime.fromMillisecondsSinceEpoch(attrs.modifyTime! * 1000),
+    );
+  });
+
+  @override
+  Future<void> createFileExclusive(String path) => _run((client) async {
+    final file = await client
+        .open(
+          path,
+          mode:
+              SftpFileOpenMode.write |
+              SftpFileOpenMode.create |
+              SftpFileOpenMode.exclusive,
+        )
+        .timeout(_timeout);
+    await file.close().timeout(_timeout);
+  });
+
+  @override
+  Future<void> writeRange(
+    String path,
+    Stream<Uint8List> source, {
+    required int offset,
+    required TransferCancellation cancellation,
+    required void Function(int bytes) onProgress,
+  }) => _run((client) async {
+    cancellation.check();
+    await _regularFile(client, path);
+    final file = await client
+        .open(path, mode: SftpFileOpenMode.write)
+        .timeout(_timeout);
+    try {
+      final attrs = await file.stat().timeout(_timeout);
+      if (!attrs.isFile || attrs.size == null || attrs.size! < offset) {
+        throw StateError('传输缓存已变化，无法续传');
+      }
+      await file.setStat(SftpFileAttrs(size: offset)).timeout(_timeout);
+      var written = offset;
+      await for (final chunk in source.timeout(_timeout)) {
+        cancellation.check();
+        await file.writeBytes(chunk, offset: written).timeout(_timeout);
+        written += chunk.length;
+        onProgress(written);
+      }
+      cancellation.check();
+    } finally {
+      await file.close().timeout(const Duration(seconds: 2));
+    }
+  });
+
+  Future<void> _regularFile(SftpClient client, String path) async {
+    final attrs = await client.stat(path, followLink: false).timeout(_timeout);
+    if (!attrs.isFile || attrs.isSymbolicLink) {
+      throw StateError('只能续传普通文件');
+    }
+  }
+
+  @override
+  Future<void> readRange(
+    String path,
+    Future<void> Function(Uint8List) write, {
+    required int offset,
+    int? length,
+    required TransferCancellation cancellation,
+  }) => _run((client) async {
+    cancellation.check();
+    await _regularFile(client, path);
+    final file = await client.open(path).timeout(_timeout);
+    try {
+      if (!(await file.stat().timeout(_timeout)).isFile) {
+        throw StateError('只能续传普通文件');
+      }
+      await writeDownloadStream(
+        file
+            .read(
+              offset: offset,
+              length: length,
+              chunkSize: 64 * 1024,
+              maxPendingRequests: 128,
+            )
+            .timeout(_timeout),
+        write,
+        cancellation: cancellation,
+        onProgress: (_) {},
+      );
+    } finally {
+      try {
+        await file.close().timeout(const Duration(seconds: 2));
+      } catch (_) {}
+    }
+  });
 
   @override
   Future<void> download(

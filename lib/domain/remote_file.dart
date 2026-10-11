@@ -52,6 +52,33 @@ abstract interface class RemoteFileSystem {
   });
 }
 
+/// Range reads and metadata used to validate a transfer before resuming it.
+abstract interface class ResumableSource {
+  Future<RemoteFile> statFile(String path);
+  Future<void> readRange(
+    String path,
+    Future<void> Function(Uint8List) write, {
+    required int offset,
+    int? length,
+    required TransferCancellation cancellation,
+  });
+}
+
+abstract interface class ResumableFileSystem
+    implements RemoteFileSystem, ResumableSource {
+  Future<void> createFileExclusive(String path);
+
+  /// Discards an unacknowledged tail before writing at [offset]. Progress is
+  /// the absolute acknowledged offset, never the number of queued bytes.
+  Future<void> writeRange(
+    String path,
+    Stream<Uint8List> source, {
+    required int offset,
+    required TransferCancellation cancellation,
+    required void Function(int bytes) onProgress,
+  });
+}
+
 String remoteChild(String directory, String name) {
   if (name.isEmpty ||
       name == '.' ||

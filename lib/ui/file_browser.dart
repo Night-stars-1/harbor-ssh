@@ -4,6 +4,7 @@ import 'package:dartssh2/dartssh2.dart';
 import 'package:flutter/material.dart';
 
 import '../data/local_transfer.dart';
+import '../data/picked_transfer.dart';
 import '../data/ssh_connection.dart';
 import '../domain/remote_file.dart';
 import 'remote_file_tile.dart';
@@ -24,6 +25,8 @@ class FileBrowser extends StatefulWidget {
 }
 
 class _FileBrowserState extends State<FileBrowser> {
+  static final _pendingBySession = Expando<PickedTransfer>();
+  PickedTransfer? get _pending => _pendingBySession[widget.session];
   late final RemoteFileSystem _files = widget.session.files;
   final _pathInput = TextEditingController(text: '~');
   String _path = '~', _requestedPath = '~', _query = '';
@@ -38,13 +41,22 @@ class _FileBrowserState extends State<FileBrowser> {
   TransferCancellation? _cancellation;
   DateTime? _lastProgress;
   final _speed = TransferSpeed();
+  int _speedOffset = 0;
   bool get _connected => widget.session.status == ConnectionStatus.connected;
+  String get _endpoint =>
+      '${widget.session.host.endpoint}\x00${widget.session.host.username}\x00${widget.session.host.jumpHostId}';
 
   @override
   void initState() {
     super.initState();
     widget.session.addListener(_sessionChanged);
     _speed.addListener(_speedChanged);
+    if (_pending != null) {
+      _message = '传输已暂停 · 可继续传输';
+      _transferName = _pending!.name;
+      _transferred = _pending!.transferred;
+      _total = _pending!.total;
+    }
     unawaited(_browse('~'));
   }
 
@@ -123,19 +135,20 @@ class _FileBrowserState extends State<FileBrowser> {
   void _progress(int bytes) {
     if (!mounted) return;
     _transferred = bytes;
-    _speed.update(bytes);
+    _speed.update(bytes - _speedOffset);
     final now = DateTime.now();
     if (_lastProgress == null ||
         now.difference(_lastProgress!).inMilliseconds >= 80) {
-      _lastProgress = now;
+      _lastProgress = bytes == 0 ? null : now;
       setState(() {});
     }
   }
 
   Future<void> _transfer(
-    Future<String?> Function(TransferCancellation) action,
-  ) async {
-    if (_busy || !_connected) return;
+    Future<String?> Function(TransferCancellation) action, {
+    bool requireConnection = true,
+  }) async {
+    if (_busy || (requireConnection && !_connected)) return;
     final cancellation = TransferCancellation();
     setState(() {
       _busy = true;
@@ -146,6 +159,7 @@ class _FileBrowserState extends State<FileBrowser> {
       _message = null;
       _lastProgress = null;
       _speed.reset();
+      _speedOffset = 0;
     });
     try {
       final message = await action(cancellation);
@@ -158,7 +172,13 @@ class _FileBrowserState extends State<FileBrowser> {
     } catch (error) {
       if (mounted) {
         setState(() {
-          _message = _errorLabel(error);
+          _message = _pending?.discarding == true
+              ? '缓存清理失败，请再次放弃传输：${_errorLabel(error)}'
+              : _pending == null
+              ? _errorLabel(error)
+              : error is TransferCancelled
+              ? '传输已暂停 · 可继续传输'
+              : '${_errorLabel(error)} · 已保留断点，可继续传输';
           _messageError = error is! TransferCancelled;
         });
       }
@@ -178,10 +198,61 @@ class _FileBrowserState extends State<FileBrowser> {
     }
   }
 
+  Future<String?> _runPending(TransferCancellation cancellation) async {
+    final pending = _pending!;
+    if (pending.endpoint != _endpoint) {
+      throw StateError('主机已变化，请连接原来的主机后继续传输');
+    }
+    await pending.run(
+      _files as ResumableFileSystem,
+      cancellation,
+      picker: widget.local,
+      onFile: (name, total, offset) {
+        if (!mounted) throw TransferCancelled();
+        setState(() {
+          _transferName = name;
+          _total = total;
+          _transferred = offset;
+          _speedOffset = offset;
+          _lastProgress = null;
+          _speed.start();
+        });
+      },
+      onProgress: (bytes) {
+        _total = pending.total;
+        _progress(bytes);
+      },
+    );
+    _pendingBySession[widget.session] = null;
+    return pending.download == null
+        ? '已上传 ${pending.completed} 个文件'
+        : '已下载 ${pending.download!.name}';
+  }
+
+  Future<void> _resume() => _transfer(_runPending);
+
+  Future<void> _discard() => _transfer((cancellation) async {
+    if (_pending!.download == null && _pending!.endpoint != _endpoint) {
+      throw StateError('请连接原来的目标主机后清理传输缓存');
+    }
+    await _pending!.discard(_files as ResumableFileSystem);
+    _pendingBySession[widget.session] = null;
+    return '已放弃传输并清理缓存';
+  }, requireConnection: false);
+
   Future<void> _upload() => _transfer((cancellation) async {
+    if (_pending != null) return '请先继续或放弃当前传输';
     final directory = _path;
     final uploads = await widget.local.pickUploads();
     cancellation.check();
+    if (_files is ResumableFileSystem && uploads.isNotEmpty) {
+      _pendingBySession[widget.session] = await PickedTransfer.upload(
+        uploads,
+        directory,
+        endpoint: _endpoint,
+      );
+      return _runPending(cancellation);
+    }
     var completed = 0;
     for (final upload in uploads) {
       cancellation.check();
@@ -220,6 +291,14 @@ class _FileBrowserState extends State<FileBrowser> {
   });
 
   Future<void> _download(RemoteFile file) => _transfer((cancellation) async {
+    if (_pending != null) return '请先继续或放弃当前传输';
+    if (_files is ResumableFileSystem) {
+      _pendingBySession[widget.session] = await PickedTransfer.downloading(
+        file,
+        endpoint: _endpoint,
+      );
+      return _runPending(cancellation);
+    }
     final target = await widget.local.pickDownload(file.name);
     if (target == null) return null;
     var complete = false;
@@ -273,8 +352,8 @@ class _FileBrowserState extends State<FileBrowser> {
     final leave = await showDialog<bool>(
       context: context,
       builder: (context) => AlertDialog(
-        title: const Text('取消传输并返回？'),
-        content: const Text('当前文件尚未传输完成'),
+        title: Text(_pending != null ? '暂停传输并返回？' : '取消传输并返回？'),
+        content: Text(_pending != null ? '重新连接后返回文件页面，即可继续传输' : '当前文件尚未传输完成'),
         actions: [
           TextButton(
             onPressed: () => Navigator.pop(context, false),
@@ -282,7 +361,7 @@ class _FileBrowserState extends State<FileBrowser> {
           ),
           FilledButton(
             onPressed: () => Navigator.pop(context, true),
-            child: const Text('取消传输'),
+            child: Text(_pending != null ? '暂停并返回' : '取消传输'),
           ),
         ],
       ),
@@ -302,7 +381,7 @@ class _FileBrowserState extends State<FileBrowser> {
   @override
   Widget build(BuildContext context) {
     final colors = Theme.of(context).colorScheme;
-    final usable = _connected && !_busy && !_loading;
+    final usable = _connected && !_busy && !_loading && _pending == null;
     final entries = _entries
         .where(
           (entry) =>
@@ -485,7 +564,7 @@ class _FileBrowserState extends State<FileBrowser> {
                           ),
                         ),
                 ),
-                if (_busy)
+                if (_busy || _pending != null)
                   Padding(
                     padding: const EdgeInsets.only(top: 12),
                     child: Material(
@@ -504,7 +583,9 @@ class _FileBrowserState extends State<FileBrowser> {
                                     children: [
                                       Text(
                                         _cancellation?.cancelled == true
-                                            ? '正在取消传输'
+                                            ? (_pending != null
+                                                  ? '正在暂停传输'
+                                                  : '正在取消传输')
                                             : _transferName,
                                         maxLines: 1,
                                         overflow: TextOverflow.ellipsis,
@@ -536,17 +617,54 @@ class _FileBrowserState extends State<FileBrowser> {
                                     ],
                                   ),
                                 ),
-                                IconButton(
-                                  onPressed: _cancellation?.cancelled == true
-                                      ? null
-                                      : () => setState(
-                                          () => _cancellation?.cancel(),
-                                        ),
-                                  icon: const Icon(
-                                    Icons.close_rounded,
-                                    semanticLabel: '取消传输',
+                                if (_busy)
+                                  IconButton(
+                                    onPressed: _cancellation?.cancelled == true
+                                        ? null
+                                        : () => setState(
+                                            () => _cancellation?.cancel(),
+                                          ),
+                                    tooltip: _pending != null ? '暂停传输' : '取消传输',
+                                    icon: Icon(
+                                      _pending != null
+                                          ? Icons.pause_rounded
+                                          : Icons.close_rounded,
+                                      semanticLabel: _pending != null
+                                          ? '暂停传输'
+                                          : '取消传输',
+                                    ),
                                   ),
-                                ),
+                                if (!_busy && _pending != null) ...[
+                                  IconButton(
+                                    key: const ValueKey(
+                                      'resume-picked-transfer',
+                                    ),
+                                    tooltip: '继续传输',
+                                    onPressed:
+                                        _connected && !_pending!.discarding
+                                        ? _resume
+                                        : null,
+                                    icon: const Icon(
+                                      Icons.play_arrow_rounded,
+                                      semanticLabel: '继续传输',
+                                    ),
+                                  ),
+                                  IconButton(
+                                    key: const ValueKey(
+                                      'discard-picked-transfer',
+                                    ),
+                                    tooltip: '放弃传输并清理缓存',
+                                    onPressed:
+                                        (_connected ||
+                                            _pending!.download != null)
+                                        ? _discard
+                                        : null,
+                                    icon: const Icon(
+                                      Icons.close_rounded,
+                                      semanticLabel: '放弃传输',
+                                    ),
+                                  ),
+                                ],
                               ],
                             ),
                             LinearProgressIndicator(

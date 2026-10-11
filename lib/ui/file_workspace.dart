@@ -108,7 +108,7 @@ class _FileWorkspaceState extends State<FileWorkspace> {
                               ),
                               IconButton(
                                 key: ValueKey('close-file-tab-${item.id}'),
-                                onPressed: model.locked(item)
+                                onPressed: !model.canClose(item)
                                     ? null
                                     : () =>
                                           model.close(model.sideOf(item), item),
@@ -1093,7 +1093,7 @@ class _FileWorkspaceState extends State<FileWorkspace> {
         ? (model.transferred / model.total!).clamp(0.0, 1.0)
         : null;
     final text = transferring
-        ? '${model.transfer!.cancelled ? '正在取消 · ' : ''}${model.transferName}'
+        ? '${model.transfer!.cancelled ? (model.resumable ? '正在暂停 · ' : '正在取消 · ') : ''}${model.transferName}'
         : model.message ?? '就绪';
     final icon = model.deleting
         ? Icons.delete_outline_rounded
@@ -1162,7 +1162,7 @@ class _FileWorkspaceState extends State<FileWorkspace> {
                                     fontWeight: FontWeight.w500,
                                   ),
                             ),
-                            if (transferring)
+                            if (transferring || model.canResume)
                               Row(
                                 children: [
                                   Expanded(
@@ -1203,13 +1203,35 @@ class _FileWorkspaceState extends State<FileWorkspace> {
                           onPressed: model.transfer!.cancelled
                               ? null
                               : model.cancel,
-                          icon: const Icon(
-                            Icons.close_rounded,
+                          tooltip: model.resumable ? '暂停传输' : '取消传输',
+                          icon: Icon(
+                            model.resumable
+                                ? Icons.pause_rounded
+                                : Icons.close_rounded,
                             size: 18,
-                            semanticLabel: '取消传输',
+                            semanticLabel: model.resumable ? '暂停传输' : '取消传输',
                           ),
                         )
-                      else if (!model.busy && model.message != null)
+                      else if (model.canResume) ...[
+                        IconButton(
+                          key: const ValueKey('resume-file-transfer'),
+                          tooltip: '继续传输',
+                          onPressed: model.canContinue ? model.resume : null,
+                          icon: const Icon(
+                            Icons.play_arrow_rounded,
+                            semanticLabel: '继续传输',
+                          ),
+                        ),
+                        IconButton(
+                          key: const ValueKey('discard-file-transfer'),
+                          tooltip: '放弃传输并清理缓存',
+                          onPressed: model.discardTransfer,
+                          icon: const Icon(
+                            Icons.close_rounded,
+                            semanticLabel: '放弃传输',
+                          ),
+                        ),
+                      ] else if (!model.busy && model.message != null)
                         IconButton(
                           key: const ValueKey('dismiss-file-result'),
                           onPressed: model.dismissMessage,

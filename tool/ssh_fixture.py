@@ -21,6 +21,7 @@ client_key.write_private_key(key_text, password="fixture-passphrase")
 # Public halves only; the private key above is the throwaway loopback credential.
 public_key_line = "ssh-rsa {} harbor-fixture-client".format(client_key.get_base64())
 existing_key_line = "ssh-rsa {} harbor-fixture-host".format(host_key.get_base64())
+resume_storage = None
 
 
 def requested_permissions(attr, default):
@@ -86,6 +87,11 @@ class DirectoryFixture(paramiko.SFTPServerInterface):
 
     def __init__(self, server, *args, **kwargs):
         super().__init__(server, *args, **kwargs)
+        global resume_storage
+        if getattr(server, 'resume_mode', False):
+            if resume_storage is None:
+                resume_storage = (dict(type(self).entries), dict(type(self).files), dict(type(self).symlinks))
+            server.file_entries, server.file_data, server.file_links = resume_storage
         if not hasattr(server, 'file_entries'):
             server.file_entries = dict(type(self).entries)
             server.file_data = dict(type(self).files)
@@ -166,7 +172,16 @@ class DirectoryFixture(paramiko.SFTPServerInterface):
         if newpath in self.entries or posixpath.dirname(newpath) not in self.entries:
             return paramiko.SFTP_FAILURE
         if stat.S_ISDIR(self.entries[oldpath]):
-            return paramiko.SFTP_FAILURE
+            # Match a real SFTP directory rename, including all descendants.
+            for mapping in (self.entries, self.files, self.symlinks):
+                moved = {newpath + name[len(oldpath):]: value
+                         for name, value in list(mapping.items())
+                         if name == oldpath or name.startswith(oldpath + '/')}
+                for name in list(mapping):
+                    if name == oldpath or name.startswith(oldpath + '/'):
+                        del mapping[name]
+                mapping.update(moved)
+            return paramiko.SFTP_OK
         self.entries[newpath] = self.entries.pop(oldpath)
         data = self.files.pop(oldpath, None)
         if data is not None:
@@ -244,7 +259,8 @@ class Server(paramiko.ServerInterface):
     def check_auth_none(self, username):
         return paramiko.AUTH_SUCCESSFUL if username == "cnb-fixture-token" else paramiko.AUTH_FAILED
     def check_auth_password(self, username, password):
-        return paramiko.AUTH_SUCCESSFUL if (username, password) == ("tester", "fixture-password") else paramiko.AUTH_FAILED
+        self.resume_mode = username == 'resume-tester'
+        return paramiko.AUTH_SUCCESSFUL if username in ('tester', 'resume-tester') and password == 'fixture-password' else paramiko.AUTH_FAILED
     def check_auth_publickey(self, username, key):
         return paramiko.AUTH_SUCCESSFUL if username == "tester" and key == client_key else paramiko.AUTH_FAILED
     def check_channel_request(self, kind, chanid):

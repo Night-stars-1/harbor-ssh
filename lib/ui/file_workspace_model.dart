@@ -6,6 +6,7 @@ import 'package:flutter/foundation.dart';
 
 import '../data/file_copy.dart';
 import '../data/local_files.dart';
+import '../data/resumable_copy.dart';
 import '../data/ssh_connection.dart';
 import '../domain/remote_file.dart';
 import 'transfer_speed.dart';
@@ -266,11 +267,20 @@ class FileWorkspaceModel extends ChangeNotifier {
   int? total;
   DateTime? _lastProgress;
   String? _deletingTabId;
+  _DropTransfer? _pendingTransfer;
+  bool get canResume => !busy && _pendingTransfer != null;
+  bool get canContinue => canResume && !_pendingTransfer!.discarding;
+  bool get resumable => _pendingTransfer != null;
   bool get deleting => _deletingTabId != null;
   bool get busy => transfer != null || deleting;
   bool locked(FileLocationTab tab) =>
       tab.id == _deletingTabId ||
       (busy && (tab.id == transferSourceId || tab.id == transferDestinationId));
+  bool canClose(FileLocationTab tab) =>
+      !locked(tab) &&
+      (_pendingTransfer == null ||
+          (tab.id != _pendingTransfer!.sourceId &&
+              tab.id != _pendingTransfer!.destinationId));
 
   bool canDelete(FileDragData data) =>
       !_disposed &&
@@ -354,10 +364,19 @@ class FileWorkspaceModel extends ChangeNotifier {
     SshConnection session, {
     required bool ownsSession,
   }) {
-    if (_disposed ||
-        locked(tab) ||
-        session.status != ConnectionStatus.connected) {
+    if (_disposed || busy || session.status != ConnectionStatus.connected) {
       return false;
+    }
+    final pending = _pendingTransfer;
+    if (pending != null &&
+        (tab.id == pending.sourceId || tab.id == pending.destinationId)) {
+      final expected = tab.id == pending.sourceId
+          ? pending.sourceIdentity
+          : pending.destinationIdentity;
+      final host = session.host;
+      final actual =
+          '${host.address.toLowerCase()}:${host.port}\x00${host.username}\x00${host.jumpHostId}';
+      if (actual != expected) return false;
     }
     final side = sideOf(tab);
     if (side < 0) return false;
@@ -392,7 +411,7 @@ class FileWorkspaceModel extends ChangeNotifier {
   }
 
   void close(int side, FileLocationTab tab) {
-    if (locked(tab)) return;
+    if (!canClose(tab)) return;
     final pane = panes[side];
     final index = pane.tabs.indexOf(tab);
     if (index < 0) return;
@@ -422,7 +441,7 @@ class FileWorkspaceModel extends ChangeNotifier {
   }
 
   void dismissMessage() {
-    if (busy) return;
+    if (busy || resumable) return;
     message = null;
     failed = false;
     _notify();
@@ -431,6 +450,7 @@ class FileWorkspaceModel extends ChangeNotifier {
   bool canCopy(int side) {
     final source = panes[side].active, target = panes[1 - side].active;
     return !busy &&
+        !resumable &&
         source != null &&
         target != null &&
         !source.loading &&
@@ -500,6 +520,7 @@ class FileWorkspaceModel extends ChangeNotifier {
         panes.any((pane) => pane.tabs.contains(tab));
     return !_disposed &&
         !busy &&
+        !resumable &&
         target != null &&
         !_sameDirectory(data.source, data.sourceDirectory, target) &&
         contains(data.source) &&
@@ -618,9 +639,103 @@ class FileWorkspaceModel extends ChangeNotifier {
       _notify();
       return false;
     }
-    final source = data.source;
-    final selected = data.files;
-    final destinationDirectory = target.path;
+    final pending = _DropTransfer(data, target, existingConflicts);
+    if (data.source.files is ResumableFileSystem &&
+        target.files is ResumableFileSystem) {
+      _pendingTransfer = pending;
+    }
+    return _runDrop(pending);
+  }
+
+  Future<void> resume() async {
+    if (!canContinue) return;
+    await _runDrop(_pendingTransfer!);
+  }
+
+  Future<void> discardTransfer() async {
+    if (!canResume) return;
+    final pending = _pendingTransfer!;
+    final destination = tabs
+        .where((tab) => tab.id == pending.destinationId)
+        .firstOrNull;
+    if (destination == null ||
+        !destination.connected ||
+        _sftpIdentity(destination) != pending.destinationIdentity) {
+      message = '请先连接目标主机，再放弃传输并清理缓存';
+      failed = true;
+      _notify();
+      return;
+    }
+    transfer = TransferCancellation();
+    pending.discarding = true;
+    _notify();
+    try {
+      for (final job in pending.jobs.values) {
+        final source = tabs
+            .where((tab) => tab.id == pending.sourceId)
+            .firstOrNull;
+        if (source?.files is ResumableSource) {
+          job.rebind(
+            source!.files as ResumableSource,
+            destination.files as ResumableFileSystem,
+          );
+        }
+        await job.discard();
+      }
+      // Completed incoming copies have not yet replaced the approved target.
+      for (final entry in pending.incoming.entries.toList()) {
+        if (pending.jobs[entry.key]?.complete == true &&
+            !pending.published.contains(entry.key)) {
+          final file = pending.selected.firstWhere(
+            (file) => file.path == entry.key,
+          );
+          if (file.isDirectory) {
+            await destination.files.deleteDirectory(
+              entry.value,
+              recursive: true,
+            );
+          } else {
+            await destination.files.deleteFile(entry.value);
+          }
+          pending.incoming.remove(entry.key);
+        }
+      }
+      _pendingTransfer = null;
+      message = '已放弃传输并清理缓存';
+      failed = false;
+    } catch (error) {
+      message = '缓存清理失败，请再次放弃传输：${fileError(error)}';
+      failed = true;
+    } finally {
+      transfer = null;
+      await destination.browse();
+      _notify();
+    }
+  }
+
+  Future<bool> _runDrop(_DropTransfer pending) async {
+    final source = tabs.where((tab) => tab.id == pending.sourceId).firstOrNull;
+    final target = tabs
+        .where((tab) => tab.id == pending.destinationId)
+        .firstOrNull;
+    if (source == null ||
+        target == null ||
+        !source.connected ||
+        !target.connected) {
+      message = '请重新连接原来的源主机和目标主机后继续传输';
+      failed = true;
+      _notify();
+      return false;
+    }
+    if (_sftpIdentity(source) != pending.sourceIdentity ||
+        _sftpIdentity(target) != pending.destinationIdentity) {
+      message = '主机已变化，请连接原来的主机后继续传输';
+      failed = true;
+      _notify();
+      return false;
+    }
+    final selected = pending.selected;
+    final destinationDirectory = pending.destinationDirectory;
     final cancellation = TransferCancellation();
     transfer = cancellation;
     transferSourceId = source.id;
@@ -632,18 +747,18 @@ class FileWorkspaceModel extends ChangeNotifier {
     message = null;
     failed = false;
     _notify();
-    var completed = 0;
+    var completed = pending.completed;
     var success = false;
     var cleanupFailed = false;
     final conflictsByName = {
-      for (final conflict in existingConflicts)
+      for (final conflict in pending.conflicts)
         (target.isLocal && Platform.isWindows
                 ? conflict.name.toLowerCase()
                 : conflict.name):
             conflict,
     };
     try {
-      for (final file in selected) {
+      for (final file in selected.skip(completed)) {
         cancellation.check();
         transferName = '${file.name} · ${completed + 1}/${selected.length}';
         transferred = 0;
@@ -651,19 +766,45 @@ class FileWorkspaceModel extends ChangeNotifier {
         _lastProgress = null;
         transferSpeed.start();
         _notify();
+        final initialBytes = pending.jobs[file.path]?.transferred ?? 0;
         void progress(int bytes) {
           transferred = bytes;
-          transferSpeed.update(bytes);
+          transferSpeed.update(bytes - initialBytes);
           final now = DateTime.now();
           if (_lastProgress == null ||
               now.difference(_lastProgress!).inMilliseconds >= 80) {
-            _lastProgress = now;
+            _lastProgress = bytes == 0 ? null : now;
             _notify();
           }
         }
 
         Future<void> copyTo(String path) async {
-          if (file.isDirectory) {
+          if (_pendingTransfer == pending) {
+            final job = pending.jobs.putIfAbsent(
+              file.path,
+              () => file.isDirectory
+                  ? ResumableDirectoryCopy(
+                      source: source.files as ResumableFileSystem,
+                      destination: target.files as ResumableFileSystem,
+                      sourcePath: file.path,
+                      destinationPath: path,
+                    )
+                  : ResumableFileCopy(
+                      source: source.files as ResumableSource,
+                      destination: target.files as ResumableFileSystem,
+                      sourcePath: file.path,
+                      destinationPath: path,
+                    ),
+            );
+            job.rebind(
+              source.files as ResumableSource,
+              target.files as ResumableFileSystem,
+            );
+            await job.run(cancellation, (bytes) {
+              total = job.total;
+              progress(bytes);
+            });
+          } else if (file.isDirectory) {
             await copyDirectoryBetween(
               source: source.files,
               destination: target.files,
@@ -707,9 +848,12 @@ class FileWorkspaceModel extends ChangeNotifier {
         if (conflict == null) {
           await copyTo(destinationPath);
         } else {
-          final stagedPath = target.files.childPath(
-            destinationDirectory,
-            _temporaryName('incoming'),
+          final stagedPath = pending.incoming.putIfAbsent(
+            file.path,
+            () => target.files.childPath(
+              destinationDirectory,
+              _temporaryName('incoming'),
+            ),
           );
           final backupPath = target.files.childPath(
             destinationDirectory,
@@ -738,6 +882,7 @@ class FileWorkspaceModel extends ChangeNotifier {
             cancellation.check();
             await target.files.renameExclusive(stagedPath, destinationPath);
             published = true;
+            pending.published.add(file.path);
             try {
               await remove(backupPath, conflict);
             } catch (_) {
@@ -753,7 +898,7 @@ class FileWorkspaceModel extends ChangeNotifier {
               }
             }
             var stageCleanupFailed = false;
-            if (!published) {
+            if (!published && _pendingTransfer != pending) {
               try {
                 await remove(stagedPath, file);
               } catch (_) {
@@ -779,6 +924,7 @@ class FileWorkspaceModel extends ChangeNotifier {
           }
         }
         completed++;
+        pending.completed = completed;
       }
       message = cleanupFailed
           ? '已传输 $completed 个项目 · 旧版本清理失败'
@@ -786,10 +932,16 @@ class FileWorkspaceModel extends ChangeNotifier {
       failed = cleanupFailed;
       source.clearSelection();
       success = true;
+      _pendingTransfer = null;
     } catch (e) {
       failed = e is! TransferCancelled;
       message =
           '${fileError(e)}${completed > 0 ? ' · 已完成 $completed 个项目' : ''}';
+      if (_pendingTransfer == pending) {
+        message = e is TransferCancelled
+            ? '传输已暂停 · 可继续传输'
+            : '$message · 已保留断点，可继续传输';
+      }
     } finally {
       transferSpeed.stop();
       transfer = null;
@@ -821,6 +973,31 @@ class FileWorkspaceModel extends ChangeNotifier {
     }
     super.dispose();
   }
+}
+
+class _DropTransfer {
+  _DropTransfer(FileDragData data, FileLocationTab target, this.conflicts)
+    : sourceId = data.source.id,
+      destinationId = target.id,
+      destinationDirectory = target.path,
+      sourceIdentity = _identity(data.source),
+      destinationIdentity = _identity(target),
+      selected = List.of(data.files);
+  final String sourceId, destinationId, destinationDirectory;
+  final String? sourceIdentity, destinationIdentity;
+  static String? _identity(FileLocationTab tab) {
+    final host = tab.session?.host;
+    return host == null
+        ? null
+        : '${host.address.toLowerCase()}:${host.port}\x00${host.username}\x00${host.jumpHostId}';
+  }
+
+  final List<RemoteFile> selected, conflicts;
+  final jobs = <String, ResumableCopy>{};
+  final incoming = <String, String>{};
+  final published = <String>{};
+  int completed = 0;
+  bool discarding = false;
 }
 
 String fileError(Object error) {

@@ -110,6 +110,166 @@ void main() {
     });
   }
 
+  testWidgets('真实本地传输经界面暂停、继续、覆盖与放弃，窄屏显示断点进度', (tester) async {
+    tester.view.physicalSize = const Size(320, 740);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    final directory = await tester.runAsync(
+      () => Directory.systemTemp.createTemp('harbor-resume-ui-'),
+    );
+    addTearDown(() => directory!.delete(recursive: true));
+    final payload = Uint8List.fromList(
+      List.generate(2 * 1024 * 1024 + 7, (i) => i % 251),
+    );
+    await tester.runAsync(() async {
+      await Directory('${directory!.path}/source').create();
+      await Directory('${directory.path}/target').create();
+      await File('${directory.path}/source/data.bin').writeAsBytes(payload);
+    });
+    final model = FileWorkspaceModel();
+    addTearDown(model.dispose);
+    final a = model.add(
+      0,
+      name: 'Source',
+      files: LocalFiles('${directory!.path}/source'),
+      isLocal: true,
+      initialPath: '${directory.path}/source',
+    );
+    final b = model.add(
+      1,
+      name: 'Target',
+      files: LocalFiles('${directory.path}/target'),
+      isLocal: true,
+      initialPath: '${directory.path}/target',
+    );
+    await tester.runAsync(() async {
+      await a.browse();
+      await b.browse();
+    });
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: harborTheme(),
+        home: Scaffold(
+          body: FileWorkspace(
+            model: model,
+            hosts: const [],
+            sessions: const [],
+            onConnect: (_) async => null,
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+    final data = FileDragData(a, [a.entries.single]);
+    var paused = false;
+    void interrupt() {
+      if (!paused && model.transfer != null && model.transferred > 0) {
+        paused = true;
+        model.cancel();
+      }
+    }
+
+    model.addListener(interrupt);
+    await tester.runAsync(() async {
+      expect(await model.drop(data, b), isFalse);
+    });
+    model.removeListener(interrupt);
+    await tester.pumpAndSettle();
+    expect(model.canResume, isTrue);
+    expect(model.canClose(a), isFalse);
+    expect(find.byKey(const ValueKey('resume-file-transfer')), findsOneWidget);
+    expect(tester.takeException(), isNull);
+    final resume =
+        tester
+                .widget<IconButton>(
+                  find.byKey(const ValueKey('resume-file-transfer')),
+                )
+                .onPressed
+            as Future<void> Function();
+    // Run the real disk action outside Flutter's fake async clock.
+    await tester.runAsync(resume);
+    await tester.pumpAndSettle();
+    expect(model.canResume, isFalse, reason: model.message);
+    expect(
+      await tester.runAsync(
+        () => File('${directory.path}/target/data.bin').readAsBytes(),
+      ),
+      payload,
+    );
+    expect(model.message, '已传输 1 个项目');
+
+    // A paused overwrite leaves the original target visible until resumed.
+    final replacement = Uint8List.fromList(
+      List.generate(payload.length, (i) => (i * 7) % 251),
+    );
+    await tester.runAsync(
+      () => File('${directory.path}/source/data.bin').writeAsBytes(replacement),
+    );
+    await tester.runAsync(() => a.browse());
+    final overwrite = FileDragData(a, [a.entries.single]);
+    paused = false;
+    model.addListener(interrupt);
+    await tester.runAsync(() async {
+      expect(
+        await model.drop(
+          overwrite,
+          b,
+          overwriteConflicts: model.conflicts(overwrite, b),
+        ),
+        isFalse,
+      );
+    });
+    model.removeListener(interrupt);
+    expect(
+      await tester.runAsync(
+        () => File('${directory.path}/target/data.bin').readAsBytes(),
+      ),
+      payload,
+    );
+    await tester.runAsync(model.resume);
+    expect(
+      await tester.runAsync(
+        () => File('${directory.path}/target/data.bin').readAsBytes(),
+      ),
+      replacement,
+    );
+
+    paused = false;
+    model.addListener(interrupt);
+    await tester.runAsync(() async {
+      expect(
+        await model.drop(
+          overwrite,
+          b,
+          overwriteConflicts: model.conflicts(overwrite, b),
+        ),
+        isFalse,
+      );
+    });
+    model.removeListener(interrupt);
+    await tester.pumpAndSettle();
+    final discard =
+        tester
+                .widget<IconButton>(
+                  find.byKey(const ValueKey('discard-file-transfer')),
+                )
+                .onPressed
+            as Future<void> Function();
+    await tester.runAsync(discard);
+    await tester.pumpAndSettle();
+    final entries = await tester.runAsync(() => b.files.browse(b.path));
+    expect(entries!.entries.map((entry) => entry.name), ['data.bin']);
+    expect(
+      await tester.runAsync(
+        () => File('${directory.path}/target/data.bin').readAsBytes(),
+      ),
+      replacement,
+    );
+    expect(tester.takeException(), isNull);
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
+
   testWidgets('手机轻扫多选后长按打开批量菜单，长按未选文件只操作该文件', (tester) async {
     tester.view.physicalSize = const Size(390, 740);
     tester.view.devicePixelRatio = 1;

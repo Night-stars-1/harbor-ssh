@@ -8,7 +8,7 @@ import '../domain/remote_file.dart';
 import 'local_transfer.dart';
 
 /// A local folder uses the same streaming operations as SFTP.
-class LocalFiles implements RemoteFileSystem {
+class LocalFiles implements ResumableFileSystem {
   LocalFiles(String root)
     : root = Directory(root).absolute.path.replaceAll('\\', '/');
   static String? _preparedHomePath;
@@ -234,6 +234,74 @@ class LocalFiles implements RemoteFileSystem {
       finished = true;
     } finally {
       if (!finished) await target.abort();
+    }
+  }
+
+  @override
+  Future<RemoteFile> statFile(String path) async {
+    if (await FileSystemEntity.type(path, followLinks: false) !=
+        FileSystemEntityType.file) {
+      throw FileSystemException('只能续传普通文件', path);
+    }
+    final attrs = await File(path).stat();
+    return RemoteFile(
+      name: path.replaceAll('\\', '/').split('/').last,
+      path: path,
+      size: attrs.size,
+      modified: attrs.modified,
+    );
+  }
+
+  @override
+  Future<void> createFileExclusive(String path) async {
+    await File(path).create(exclusive: true);
+  }
+
+  @override
+  Future<void> readRange(
+    String path,
+    Future<void> Function(Uint8List) write, {
+    required int offset,
+    int? length,
+    required TransferCancellation cancellation,
+  }) async {
+    await statFile(path);
+    await for (final bytes in File(
+      path,
+    ).openRead(offset, length == null ? null : offset + length)) {
+      cancellation.check();
+      await write(Uint8List.fromList(bytes));
+    }
+    cancellation.check();
+  }
+
+  @override
+  Future<void> writeRange(
+    String path,
+    Stream<Uint8List> source, {
+    required int offset,
+    required TransferCancellation cancellation,
+    required void Function(int bytes) onProgress,
+  }) async {
+    final attrs = await statFile(path);
+    if (attrs.size! < offset) throw StateError('传输缓存已变化，无法续传');
+    // append opens without truncating; seek explicitly so uncertain writes
+    // beyond the last acknowledged checkpoint can be discarded.
+    final output = await File(path).open(mode: FileMode.append);
+    try {
+      await output.truncate(offset);
+      await output.setPosition(offset);
+      var written = offset;
+      await for (final bytes in source) {
+        cancellation.check();
+        await output.writeFrom(bytes);
+        written += bytes.length;
+        onProgress(written);
+      }
+      await output.flush();
+      cancellation.check();
+    } finally {
+      await output.close();
     }
   }
 }

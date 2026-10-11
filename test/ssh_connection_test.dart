@@ -11,6 +11,11 @@ import 'package:harbor_ssh/data/terminal_ai.dart';
 import 'package:harbor_ssh/domain/host.dart';
 import 'package:harbor_ssh/domain/remote_file.dart';
 import 'package:harbor_ssh/data/file_copy.dart';
+import 'package:harbor_ssh/data/local_files.dart';
+import 'package:harbor_ssh/data/resumable_copy.dart';
+import 'package:harbor_ssh/data/picked_transfer.dart';
+import 'package:harbor_ssh/data/local_transfer.dart';
+import 'package:harbor_ssh/ui/file_workspace_model.dart';
 import 'package:harbor_ssh/ui/ai_task_controller.dart';
 
 import 'support.dart';
@@ -774,6 +779,327 @@ void main() {
           ),
         );
       });
+      test('SFTP 断点续传完整流程：暂停、SSH 重连、上传下载、文件夹及冲突保护', () async {
+        final directory = await Directory.systemTemp.createTemp(
+          'harbor-resume-test-',
+        );
+        addTearDown(() => directory.delete(recursive: true));
+        final sourceDirectory = await Directory('${directory.path}/source')
+            .create();
+        final downloadDirectory = await Directory('${directory.path}/downloads')
+            .create();
+        final local = LocalFiles(sourceDirectory.path);
+        final payload = Uint8List.fromList(
+          List.generate(
+            3 * 1024 * 1024 + 123,
+            (index) => (index * 17 + index ~/ 65536) % 251,
+          ),
+        );
+        final input = File('${sourceDirectory.path}/large.bin');
+        await input.writeAsBytes(payload);
+        final connection = SshConnection(
+          id: 'resume-sftp',
+          host: Host(
+            id: 'resume-fixture',
+            name: 'Resume Fixture',
+            address: '127.0.0.1',
+            port: port,
+            username: 'resume-tester',
+          ),
+        );
+        addTearDown(connection.dispose);
+        final repository = memoryRepository();
+        Future<void> connect() => connection.connect(
+          const Credentials(password: 'fixture-password'),
+          repository,
+          (_, _) async => true,
+        );
+        await connect();
+        var remote = connection.files as ResumableFileSystem;
+        final upload = ResumableFileCopy(
+          source: local,
+          destination: remote,
+          sourcePath: input.path,
+          destinationPath: '/home/tester/resumed.bin',
+        );
+        final pause = TransferCancellation();
+        await expectLater(
+          upload.run(pause, (bytes) {
+            if (bytes >= 256 * 1024) pause.cancel();
+          }),
+          throwsA(isA<TransferCancelled>()),
+        );
+        final checkpoint = upload.transferred;
+        expect(checkpoint, greaterThan(0));
+        expect(checkpoint, lessThan(payload.length));
+        expect((await remote.statFile(upload.stagingPath)).size, checkpoint);
+        expect(
+          (await remote.browse('/home/tester')).entries
+              .any((file) => file.name == 'resumed.bin'),
+          isFalse,
+        );
+
+        // A completely new SSH transport still sees the partial data. An
+        // uncertain extra write must be truncated instead of appended twice.
+        connection.close();
+        await connection.reconnect(
+          const Credentials(password: 'fixture-password'),
+          repository,
+          (_, _) async => true,
+        );
+        remote = connection.files as ResumableFileSystem;
+        await remote.writeRange(
+          upload.stagingPath,
+          Stream.value(Uint8List.fromList([99, 98, 97])),
+          offset: checkpoint,
+          cancellation: TransferCancellation(),
+          onProgress: (_) {},
+        );
+        upload.rebind(local, remote);
+        final resumedProgress = <int>[];
+        await upload.run(TransferCancellation(), resumedProgress.add);
+        expect(resumedProgress.first, checkpoint);
+        expect(upload.transferred, payload.length);
+        final downloaded = BytesBuilder(copy: true);
+        await remote.download(
+          '/home/tester/resumed.bin',
+          (bytes) async {
+            downloaded.add(bytes);
+          },
+          cancellation: TransferCancellation(),
+          onProgress: (_) {},
+        );
+        expect(downloaded.takeBytes(), payload);
+        expect(
+          (await remote.browse('/home/tester')).entries
+              .any((file) => file.path == upload.stagingPath),
+          isFalse,
+        );
+
+        // Exercise the actual workspace task, including its retained batch,
+        // resume action and local random-access download after SSH reconnection.
+        final model = FileWorkspaceModel();
+        addTearDown(model.dispose);
+        final source = model.add(
+          0,
+          name: 'Remote',
+          files: remote,
+          session: connection,
+          initialPath: '/home/tester',
+        );
+        final target = model.add(
+          1,
+          name: 'Local',
+          files: LocalFiles(downloadDirectory.path),
+          isLocal: true,
+          initialPath: downloadDirectory.path,
+        );
+        await eventually(() => !source.loading && !target.loading);
+        final remoteFile = source.entries.firstWhere(
+          (file) => file.name == 'resumed.bin',
+        );
+        var interrupted = false;
+        void pauseModel() {
+          if (!interrupted &&
+              model.transferred >= 256 * 1024 &&
+              model.transfer != null) {
+            interrupted = true;
+            model.cancel();
+          }
+        }
+
+        model.addListener(pauseModel);
+        expect(
+          await model.drop(FileDragData(source, [remoteFile]), target),
+          isFalse,
+        );
+        model.removeListener(pauseModel);
+        expect(model.canResume, isTrue);
+        expect(
+          await File('${downloadDirectory.path}/resumed.bin').exists(),
+          isFalse,
+        );
+        connection.close();
+        await connection.reconnect(
+          const Credentials(password: 'fixture-password'),
+          repository,
+          (_, _) async => true,
+        );
+        await model.resume();
+        expect(model.canResume, isFalse);
+        expect(
+          await File('${downloadDirectory.path}/resumed.bin').readAsBytes(),
+          payload,
+        );
+
+        final folder = await Directory('${sourceDirectory.path}/folder')
+            .create();
+        await File('${folder.path}/a.bin').writeAsBytes(payload);
+        await File('${folder.path}/b.txt').writeAsString('第二个文件');
+        await File('${folder.path}/empty.txt').writeAsBytes([]);
+        final tree = ResumableDirectoryCopy(
+          source: local,
+          destination: remote,
+          sourcePath: folder.path,
+          destinationPath: '/home/tester/resumed-folder',
+        );
+        final treePause = TransferCancellation();
+        await expectLater(
+          tree.run(treePause, (bytes) {
+            if (bytes >= 256 * 1024) treePause.cancel();
+          }),
+          throwsA(isA<TransferCancelled>()),
+        );
+        final treeCheckpoint = tree.transferred;
+        final treeProgress = <int>[];
+        await tree.run(TransferCancellation(), treeProgress.add);
+        expect(treeProgress.first, treeCheckpoint);
+        expect(tree.complete, isTrue);
+        final treeBytes = BytesBuilder(copy: true);
+        await remote.download(
+          '/home/tester/resumed-folder/a.bin',
+          (bytes) async {
+            treeBytes.add(bytes);
+          },
+          cancellation: TransferCancellation(),
+          onProgress: (_) {},
+        );
+        expect(treeBytes.takeBytes(), payload);
+        expect(
+          (await remote.statFile('/home/tester/resumed-folder/empty.txt')).size,
+          0,
+        );
+
+        // The picker/mobile path uses an immutable cache for non-seekable
+        // uploads and resumes downloads before exporting to a document writer.
+        var opened = 0;
+        final picker = _DirectoryTransferPicker(downloadDirectory.path);
+        final picked = await PickedTransfer.upload(
+          [
+            UploadFile('picked.bin', payload.length, () {
+              opened++;
+              return Stream.value(payload);
+            }),
+          ],
+          '/home/tester',
+          endpoint: 'fixture',
+          cacheDirectory: directory,
+        );
+        final pickedPause = TransferCancellation();
+        await expectLater(
+          picked.run(
+            remote,
+            pickedPause,
+            picker: picker,
+            onFile: (_, _, _) {},
+            onProgress: (bytes) {
+              if (bytes > 0) pickedPause.cancel();
+            },
+          ),
+          throwsA(isA<TransferCancelled>()),
+        );
+        expect(opened, 1);
+        final pickedOffset = picked.transferred;
+        final pickedProgress = <int>[];
+        await picked.run(
+          remote,
+          TransferCancellation(),
+          picker: picker,
+          onFile: (_, _, _) {},
+          onProgress: pickedProgress.add,
+        );
+        expect(pickedProgress.first, pickedOffset);
+        expect(opened, 1);
+        expect(await picked.cache.exists(), isFalse);
+
+        final pickedDownload = await PickedTransfer.downloading(
+          await remote.statFile('/home/tester/picked.bin'),
+          endpoint: 'fixture',
+          cacheDirectory: directory,
+        );
+        final downloadPause = TransferCancellation();
+        await expectLater(
+          pickedDownload.run(
+            remote,
+            downloadPause,
+            picker: picker,
+            onFile: (_, _, _) {},
+            onProgress: (bytes) {
+              if (bytes >= 256 * 1024) downloadPause.cancel();
+            },
+          ),
+          throwsA(isA<TransferCancelled>()),
+        );
+        expect(
+          await File('${downloadDirectory.path}/picked.bin').exists(),
+          isFalse,
+        );
+        final downloadOffset = pickedDownload.transferred;
+        final downloadProgress = <int>[];
+        await pickedDownload.run(
+          remote,
+          TransferCancellation(),
+          picker: picker,
+          onFile: (_, _, _) {},
+          onProgress: downloadProgress.add,
+        );
+        expect(downloadProgress.first, downloadOffset);
+        expect(
+          await File('${downloadDirectory.path}/picked.bin').readAsBytes(),
+          payload,
+        );
+        expect(await pickedDownload.cache.exists(), isFalse);
+
+        final changed = ResumableFileCopy(
+          source: local,
+          destination: remote,
+          sourcePath: input.path,
+          destinationPath: '/home/tester/changed.bin',
+        );
+        final changedPause = TransferCancellation();
+        await expectLater(
+          changed.run(changedPause, (bytes) {
+            if (bytes > 0) changedPause.cancel();
+          }),
+          throwsA(isA<TransferCancelled>()),
+        );
+        await input.writeAsString('changed source');
+        await expectLater(
+          changed.run(TransferCancellation(), (_) {}),
+          throwsStateError,
+        );
+        await changed.discard();
+        expect(
+          (await remote.browse('/home/tester')).entries.any(
+            (file) =>
+                file.path == changed.stagingPath || file.name == 'changed.bin',
+          ),
+          isFalse,
+        );
+
+        final conflict = ResumableFileCopy(
+          source: local,
+          destination: remote,
+          sourcePath: input.path,
+          destinationPath: '/home/tester/resumed.bin',
+        );
+        await expectLater(
+          conflict.run(TransferCancellation(), (_) {}),
+          throwsA(anything),
+        );
+        await conflict.discard();
+        final original = BytesBuilder(copy: true);
+        await remote.download(
+          '/home/tester/resumed.bin',
+          (bytes) async {
+            original.add(bytes);
+          },
+          cancellation: TransferCancellation(),
+          onProgress: (_) {},
+        );
+        expect(original.takeBytes(), payload);
+      }, timeout: const Timeout(Duration(minutes: 3)));
+
       test('SFTP 文件上传下载、同名保护、取消清理及终端隔离', () async {
         final connection = SshConnection(id: 'transfer-sftp', host: host());
         addTearDown(connection.dispose);
@@ -1252,4 +1578,14 @@ Future<void> eventually(bool Function() predicate) async {
     if (DateTime.now().isAfter(deadline)) fail('等待 SSH 状态或输出超时');
     await Future<void>.delayed(const Duration(milliseconds: 20));
   }
+}
+
+class _DirectoryTransferPicker implements LocalTransfer {
+  _DirectoryTransferPicker(this.directory);
+  final String directory;
+  @override
+  Future<DownloadTarget?> pickDownload(String name) =>
+      NativeLocalTransfer.createDiskDownload(directory, name);
+  @override
+  Future<List<UploadFile>> pickUploads() async => [];
 }
