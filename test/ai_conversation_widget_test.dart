@@ -95,11 +95,15 @@ void main() {
         }, []),
       );
       await tester.pumpAndSettle();
+      Finder cellText(String text) => find.byWidgetPredicate((widget) {
+        if (widget is! RichText) return false;
+        return widget.text.toPlainText(includePlaceholders: false) == text;
+      });
       expect(find.byType(AiMarkdownCodeBlock), findsOneWidget);
       expect(find.text('Bash'), findsOneWidget);
       expect(find.text('1\n2\n3'), findsOneWidget);
       expect(find.text(code), findsOneWidget);
-      expect(find.text(command), findsOneWidget);
+      expect(cellText(command), findsOneWidget);
       expect(find.byType(AiMarkdownTable), findsOneWidget);
       expect(find.text('命令'), findsOneWidget);
       expect(find.text('作用'), findsOneWidget);
@@ -113,7 +117,7 @@ void main() {
       expect(grid.children.every((row) => row.children.length == 2), isTrue);
       final tableRect = tester.getRect(find.byType(AiMarkdownTable));
       for (final purpose in purposes) {
-        final field = find.text(purpose);
+        final field = cellText(purpose);
         expect(field, findsOneWidget);
         await Scrollable.ensureVisible(tester.element(field), alignment: 0.5);
         await tester.pumpAndSettle();
@@ -127,12 +131,12 @@ void main() {
       // The narrow layout keeps the first command and its purpose in the same
       // row, with columns aligned to the header instead of stacked cards.
       expect(
-        tester.getCenter(find.text(command)).dy,
-        closeTo(tester.getCenter(find.text(purposes.first)).dy, 0.5),
+        tester.getCenter(cellText(command)).dy,
+        closeTo(tester.getCenter(cellText(purposes.first)).dy, 0.5),
       );
       expect(
-        tester.getRect(find.text(command)).right,
-        lessThan(tester.getRect(find.text(purposes.first)).left),
+        tester.getRect(cellText(command)).right,
+        lessThan(tester.getRect(cellText(purposes.first)).left),
       );
       await Scrollable.ensureVisible(
         tester.element(find.byTooltip('复制代码')),
@@ -145,7 +149,7 @@ void main() {
       await tester.tap(find.byTooltip('折叠代码'));
       await tester.pumpAndSettle();
       expect(find.text(code), findsNothing);
-      expect(find.text(command), findsOneWidget);
+      expect(cellText(command), findsOneWidget);
 
       expect(find.byTooltip('展开代码'), findsOneWidget);
       await Scrollable.ensureVisible(
