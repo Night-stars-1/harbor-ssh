@@ -11,6 +11,7 @@ import 'package:harbor_ssh/ui/ai_task_controller.dart';
 import 'package:harbor_ssh/ui/ai_markdown_code_block.dart';
 import 'package:harbor_ssh/ui/ai_markdown_table.dart';
 import 'package:harbor_ssh/ui/ai_window_bridge.dart';
+import 'package:harbor_ssh/ui/ai_window_session.dart';
 import 'package:harbor_ssh/ui/terminal_ai_panel.dart';
 import 'package:harbor_ssh/ui/theme.dart';
 
@@ -471,6 +472,230 @@ bash deploy-marzban.sh 1
     expect(tester.takeException(), isNull);
     await tester.pumpWidget(const SizedBox.shrink());
   });
+
+  test('独立窗口可切换到从未打开 AI 的 SSH，切换不停止原任务', () async {
+    final h = _Harness();
+    addTearDown(h.dispose);
+    final other = _TestTask();
+    addTearDown(other.dispose);
+    h.host.register('s1', h.task, '生产服务器', onDock: h.dock);
+    h.task
+      ..entries.add(AiTaskEntry('s1 的对话', user: true))
+      ..running = true;
+    final created = <String>{'s1'};
+    h.sessions = () => const [
+      AiWindowSession(
+        id: 's1',
+        hostName: '生产服务器',
+        endpoint: 'a.example:22',
+        connected: true,
+        running: true,
+      ),
+      AiWindowSession(
+        id: 's2',
+        hostName: '测试服务器',
+        endpoint: 'b.example:22',
+        connected: true,
+      ),
+    ];
+    h.ensure = (id) async {
+      if (id == 's2' && created.add(id)) {
+        h.host.register('s2', other, '测试服务器', onDock: h.dock);
+      }
+      return created.contains(id);
+    };
+    h.bindSessions();
+
+    await h.host.open('s1');
+    await h.remote.initialize();
+    expect(h.remote.sessions.map((s) => s.id), ['s1', 's2']);
+    expect(h.remote.selectingSession, isFalse);
+
+    expect(await h.remote.selectSession('s2'), isTrue);
+    expect(h.remote.sessionId, 's2');
+    expect(h.remote.hostName, '测试服务器');
+    expect(h.remote.selectingSession, isFalse);
+    expect(h.task.stopCount, 0, reason: '切到 B 不停止 A 的运行中任务');
+    expect(h.task.running, isTrue);
+    expect(h.host.isDetached('s1'), isFalse);
+    expect(h.host.isDetached('s2'), isTrue);
+
+    // A user action in the window now lands on B only.
+    await h.remote.start('只在 B 上执行');
+    await h.settle();
+    expect(other.calls, contains('start:只在 B 上执行'));
+    expect(h.task.calls, isNot(contains('start:只在 B 上执行')));
+    expect(other.stopCount, 0);
+  });
+
+  test('重连后的主机名会更新独立窗口标题', () async {
+    final h = _Harness();
+    addTearDown(h.dispose);
+    h.host.register('s1', h.task, '旧名称', onDock: h.dock);
+    await h.host.open('s1');
+    await h.remote.initialize();
+    expect(h.remote.hostName, '旧名称');
+    h.host.register('s1', h.task, '新名称', onDock: h.dock);
+    await h.settle();
+    expect(h.remote.hostName, '新名称');
+    expect(h.remote.sessionId, 's1');
+  });
+
+  test('目录随会话打开、关闭与后台任务状态更新', () async {
+    final h = _Harness();
+    addTearDown(h.dispose);
+    final background = _TestTask();
+    addTearDown(background.dispose);
+    h.host.register('s1', h.task, '生产服务器', onDock: h.dock);
+    h.host.register('s2', background, '测试服务器', onDock: h.dock);
+    var connected = true;
+    var secondOpen = false;
+    h.sessions = () => [
+      AiWindowSession(
+        id: 's1',
+        hostName: '生产服务器',
+        endpoint: 'a.example:22',
+        connected: connected,
+        running: h.task.running,
+      ),
+      if (secondOpen)
+        AiWindowSession(
+          id: 's2',
+          hostName: '测试服务器',
+          endpoint: 'b.example:22',
+          connected: true,
+          running: background.running,
+        ),
+    ];
+    h.bindSessions();
+
+    await h.host.open('s1');
+    await h.remote.initialize();
+    expect(h.remote.sessions.map((s) => s.id), ['s1']);
+
+    // A second SSH session is opened in the main window.
+    secondOpen = true;
+    h.host.refreshSessions();
+    await h.settle();
+    expect(h.remote.sessions.map((s) => s.id), ['s1', 's2']);
+
+    // Its turn state changes: the window mirrors another session, yet the
+    // directory is refreshed.
+    background.running = true;
+    background.poke();
+    await h.settle();
+    expect(
+      h.remote.sessions.firstWhere((s) => s.id == 's2').running,
+      isTrue,
+      reason: '非 active 任务状态变化也会推送目录',
+    );
+
+    // The mirrored SSH session disconnects.
+    connected = false;
+    h.host.refreshSessions();
+    await h.settle();
+    expect(h.remote.sessions.first.connected, isFalse);
+
+    // s2 closes: it leaves the directory.
+    secondOpen = false;
+    h.host.refreshSessions();
+    await h.settle();
+    expect(h.remote.sessions.map((s) => s.id), ['s1']);
+  });
+
+  test('迟到的选择不会把窗口拖回旧会话', () async {
+    final h = _Harness();
+    addTearDown(h.dispose);
+    final second = _TestTask();
+    addTearDown(second.dispose);
+    h.host.register('s1', h.task, '甲', onDock: h.dock);
+    h.host.register('s2', second, '乙', onDock: h.dock);
+    h.sessions = () => const [
+      AiWindowSession(
+        id: 's1',
+        hostName: '甲',
+        endpoint: 'a:22',
+        connected: true,
+      ),
+      AiWindowSession(
+        id: 's2',
+        hostName: '乙',
+        endpoint: 'b:22',
+        connected: true,
+      ),
+      AiWindowSession(
+        id: 's3',
+        hostName: '丙',
+        endpoint: 'c:22',
+        connected: true,
+      ),
+    ];
+    h.bindSessions();
+    await h.host.open('s1');
+    await h.remote.initialize();
+    // The main window already moved on to s2 (another pane detached it).
+    await h.host.open('s2');
+
+    // A select that still believes it is on s1 must be rejected.
+    final stale = await h.host.handle(
+      const MethodCall('action', <String, Object?>{
+        'sessionId': 's1',
+        'generation': 1,
+        'op': AiWindowOp.openSession,
+        'args': <String, Object?>{'id': 's3'},
+      }),
+    ) as Map;
+    expect(stale.containsKey('result'), isFalse);
+    expect((stale['state'] as Map)['sessionId'], 's2');
+    expect(h.host.isDetached('s2'), isTrue);
+    expect(h.host.isDetached('s1'), isFalse);
+
+    // A stale generation of the current session is rejected too.
+    final wrongGeneration = await h.host.handle(
+      const MethodCall('action', <String, Object?>{
+        'sessionId': 's2',
+        'generation': 999,
+        'op': AiWindowOp.openSession,
+        'args': <String, Object?>{'id': 's3'},
+      }),
+    ) as Map;
+    expect(wrongGeneration.containsKey('result'), isFalse);
+    expect(h.host.isDetached('s2'), isTrue);
+    expect(h.host.isDetached('s3'), isFalse);
+  });
+
+  test('会话目录只镜像凭据无关的字段', () async {
+    final h = _Harness();
+    addTearDown(h.dispose);
+    h.host.register('s1', h.task, '生产服务器', onDock: h.dock);
+    h.sessions = () => const [
+      AiWindowSession(
+        id: 's1',
+        hostName: '生产服务器',
+        endpoint: 'a.example:22',
+        connected: true,
+        running: true,
+        waitingApproval: true,
+      ),
+    ];
+    h.bindSessions();
+    await h.host.open('s1');
+    await h.remote.initialize();
+
+    final rows = h.pushes.last['sessions'] as List;
+    expect(rows, hasLength(1));
+    expect((rows.single as Map).keys.toSet(), {
+      'id',
+      'hostName',
+      'endpoint',
+      'connected',
+      'running',
+      'waitingApproval',
+    });
+    expect(jsonEncode(rows), isNot(contains('sk-secret')));
+    expect(jsonEncode(rows), isNot(contains('password')));
+    expect(h.remote.sessions.single.waitingApproval, isTrue);
+  });
 }
 
 /// Test double for the main-engine controller: records what the detached
@@ -599,6 +824,14 @@ class _Harness {
   int openCount = 0;
   int hides = 0;
   int docks = 0;
+
+  /// Session directory the host reads, as [TerminalWorkspace] supplies it.
+  List<AiWindowSession> Function() sessions = () => const [];
+
+  /// Lazily materializes a session that never opened the assistant.
+  Future<bool> Function(String sessionId) ensure = (_) async => false;
+
+  void bindSessions() => host.bindSessions(catalog: sessions, ensure: ensure);
 
   void dock() => docks++;
 

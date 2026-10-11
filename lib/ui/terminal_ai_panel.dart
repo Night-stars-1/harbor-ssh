@@ -13,10 +13,68 @@ import '../data/ai_image_input.dart';
 import '../data/terminal_ai.dart';
 
 import 'ai_task_controller.dart';
+import 'ai_window_session.dart';
 import 'ai_markdown_code_block.dart';
 import 'ai_markdown_style.dart';
 import 'ai_markdown_table.dart';
+import 'expressive_widgets.dart';
 import 'theme.dart';
+
+/// Minimum window width that earns the standalone workbench's action rail;
+/// below it the same actions move into the header toolbar.
+const _workspaceRailMinWidth = 900.0;
+
+/// The rail also needs height for its actions and host facts, so short windows
+/// fall back to the toolbar and give the chat a usable height instead.
+const _workspaceRailMinHeight = 560.0;
+
+const _workspaceRailWidth = 220.0;
+
+/// Reading measure shared by the transcript surface and the composer below it.
+const _workspaceReadingWidth = 860.0;
+
+/// Largest share of the chat column the approval prompt and composer may take.
+/// Beyond it that bottom region scrolls, so a short window with large text can
+/// never push the transcript into an overflow.
+const _workspaceBottomShare = 0.7;
+
+/// Composer width (at 1x text) below which the model and approval controls
+/// collapse to icon buttons. It follows the composer's own constraints, not the
+/// whole window, and grows with the text scale.
+const _composerCompactWidth = 300.0;
+
+/// Standalone transcript bubbles: a user message reads as a right-aligned note
+/// and an assistant reply as a left-aligned document. Each is capped by an
+/// absolute width and by a share of the chat column, so a narrow window keeps
+/// both sides readable instead of letting a bubble run the full width.
+const _bubbleMaxUserWidth = 480.0;
+const _bubbleMaxAssistantWidth = 640.0;
+const _bubbleMaxUserShare = 0.78;
+const _bubbleMaxAssistantShare = 0.92;
+
+/// Safe opening prompts for the empty workbench. Tapping one only prefills the
+/// composer: nothing is sent and no command runs.
+const _workspaceSuggestions = <String>[
+  '检查磁盘空间，找出占用最大的目录',
+  '查看最近的服务错误日志',
+  '列出内存占用最高的进程',
+];
+
+/// Composer draft for one SSH session in the detached window. The window root
+/// keeps one per session, so switching sessions and coming back restores the
+/// text, the pending attachments and the transcript scroll offset without
+/// keeping hidden panels alive.
+class AiPanelDraft {
+  const AiPanelDraft({
+    this.text = const TextEditingValue(),
+    this.images = const <AiImage>[],
+    this.scrollOffset,
+  });
+
+  final TextEditingValue text;
+  final List<AiImage> images;
+  final double? scrollOffset;
+}
 
 class TerminalAiPanel extends StatefulWidget {
   const TerminalAiPanel({
@@ -28,6 +86,9 @@ class TerminalAiPanel extends StatefulWidget {
     this.onDetach,
     this.onDock,
     this.imageInput,
+    this.sessionSelection,
+    this.draft,
+    this.onDraftChanged,
   });
   final AiTaskController task;
   final String hostName;
@@ -42,6 +103,19 @@ class TerminalAiPanel extends StatefulWidget {
   /// dock entry point hidden, which is the embedded panel's normal state.
   final VoidCallback? onDock;
   final AiImageInput? imageInput;
+
+  /// The open SSH sessions the detached window may switch between. Null keeps
+  /// the panel a single-session view: the embedded panel and the read-only
+  /// previews never offer a session switcher.
+  final AiWindowSessionSelection? sessionSelection;
+
+  /// Draft to restore when this panel is built for a session; the detached
+  /// window root keeps the drafts so switching sessions never loses one.
+  final AiPanelDraft? draft;
+
+  /// Reports the composer draft while the user edits, so the root can store it
+  /// under the current session before the panel is rebuilt for another one.
+  final ValueChanged<AiPanelDraft>? onDraftChanged;
   @override
   State<TerminalAiPanel> createState() => _TerminalAiPanelState();
 }
@@ -49,8 +123,18 @@ class TerminalAiPanel extends StatefulWidget {
 class _TerminalAiPanelState extends State<TerminalAiPanel> {
   final _input = TextEditingController();
   final _scroll = ScrollController();
+
+  /// The session this panel was built for, captured once. Notifications from
+  /// the shared controller may arrive for a different session before the root
+  /// swaps the panel, and those must never touch this session's draft.
+  String? _sessionId;
   bool _scrollQueued = false;
   final _images = <AiImage>[];
+
+  /// Immutable snapshot of [_images] handed to the draft report. It is rebuilt
+  /// only when the attachments change, so typing and scrolling never copy the
+  /// list, and the reported draft never aliases the mutable composer list.
+  List<AiImage> _imagesSnapshot = const <AiImage>[];
   bool _loadingImages = false;
   bool _dragging = false;
   List<String> _models = const [];
@@ -76,6 +160,7 @@ class _TerminalAiPanelState extends State<TerminalAiPanel> {
   void _addImage(AiImage image) {
     AiImage.validateBatch([..._images, image]);
     setState(() => _images.add(image));
+    _imagesChanged();
   }
 
   Future<void> _readSources(List<AiImageSource> sources) async {
@@ -89,7 +174,10 @@ class _TerminalAiPanelState extends State<TerminalAiPanel> {
       added.add(image);
       AiImage.validateBatch([..._images, ...added]);
     }
-    if (mounted) setState(() => _images.addAll(added));
+    if (mounted) {
+      setState(() => _images.addAll(added));
+      _imagesChanged();
+    }
   }
 
   Future<void> _loadImages(Future<void> Function() load) async {
@@ -165,13 +253,61 @@ class _TerminalAiPanelState extends State<TerminalAiPanel> {
   @override
   void initState() {
     super.initState();
+    _sessionId = widget.sessionSelection?.sessionId;
+    final draft = widget.draft;
+    if (draft != null) {
+      _input.value = draft.text;
+      _images.addAll(draft.images);
+      _imagesSnapshot = List.unmodifiable(_images);
+    }
+    // A panel can be created for a session that is already running (switching
+    // back to it). That is not a new accepted send, so the first notification
+    // must not clear the draft that was just restored.
+    _wasRunning = widget.task.running;
+    _input.addListener(_reportDraft);
+    _scroll.addListener(_reportDraft);
     widget.task.addListener(_changed);
     // Loading here keeps the history list ready before it is opened. The store
     // is injected by the app; without one this is a no-op.
     unawaited(widget.task.loadHistory());
+    final offset = draft?.scrollOffset;
+    if (offset != null && offset > 0) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted && _scroll.hasClients) _scroll.jumpTo(offset);
+      });
+    }
+  }
+
+  /// Stores the composer draft under the session it belongs to. The root keeps
+  /// one draft per session, so the panel can be rebuilt for another session
+  /// without keeping hidden panels (and their listeners) alive.
+  void _reportDraft() {
+    final report = widget.onDraftChanged;
+    if (report == null) return;
+    report(
+      AiPanelDraft(
+        text: _input.value,
+        images: _imagesSnapshot,
+        scrollOffset: _scroll.hasClients ? _scroll.offset : null,
+      ),
+    );
+  }
+
+  /// Rebuilds the immutable attachment snapshot, then reports the draft. Only
+  /// the places that add or remove an attachment call this.
+  void _imagesChanged() {
+    _imagesSnapshot = List.unmodifiable(_images);
+    _reportDraft();
   }
 
   void _changed() {
+    // A notification for another session must not clear this session's draft:
+    // switching to a running session would otherwise wipe the draft of the one
+    // the user just left.
+    if (_sessionId != null &&
+        widget.sessionSelection?.sessionId != _sessionId) {
+      return;
+    }
     final running = widget.task.running;
     if (running && !_wasRunning) {
       // The message is accepted only once the turn starts; a rejected start
@@ -179,6 +315,7 @@ class _TerminalAiPanelState extends State<TerminalAiPanel> {
       if (_input.text.isNotEmpty || _images.isNotEmpty) {
         _input.clear();
         setState(() => _images.clear());
+        _imagesChanged();
       }
       _scrollToEnd();
     }
@@ -204,6 +341,8 @@ class _TerminalAiPanelState extends State<TerminalAiPanel> {
   @override
   void dispose() {
     widget.task.removeListener(_changed);
+    _input.removeListener(_reportDraft);
+    _scroll.removeListener(_reportDraft);
     _input.dispose();
     _scroll.dispose();
     super.dispose();
@@ -348,6 +487,7 @@ class _TerminalAiPanelState extends State<TerminalAiPanel> {
     if (!mounted) return;
     _input.clear();
     setState(() => _images.clear());
+    _imagesChanged();
   }
 
   /// Non-blocking hint that history could not be read or written. It stays
@@ -505,23 +645,28 @@ class _TerminalAiPanelState extends State<TerminalAiPanel> {
   Widget _compactModelPicker(AiTaskController task) =>
       _modelPicker(task, compact: true);
 
+  /// Shared wording for the approval control, its menu and the rail facts.
+  String _approvalLabel(AiApprovalMode mode) => switch (mode) {
+    AiApprovalMode.auto => '自动审批',
+    AiApprovalMode.readOnly => '只读模式',
+    AiApprovalMode.manual => '手动审批',
+  };
+
+  IconData _approvalIcon(AiApprovalMode mode) => switch (mode) {
+    AiApprovalMode.auto => Icons.verified_user_rounded,
+    AiApprovalMode.readOnly => Icons.visibility_outlined,
+    AiApprovalMode.manual => Icons.gpp_maybe_outlined,
+  };
+
   Widget _approvalMode(AiTaskController task, {bool compact = false}) {
     final mode = task.approvalMode;
-    final label = switch (mode) {
-      AiApprovalMode.auto => '自动审批',
-      AiApprovalMode.readOnly => '只读模式',
-      AiApprovalMode.manual => '手动审批',
-    };
+    final label = _approvalLabel(mode);
     final message = switch (mode) {
       AiApprovalMode.auto => '高风险命令将自动执行',
       AiApprovalMode.readOnly => 'AI 只发起工具调用，命令由客户端执行',
       AiApprovalMode.manual => '高风险命令执行前询问',
     };
-    final icon = switch (mode) {
-      AiApprovalMode.auto => Icons.verified_user_rounded,
-      AiApprovalMode.readOnly => Icons.visibility_outlined,
-      AiApprovalMode.manual => Icons.gpp_maybe_outlined,
-    };
+    final icon = _approvalIcon(mode);
     return MenuAnchor(
       controller: _approvalMenu,
       alignmentOffset: const Offset(0, 4),
@@ -599,121 +744,128 @@ class _TerminalAiPanelState extends State<TerminalAiPanel> {
   }
 
   Widget _composerOptions(AiTaskController task) {
-    final compact = MediaQuery.sizeOf(context).width < 360;
-    final modelControl = task.settings().configured
-        ? compact
-              ? _compactModelPicker(task)
-              : Expanded(
-                  child: Align(
-                    alignment: Alignment.centerRight,
-                    child: _modelPicker(task),
-                  ),
-                )
-        : null;
     return Padding(
       padding: const EdgeInsets.fromLTRB(8, 2, 8, 2),
-      child: Row(
-        children: [
-          if (compact)
-            SizedBox.square(
-              dimension: 40,
-              child: IconButton(
-                key: const ValueKey('ai-add-image'),
-                onPressed: task.running || _loadingImages ? null : _pickImages,
-                constraints: const BoxConstraints.tightFor(
-                  width: 40,
-                  height: 40,
-                ),
-                padding: EdgeInsets.zero,
-                visualDensity: VisualDensity.compact,
-                icon: _loadingImages
-                    ? const SizedBox.square(
-                        dimension: 20,
-                        child: CircularProgressIndicator(strokeWidth: 2),
+      child: LayoutBuilder(
+        builder: (context, constraints) {
+          // The composer's own width decides, not the window: the detached
+          // workbench can be narrow inside a wide window. The threshold grows
+          // with the text scale so a 2x composer collapses to icon buttons
+          // before its labels start fighting for room.
+          final compact =
+              constraints.maxWidth <
+              MediaQuery.textScalerOf(context).scale(_composerCompactWidth);
+          final model = task.settings().configured
+              ? compact
+                    ? _compactModelPicker(task)
+                    : Expanded(
+                        child: Align(
+                          alignment: Alignment.centerRight,
+                          child: _modelPicker(task),
+                        ),
                       )
-                    : const Icon(
-                        Icons.add_photo_alternate_outlined,
-                        semanticLabel: '添加图片',
-                      ),
-              ),
-            )
-          else
-            IconButton(
-              key: const ValueKey('ai-add-image'),
-              onPressed: task.running || _loadingImages ? null : _pickImages,
-              icon: _loadingImages
-                  ? const SizedBox.square(
-                      dimension: 20,
-                      child: CircularProgressIndicator(strokeWidth: 2),
-                    )
-                  : const Icon(
-                      Icons.add_photo_alternate_outlined,
-                      semanticLabel: '添加图片',
+              : null;
+          final pickable = !task.running && !_loadingImages;
+          return Row(
+            children: [
+              if (compact)
+                SizedBox.square(
+                  dimension: 40,
+                  child: IconButton(
+                    key: const ValueKey('ai-add-image'),
+                    onPressed: pickable ? _pickImages : null,
+                    constraints: const BoxConstraints.tightFor(
+                      width: 40,
+                      height: 40,
                     ),
-            ),
-          _approvalMode(task, compact: compact),
-          if (modelControl != null) ...[
-            modelControl,
-            if (!compact) const SizedBox(width: 4),
-          ] else
-            const Spacer(),
-          ValueListenableBuilder<TextEditingValue>(
-            valueListenable: _input,
-            builder: (context, value, _) => compact
-                ? SizedBox.square(
-                    dimension: 40,
-                    child: IconButton.filled(
-                      key: const ValueKey('ai-send'),
-                      onPressed: task.running
-                          ? task.stop
-                          : _loadingImages ||
-                                (value.text.trim().isEmpty && _images.isEmpty)
-                          ? null
-                          : _send,
-                      style: IconButton.styleFrom(
-                        minimumSize: const Size.square(40),
-                        maximumSize: const Size.square(40),
-                        padding: EdgeInsets.zero,
-                        visualDensity: VisualDensity.compact,
-                        tapTargetSize: MaterialTapTargetSize.shrinkWrap,
-                      ),
-                      constraints: const BoxConstraints.tightFor(
-                        width: 40,
-                        height: 40,
-                      ),
-                      icon: Icon(
-                        task.running
-                            ? Icons.stop_rounded
-                            : Icons.arrow_upward_rounded,
-                        semanticLabel: task.running ? '停止' : '发送',
-                      ),
-                    ),
-                  )
-                : IconButton.filled(
-                    key: const ValueKey('ai-send'),
-                    onPressed: task.running
-                        ? task.stop
-                        : _loadingImages ||
-                              (value.text.trim().isEmpty && _images.isEmpty)
-                        ? null
-                        : _send,
-                    style: IconButton.styleFrom(
-                      minimumSize: const Size.square(48),
-                      maximumSize: const Size.square(48),
-                      padding: EdgeInsets.zero,
-                    ),
-                    icon: Icon(
-                      task.running
-                          ? Icons.stop_rounded
-                          : Icons.arrow_upward_rounded,
-                      semanticLabel: task.running ? '停止' : '发送',
-                    ),
+                    padding: EdgeInsets.zero,
+                    visualDensity: VisualDensity.compact,
+                    icon: _loadingImages
+                        ? const SizedBox.square(
+                            dimension: 20,
+                            child: CircularProgressIndicator(strokeWidth: 2),
+                          )
+                        : const Icon(
+                            Icons.add_photo_alternate_outlined,
+                            semanticLabel: '添加图片',
+                          ),
                   ),
-          ),
-        ],
+                )
+              else
+                IconButton(
+                  key: const ValueKey('ai-add-image'),
+                  onPressed: pickable ? _pickImages : null,
+                  icon: _loadingImages
+                      ? const SizedBox.square(
+                          dimension: 20,
+                          child: CircularProgressIndicator(strokeWidth: 2),
+                        )
+                      : const Icon(
+                          Icons.add_photo_alternate_outlined,
+                          semanticLabel: '添加图片',
+                        ),
+                ),
+              _approvalMode(task, compact: compact),
+              if (model != null) ...[
+                model,
+                if (!compact) const SizedBox(width: 4),
+              ] else
+                const Spacer(),
+              ValueListenableBuilder<TextEditingValue>(
+                valueListenable: _input,
+                builder: (context, value, _) {
+                  // Stopping a running turn is always available; sending needs
+                  // a draft and no image still loading.
+                  final sendable =
+                      !_loadingImages &&
+                      (value.text.trim().isNotEmpty || _images.isNotEmpty);
+                  final VoidCallback? onPressed = task.running
+                      ? task.stop
+                      : (sendable ? _send : null);
+                  return compact
+                      ? SizedBox.square(
+                          dimension: 40,
+                          child: IconButton.filled(
+                            key: const ValueKey('ai-send'),
+                            onPressed: onPressed,
+                            style: IconButton.styleFrom(
+                              minimumSize: const Size.square(40),
+                              maximumSize: const Size.square(40),
+                              padding: EdgeInsets.zero,
+                              visualDensity: VisualDensity.compact,
+                              tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                            ),
+                            constraints: const BoxConstraints.tightFor(
+                              width: 40,
+                              height: 40,
+                            ),
+                            icon: _sendIcon(task),
+                          ),
+                        )
+                      : IconButton.filled(
+                          key: const ValueKey('ai-send'),
+                          onPressed: onPressed,
+                          style: IconButton.styleFrom(
+                            minimumSize: const Size.square(48),
+                            maximumSize: const Size.square(48),
+                            padding: EdgeInsets.zero,
+                          ),
+                          icon: _sendIcon(task),
+                        );
+                },
+              ),
+            ],
+          );
+        },
       ),
     );
   }
+
+  /// The composer's primary action: stop while a turn runs, send otherwise.
+  Icon _sendIcon(AiTaskController task) => Icon(
+    task.running ? Icons.stop_rounded : Icons.arrow_upward_rounded,
+    semanticLabel: task.running ? '停止' : '发送',
+  );
 
   Widget _composer(AiTaskController task) {
     final colors = Theme.of(context).colorScheme;
@@ -734,7 +886,10 @@ class _TerminalAiPanelState extends State<TerminalAiPanel> {
                 removable: true,
                 onRemove: _loadingImages || task.running
                     ? null
-                    : (index) => setState(() => _images.removeAt(index)),
+                    : (index) {
+                        setState(() => _images.removeAt(index));
+                        _imagesChanged();
+                      },
               ),
               const SizedBox(height: 8),
             ],
@@ -861,16 +1016,7 @@ class _TerminalAiPanelState extends State<TerminalAiPanel> {
         listenable: widget.task,
         builder: (context, _) {
           final task = widget.task;
-          final messages = _messageGroups(task.entries);
           final configured = task.settings().configured;
-          // A window-mode entry point costs one more title-bar action. On
-          // phone-width surfaces the decorative mark yields its slot so the
-          // existing history/new/close actions keep their full-size layout and
-          // the 240px/2x header still fits without overflow.
-          final hasWindowAction =
-              widget.onDetach != null || widget.onDock != null;
-          final compactHeader =
-              hasWindowAction && MediaQuery.sizeOf(context).width < 360;
           return DropTarget(
             enable:
                 !task.running &&
@@ -885,242 +1031,979 @@ class _TerminalAiPanelState extends State<TerminalAiPanel> {
                   AiImageSource(item.name, () => _readDrop(item)),
               ]),
             ),
-            child: Padding(
-              padding: const EdgeInsets.all(16),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.stretch,
-                children: [
-                  Row(
-                    children: [
-                      if (!compactHeader) ...[
-                        Icon(Icons.auto_awesome_rounded, color: colors.primary),
-                        const SizedBox(width: 10),
-                      ],
-                      Expanded(
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            Text(
-                              'AI 助手',
-                              maxLines: 1,
-                              overflow: TextOverflow.ellipsis,
-                              style: Theme.of(context).textTheme.titleLarge,
-                            ),
-                            Text(
-                              widget.hostName,
-                              maxLines: 1,
-                              overflow: TextOverflow.ellipsis,
-                              style: Theme.of(context).textTheme.bodySmall
-                                  ?.copyWith(color: colors.onSurfaceVariant),
-                            ),
-                          ],
-                        ),
-                      ),
-                      IconButton(
-                        key: const ValueKey('ai-history'),
-                        onPressed: task.running ? null : _openHistory,
-                        icon: const Icon(
-                          Icons.history_rounded,
-                          semanticLabel: '历史对话',
-                        ),
-                      ),
-                      if (task.entries.isNotEmpty)
-                        IconButton(
-                          key: const ValueKey('ai-new-conversation'),
-                          onPressed: task.running
-                              ? null
-                              : () => unawaited(task.newConversation()),
-                          icon: const Icon(
-                            Icons.edit_square,
-                            semanticLabel: '新对话',
-                          ),
-                        ),
-                      if (widget.onDetach != null)
-                        _windowModeButton(
-                          key: const ValueKey('ai-popout'),
-                          icon: Icons.open_in_new_rounded,
-                          label: '在独立窗口中打开',
-                          onPressed: widget.onDetach!,
-                          compact: compactHeader,
-                        ),
-                      if (widget.onDock != null)
-                        _windowModeButton(
-                          key: const ValueKey('ai-dock'),
-                          icon: Icons.close_fullscreen_rounded,
-                          label: '返回主窗口',
-                          onPressed: widget.onDock!,
-                          compact: compactHeader,
-                        ),
-                      IconButton(
-                        onPressed: widget.onClose,
-                        icon: const Icon(
-                          Icons.close_rounded,
-                          semanticLabel: '关闭 AI 面板',
-                        ),
-                      ),
-                    ],
-                  ),
-                  if (task.historyFailure != null) _historyNotice(task),
-                  const SizedBox(height: 12),
-                  Expanded(
-                    child: LayoutBuilder(
-                      builder: (context, constraints) => SingleChildScrollView(
-                        child: SizedBox(
-                          height: math.max(
-                            constraints.maxHeight,
-                            300 *
-                                MediaQuery.textScalerOf(context).scale(14) /
-                                14,
-                          ),
-                          child: Column(
-                            crossAxisAlignment: CrossAxisAlignment.stretch,
-                            children: [
-                              if (!configured)
-                                Expanded(
-                                  child: Center(
-                                    child: Column(
-                                      mainAxisSize: MainAxisSize.min,
-                                      children: [
-                                        const Text(
-                                          '先在设置 → AI 配置模型服务',
-                                          textAlign: TextAlign.center,
-                                        ),
-                                        if (widget.onSettings != null) ...[
-                                          const SizedBox(height: 16),
-                                          FilledButton.tonal(
-                                            onPressed: () {
-                                              widget.onSettings!();
-                                            },
-                                            child: const Text('打开设置'),
-                                          ),
-                                        ],
-                                      ],
-                                    ),
-                                  ),
-                                )
-                              else ...[
-                                Expanded(
-                                  child: task.entries.isEmpty
-                                      ? Center(
-                                          child: Text(
-                                            '例如：检查磁盘空间，找出占用最大的目录',
-                                            textAlign: TextAlign.center,
-                                            style: TextStyle(
-                                              color: colors.onSurfaceVariant,
-                                            ),
-                                          ),
-                                        )
-                                      : ListView.builder(
-                                          key: const ValueKey('ai-transcript'),
-                                          controller: _scroll,
-                                          itemCount:
-                                              messages.length +
-                                              (task.running ? 1 : 0),
-                                          itemBuilder: (_, index) =>
-                                              index < messages.length
-                                              ? _AiMessageBubble(
-                                                  key: ObjectKey(
-                                                    messages[index].first,
-                                                  ),
-                                                  entries: messages[index],
-                                                )
-                                              : _AiActivity(
-                                                  key: const ValueKey(
-                                                    'ai-activity',
-                                                  ),
-                                                  label: task.status,
-                                                  waiting: task.pending != null,
-                                                  startedAt: task.turnStartedAt,
-                                                ),
-                                        ),
-                                ),
-                                if (task.failure != null &&
-                                    (task.entries.isEmpty ||
-                                        task.entries.last.notice != true ||
-                                        task.entries.last.text !=
-                                            task.failure)) ...[
-                                  const SizedBox(height: 8),
-                                  Text(
-                                    task.failure!,
-                                    style: Theme.of(context).textTheme.bodySmall
-                                        ?.copyWith(
-                                          color: task.failure == null
-                                              ? colors.onSurfaceVariant
-                                              : colors.error,
-                                        ),
-                                  ),
-                                ],
-                                if (task.pending != null) ...[
-                                  const SizedBox(height: 10),
-                                  Row(
-                                    children: [
-                                      Expanded(
-                                        child: Text(task.pending!.reason),
-                                      ),
-                                      _approvalMode(
-                                        task,
-                                        compact:
-                                            MediaQuery.sizeOf(context).width <
-                                            360,
-                                      ),
-                                    ],
-                                  ),
-                                  const SizedBox(height: 4),
-                                  ConstrainedBox(
-                                    constraints: const BoxConstraints(
-                                      maxHeight: 120,
-                                    ),
-                                    child: SingleChildScrollView(
-                                      child: Column(
-                                        crossAxisAlignment:
-                                            CrossAxisAlignment.stretch,
-                                        children: [
-                                          SelectableText(
-                                            task.pending!.command,
-                                            style: Theme.of(context)
-                                                .textTheme
-                                                .bodyMedium
-                                                ?.copyWith(
-                                                  fontFamily: 'monospace',
-                                                ),
-                                          ),
-                                        ],
-                                      ),
-                                    ),
-                                  ),
-                                  const SizedBox(height: 8),
-                                  Wrap(
-                                    alignment: WrapAlignment.end,
-                                    spacing: 8,
-                                    runSpacing: 8,
-                                    children: [
-                                      TextButton(
-                                        onPressed: () => task.approve(false),
-                                        child: const Text('取消'),
-                                      ),
-                                      FilledButton.tonal(
-                                        onPressed: () => task.approve(true),
-                                        child: const Text('批准并执行'),
-                                      ),
-                                    ],
-                                  ),
-                                ] else ...[
-                                  const SizedBox(height: 12),
-                                  _composer(task),
-                                ],
-                              ],
-                            ],
-                          ),
-                        ),
-                      ),
-                    ),
-                  ),
-                ],
-              ),
-            ),
+            // The detached window (`onDock`) gets the standalone workbench
+            // layout; the embedded panel keeps the in-pane layout.
+            child: widget.onDock != null
+                ? _workspaceBody(context, task, configured)
+                : _embeddedBody(context, task, configured),
           );
         },
       ),
+    );
+  }
+
+  /// The embedded in-pane panel. Its layout and behaviour are unchanged: one
+  /// compact header row above a scrolling transcript, with the composer — or
+  /// the approval prompt — at the end of the column.
+  Widget _embeddedBody(
+    BuildContext context,
+    AiTaskController task,
+    bool configured,
+  ) {
+    final colors = Theme.of(context).colorScheme;
+    final messages = _messageGroups(task.entries);
+    // A window-mode entry point costs one more title-bar action. On
+    // phone-width surfaces the decorative mark yields its slot so the
+    // existing history/new/close actions keep their full-size layout and
+    // the 240px/2x header still fits without overflow.
+    final hasWindowAction = widget.onDetach != null || widget.onDock != null;
+    final compactHeader =
+        hasWindowAction && MediaQuery.sizeOf(context).width < 360;
+    return Padding(
+      padding: const EdgeInsets.all(16),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Row(
+            children: [
+              if (!compactHeader) ...[
+                Icon(Icons.auto_awesome_rounded, color: colors.primary),
+                const SizedBox(width: 10),
+              ],
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      'AI 助手',
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: Theme.of(context).textTheme.titleLarge,
+                    ),
+                    Text(
+                      widget.hostName,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: Theme.of(context).textTheme.bodySmall
+                          ?.copyWith(color: colors.onSurfaceVariant),
+                    ),
+                  ],
+                ),
+              ),
+              IconButton(
+                key: const ValueKey('ai-history'),
+                onPressed: task.running ? null : _openHistory,
+                icon: const Icon(Icons.history_rounded, semanticLabel: '历史对话'),
+              ),
+              if (task.entries.isNotEmpty)
+                IconButton(
+                  key: const ValueKey('ai-new-conversation'),
+                  onPressed: task.running
+                      ? null
+                      : () => unawaited(task.newConversation()),
+                  icon: const Icon(Icons.edit_square, semanticLabel: '新对话'),
+                ),
+              if (widget.onDetach != null)
+                _windowModeButton(
+                  key: const ValueKey('ai-popout'),
+                  icon: Icons.open_in_new_rounded,
+                  label: '在独立窗口中打开',
+                  onPressed: widget.onDetach!,
+                  compact: compactHeader,
+                ),
+              if (widget.onDock != null)
+                _windowModeButton(
+                  key: const ValueKey('ai-dock'),
+                  icon: Icons.close_fullscreen_rounded,
+                  label: '返回主窗口',
+                  onPressed: widget.onDock!,
+                  compact: compactHeader,
+                ),
+              IconButton(
+                onPressed: widget.onClose,
+                icon: const Icon(
+                  Icons.close_rounded,
+                  semanticLabel: '关闭 AI 面板',
+                ),
+              ),
+            ],
+          ),
+          if (task.historyFailure != null) _historyNotice(task),
+          const SizedBox(height: 12),
+          Expanded(
+            child: LayoutBuilder(
+              builder: (context, constraints) => SingleChildScrollView(
+                child: SizedBox(
+                  height: math.max(
+                    constraints.maxHeight,
+                    300 * MediaQuery.textScalerOf(context).scale(14) / 14,
+                  ),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                    children: [
+                      if (!configured)
+                        Expanded(
+                          child: Center(
+                            child: Column(
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                const Text(
+                                  '先在设置 → AI 配置模型服务',
+                                  textAlign: TextAlign.center,
+                                ),
+                                if (widget.onSettings != null) ...[
+                                  const SizedBox(height: 16),
+                                  FilledButton.tonal(
+                                    onPressed: () {
+                                      widget.onSettings!();
+                                    },
+                                    child: const Text('打开设置'),
+                                  ),
+                                ],
+                              ],
+                            ),
+                          ),
+                        )
+                      else ...[
+                        Expanded(
+                          child: task.entries.isEmpty
+                              ? Center(
+                                  child: Text(
+                                    '例如：检查磁盘空间，找出占用最大的目录',
+                                    textAlign: TextAlign.center,
+                                    style: TextStyle(
+                                      color: colors.onSurfaceVariant,
+                                    ),
+                                  ),
+                                )
+                              : ListView.builder(
+                                  key: const ValueKey('ai-transcript'),
+                                  controller: _scroll,
+                                  itemCount:
+                                      messages.length + (task.running ? 1 : 0),
+                                  itemBuilder: (_, index) =>
+                                      index < messages.length
+                                      ? _AiMessageBubble(
+                                          key: ObjectKey(messages[index].first),
+                                          entries: messages[index],
+                                        )
+                                      : _AiActivity(
+                                          key: const ValueKey('ai-activity'),
+                                          label: task.status,
+                                          waiting: task.pending != null,
+                                          startedAt: task.turnStartedAt,
+                                        ),
+                                ),
+                        ),
+                        if (task.failure != null &&
+                            (task.entries.isEmpty ||
+                                task.entries.last.notice != true ||
+                                task.entries.last.text != task.failure)) ...[
+                          const SizedBox(height: 8),
+                          Text(
+                            task.failure!,
+                            style: Theme.of(context).textTheme.bodySmall
+                                ?.copyWith(
+                                  color: task.failure == null
+                                      ? colors.onSurfaceVariant
+                                      : colors.error,
+                                ),
+                          ),
+                        ],
+                        if (task.pending != null) ...[
+                          const SizedBox(height: 10),
+                          Row(
+                            children: [
+                              Expanded(child: Text(task.pending!.reason)),
+                              _approvalMode(
+                                task,
+                                compact: MediaQuery.sizeOf(context).width < 360,
+                              ),
+                            ],
+                          ),
+                          const SizedBox(height: 4),
+                          ConstrainedBox(
+                            constraints: const BoxConstraints(maxHeight: 120),
+                            child: SingleChildScrollView(
+                              child: Column(
+                                crossAxisAlignment: CrossAxisAlignment.stretch,
+                                children: [
+                                  SelectableText(
+                                    task.pending!.command,
+                                    style: Theme.of(context)
+                                        .textTheme
+                                        .bodyMedium
+                                        ?.copyWith(fontFamily: 'monospace'),
+                                  ),
+                                ],
+                              ),
+                            ),
+                          ),
+                          const SizedBox(height: 8),
+                          Wrap(
+                            alignment: WrapAlignment.end,
+                            spacing: 8,
+                            runSpacing: 8,
+                            children: [
+                              TextButton(
+                                onPressed: () => task.approve(false),
+                                child: const Text('取消'),
+                              ),
+                              FilledButton.tonal(
+                                onPressed: () => task.approve(true),
+                                child: const Text('批准并执行'),
+                              ),
+                            ],
+                          ),
+                        ] else ...[
+                          const SizedBox(height: 12),
+                          _composer(task),
+                        ],
+                      ],
+                    ],
+                  ),
+                ),
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  // ---------------------------------------------------------------------------
+  // Standalone workbench (detached window)
+  // ---------------------------------------------------------------------------
+
+  /// The detached window reads as a workbench instead of a pane: a header that
+  /// names the host and the current task state, an optional action rail on
+  /// large windows, a reading-width chat surface and the composer pinned below
+  /// it. Everything below reuses the embedded transcript, composer, approval
+  /// and history pieces, so both layouts share one implementation.
+  Widget _workspaceBody(
+    BuildContext context,
+    AiTaskController task,
+    bool configured,
+  ) => LayoutBuilder(
+    builder: (context, constraints) {
+      final showRail =
+          constraints.maxWidth >= _workspaceRailMinWidth &&
+          constraints.maxHeight >= _workspaceRailMinHeight;
+      final chat = _workspaceChat(context, task, configured);
+      return Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          _workspaceHeader(
+            context,
+            task,
+            configured: configured,
+            showRail: showRail,
+          ),
+          Expanded(
+            // The chat keeps its slot (and its transcript state) when the rail
+            // appears or disappears on resize; only the rail is added or
+            // dropped.
+            child: Row(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                Expanded(child: chat),
+                if (showRail) _workspaceRail(context, task),
+              ],
+            ),
+          ),
+        ],
+      );
+    },
+  );
+
+  /// Host context for the workbench: identity, host name and what the task is
+  /// doing right now. The narrow fallback keeps the same actions in a toolbar
+  /// under the identity row so a 480px window never crowds the title.
+  Widget _workspaceHeader(
+    BuildContext context,
+    AiTaskController task, {
+    required bool configured,
+    required bool showRail,
+  }) {
+    final theme = Theme.of(context);
+    final colors = theme.colorScheme;
+    final status = _workspaceStatus(task, configured);
+    final subtitle = '${widget.hostName} · $status';
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(16, 12, 16, 8),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Row(
+            children: [
+              ExpressiveMark(
+                size: 44,
+                flower: true,
+                icon: Icons.auto_awesome_rounded,
+                color: colors.primaryContainer,
+                foreground: colors.onPrimaryContainer,
+              ),
+              const SizedBox(width: 12),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      'AI 工作台',
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: theme.textTheme.titleMedium,
+                    ),
+                    Text(
+                      subtitle,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: theme.textTheme.bodySmall?.copyWith(
+                        color: colors.onSurfaceVariant,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              const SizedBox(width: 8),
+              Tooltip(
+                message: '返回主窗口',
+                child: IconButton(
+                  key: const ValueKey('ai-dock'),
+                  onPressed: widget.onDock,
+                  icon: const Icon(
+                    Icons.close_fullscreen_rounded,
+                    semanticLabel: '返回主窗口',
+                  ),
+                ),
+              ),
+            ],
+          ),
+          if (!showRail) ...[
+            const SizedBox(height: 4),
+            _workspaceToolbar(context, task),
+          ],
+          if (task.historyFailure != null) _historyNotice(task),
+        ],
+      ),
+    );
+  }
+
+  /// One line of task state for the header; the rail repeats the model and
+  /// approval facts.
+  String _workspaceStatus(AiTaskController task, bool configured) {
+    if (!configured) return '未配置模型服务';
+    if (task.pending != null) return '等待审批';
+    if (task.running) {
+      final status = task.status.trim();
+      return status.isEmpty ? '执行中' : status;
+    }
+    return task.entries.isEmpty ? '待命' : '已就绪';
+  }
+
+  /// Compact header toolbar: the rail's actions for windows too narrow (or too
+  /// short) to carry a rail. The session switcher joins them as a menu so a
+  /// narrow window can still move between the open SSH sessions.
+  Widget _workspaceToolbar(BuildContext context, AiTaskController task) => Wrap(
+    spacing: 4,
+    runSpacing: 4,
+    children: [
+      if (widget.sessionSelection?.sessions.isNotEmpty ?? false)
+        _workspaceSessionMenu(widget.sessionSelection!),
+      _workspaceActionButton(
+        key: const ValueKey('ai-history'),
+        icon: Icons.history_rounded,
+        label: '历史对话',
+        onPressed: task.running ? null : _openHistory,
+      ),
+      _workspaceActionButton(
+        key: const ValueKey('ai-new-conversation'),
+        icon: Icons.edit_square,
+        label: '新对话',
+        onPressed: task.running
+            ? null
+            : () => unawaited(task.newConversation()),
+      ),
+      if (widget.onSettings != null)
+        _workspaceActionButton(
+          key: const ValueKey('ai-settings'),
+          icon: Icons.settings_outlined,
+          label: '设置',
+          onPressed: widget.onSettings,
+        ),
+    ],
+  );
+
+  Widget _workspaceActionButton({
+    required Key key,
+    required IconData icon,
+    required String label,
+    required VoidCallback? onPressed,
+  }) => TextButton.icon(
+    key: key,
+    onPressed: onPressed,
+    icon: Icon(icon, size: 18),
+    label: Text(label),
+    style: TextButton.styleFrom(
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+      minimumSize: const Size(0, 40),
+      shape: HarborShapes.superellipse(const BorderRadius.all(HarborShapes.sm)),
+      tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+    ),
+  );
+
+  /// Action rail for large windows: the primary actions and, above all, the
+  /// open SSH sessions the workbench can switch between. The host facts that
+  /// used to fill this rail are already repeated by the composer, so the rail
+  /// now spends its space on the session list instead of dead whitespace.
+  Widget _workspaceRail(BuildContext context, AiTaskController task) {
+    final theme = Theme.of(context);
+    final colors = theme.colorScheme;
+    final selection = widget.sessionSelection;
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(4, 0, 16, 16),
+      child: SizedBox(
+        width: _workspaceRailWidth,
+        child: Material(
+          color: colors.surfaceContainerHigh,
+          shape: HarborShapes.superellipse(
+            const BorderRadius.all(HarborShapes.xl),
+          ),
+          clipBehavior: Clip.antiAlias,
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              Padding(
+                padding: const EdgeInsets.fromLTRB(12, 12, 12, 8),
+                child: FilledButton.icon(
+                  key: const ValueKey('ai-new-conversation'),
+                  onPressed: task.running
+                      ? null
+                      : () => unawaited(task.newConversation()),
+                  icon: const Icon(Icons.edit_square, size: 18),
+                  label: const Text('新对话'),
+                  style: FilledButton.styleFrom(
+                    minimumSize: const Size(0, 44),
+                    shape: HarborShapes.superellipse(
+                      const BorderRadius.all(HarborShapes.md),
+                    ),
+                  ),
+                ),
+              ),
+              Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 12),
+                child: Row(
+                  children: [
+                    Expanded(
+                      child: _workspaceActionButton(
+                        key: const ValueKey('ai-history'),
+                        icon: Icons.history_rounded,
+                        label: '历史',
+                        onPressed: task.running ? null : _openHistory,
+                      ),
+                    ),
+                    if (widget.onSettings != null) ...[
+                      const SizedBox(width: 8),
+                      Expanded(
+                        child: _workspaceActionButton(
+                          key: const ValueKey('ai-settings'),
+                          icon: Icons.settings_outlined,
+                          label: '设置',
+                          onPressed: widget.onSettings,
+                        ),
+                      ),
+                    ],
+                  ],
+                ),
+              ),
+              const SizedBox(height: 12),
+              Divider(height: 1, color: colors.outlineVariant),
+              Padding(
+                padding: const EdgeInsets.fromLTRB(16, 12, 16, 6),
+                child: Text(
+                  'SSH 会话',
+                  style: theme.textTheme.labelMedium?.copyWith(
+                    color: colors.onSurfaceVariant,
+                  ),
+                ),
+              ),
+              Expanded(child: _workspaceSessionList(context, selection)),
+              if (selection?.selectingSession ?? false)
+                const Padding(
+                  padding: EdgeInsets.fromLTRB(12, 0, 12, 10),
+                  child: LinearProgressIndicator(minHeight: 2),
+                ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  /// The open SSH sessions, the current one highlighted. Selecting one asks the
+  /// detached engine to mirror that session; the system window itself is reused.
+  Widget _workspaceSessionList(
+    BuildContext context,
+    AiWindowSessionSelection? selection,
+  ) {
+    final theme = Theme.of(context);
+    final colors = theme.colorScheme;
+    if (selection == null) {
+      return Padding(
+        padding: const EdgeInsets.fromLTRB(16, 0, 16, 12),
+        child: Text(
+          widget.hostName,
+          maxLines: 2,
+          overflow: TextOverflow.ellipsis,
+          style: theme.textTheme.bodyMedium,
+        ),
+      );
+    }
+    final sessions = selection.sessions;
+    if (sessions.isEmpty) {
+      return Padding(
+        padding: const EdgeInsets.fromLTRB(16, 0, 16, 12),
+        child: Text(
+          '暂无已打开的 SSH 会话',
+          style: theme.textTheme.bodySmall?.copyWith(
+            color: colors.onSurfaceVariant,
+          ),
+        ),
+      );
+    }
+    return ListView.builder(
+      key: const ValueKey('ai-session-list'),
+      padding: const EdgeInsets.fromLTRB(12, 0, 12, 12),
+      itemCount: sessions.length,
+      itemBuilder: (context, index) =>
+          _workspaceSessionTile(context, selection, sessions[index]),
+    );
+  }
+
+  Widget _workspaceSessionTile(
+    BuildContext context,
+    AiWindowSessionSelection selection,
+    AiWindowSession session,
+  ) {
+    final theme = Theme.of(context);
+    final colors = theme.colorScheme;
+    final selected = session.id == selection.sessionId;
+    final selectable = !selected && !selection.selectingSession;
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 8),
+      child: Material(
+        color: selected
+            ? colors.secondaryContainer
+            : colors.surfaceContainerHighest,
+        shape: HarborShapes.superellipse(BorderRadius.circular(16)),
+        clipBehavior: Clip.antiAlias,
+        child: InkWell(
+          key: ValueKey('ai-session-${session.id}'),
+          onTap: selectable
+              ? () => unawaited(selection.selectSession(session.id))
+              : null,
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(12, 10, 12, 10),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
+                  children: [
+                    Icon(
+                      selected
+                          ? Icons.radio_button_checked_rounded
+                          : Icons.radio_button_unchecked_rounded,
+                      size: 16,
+                      color: selected
+                          ? colors.primary
+                          : colors.onSurfaceVariant,
+                    ),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: Text(
+                        session.hostName,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: theme.textTheme.labelLarge,
+                      ),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 4),
+                Text(
+                  session.endpoint,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: theme.textTheme.bodySmall?.copyWith(
+                    color: colors.onSurfaceVariant,
+                  ),
+                ),
+                const SizedBox(height: 6),
+                _workspaceSessionStatus(context, session),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  /// Connection and task state for one session: approval and running outrank a
+  /// plain connection so the list shows what needs attention first.
+  Widget _workspaceSessionStatus(
+    BuildContext context,
+    AiWindowSession session,
+  ) {
+    final theme = Theme.of(context);
+    final colors = theme.colorScheme;
+    final (label, icon, color) = session.waitingApproval
+        ? ('等待审批', Icons.hourglass_top_rounded, colors.tertiary)
+        : session.running
+        ? ('运行中', Icons.bolt_rounded, colors.primary)
+        : session.connected
+        ? ('已连接', Icons.link_rounded, colors.secondary)
+        : ('未连接', Icons.link_off_rounded, colors.onSurfaceVariant);
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Icon(icon, size: 14, color: color),
+        const SizedBox(width: 4),
+        Text(label, style: theme.textTheme.labelSmall?.copyWith(color: color)),
+      ],
+    );
+  }
+
+  /// Narrow-window session switcher: the same sessions as the rail, folded into
+  /// one menu button that stays reachable in the header toolbar.
+  Widget _workspaceSessionMenu(AiWindowSessionSelection selection) {
+    final current = _workspaceCurrentSession(selection);
+    return MenuAnchor(
+      builder: (context, controller, child) => TextButton.icon(
+        key: const ValueKey('ai-session-menu'),
+        onPressed: selection.selectingSession
+            ? null
+            : (controller.isOpen ? controller.close : controller.open),
+        icon: const Icon(Icons.dns_outlined, size: 18),
+        label: ConstrainedBox(
+          constraints: const BoxConstraints(maxWidth: 140),
+          child: Text(
+            current?.hostName ?? '切换会话',
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+          ),
+        ),
+        style: TextButton.styleFrom(
+          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+          minimumSize: const Size(0, 40),
+          shape: HarborShapes.superellipse(
+            const BorderRadius.all(HarborShapes.sm),
+          ),
+          tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+        ),
+      ),
+      menuChildren: [
+        for (final session in selection.sessions)
+          MenuItemButton(
+            key: ValueKey('ai-session-menu-${session.id}'),
+            leadingIcon: Icon(
+              session.id == selection.sessionId
+                  ? Icons.check_rounded
+                  : Icons.dns_outlined,
+              size: 18,
+            ),
+            onPressed: () => unawaited(selection.selectSession(session.id)),
+            child: Text('${session.hostName} · ${session.endpoint}'),
+          ),
+      ],
+    );
+  }
+
+  AiWindowSession? _workspaceCurrentSession(
+    AiWindowSessionSelection selection,
+  ) {
+    for (final session in selection.sessions) {
+      if (session.id == selection.sessionId) return session;
+    }
+    return null;
+  }
+
+  /// Chat column: one reading-width stack with the transcript surface on top
+  /// and the approval prompt plus composer pinned at the bottom.
+  ///
+  /// The bottom region is capped at a share of the column, so a short window
+  /// with large text scrolls the composer and the approval prompt instead of
+  /// overflowing the transcript off the screen.
+  Widget _workspaceChat(
+    BuildContext context,
+    AiTaskController task,
+    bool configured,
+  ) => Padding(
+    padding: const EdgeInsets.fromLTRB(16, 4, 16, 16),
+    child: Center(
+      child: ConstrainedBox(
+        constraints: const BoxConstraints(maxWidth: _workspaceReadingWidth),
+        child: SizedBox(
+          width: double.infinity,
+          child: LayoutBuilder(
+            builder: (context, constraints) => Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                Expanded(child: _workspaceSurface(context, task, configured)),
+                ConstrainedBox(
+                  constraints: BoxConstraints(
+                    maxHeight: constraints.maxHeight * _workspaceBottomShare,
+                  ),
+                  child: SingleChildScrollView(
+                    child: _workspaceBottom(context, task),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    ),
+  );
+
+  Widget _workspaceBottom(BuildContext context, AiTaskController task) {
+    final theme = Theme.of(context);
+    final colors = theme.colorScheme;
+    final showFailure =
+        task.failure != null &&
+        (task.entries.isEmpty ||
+            task.entries.last.notice != true ||
+            task.entries.last.text != task.failure);
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        if (showFailure) ...[
+          const SizedBox(height: 12),
+          ConstrainedBox(
+            constraints: const BoxConstraints(maxHeight: 72),
+            child: SingleChildScrollView(
+              child: Text(
+                task.failure!,
+                style: theme.textTheme.bodySmall?.copyWith(color: colors.error),
+              ),
+            ),
+          ),
+        ],
+        if (task.pending != null) ...[
+          const SizedBox(height: 12),
+          _workspaceApproval(context, task),
+        ],
+        const SizedBox(height: 12),
+        _composer(task),
+      ],
+    );
+  }
+
+  /// The transcript lives on its own tonal surface so the chat reads as one
+  /// continuous sheet, separate from the composer below it.
+  Widget _workspaceSurface(
+    BuildContext context,
+    AiTaskController task,
+    bool configured,
+  ) {
+    final colors = Theme.of(context).colorScheme;
+    return Material(
+      color: colors.surfaceContainerLow,
+      shape: HarborShapes.superellipse(const BorderRadius.all(HarborShapes.xl)),
+      clipBehavior: Clip.antiAlias,
+      child: _workspaceSurfaceContent(context, task, configured),
+    );
+  }
+
+  Widget _workspaceSurfaceContent(
+    BuildContext context,
+    AiTaskController task,
+    bool configured,
+  ) {
+    if (!configured) {
+      return _workspaceCentered(
+        children: [
+          const Text('先在设置 → AI 配置模型服务', textAlign: TextAlign.center),
+          if (widget.onSettings != null) ...[
+            const SizedBox(height: 16),
+            FilledButton.tonal(
+              onPressed: () => widget.onSettings!(),
+              child: const Text('打开设置'),
+            ),
+          ],
+        ],
+      );
+    }
+    if (task.entries.isEmpty) return _workspaceEmpty(context, task);
+    final messages = _messageGroups(task.entries);
+    return ListView.builder(
+      key: const ValueKey('ai-transcript'),
+      controller: _scroll,
+      padding: const EdgeInsets.fromLTRB(20, 20, 20, 20),
+      itemCount: messages.length + (task.running ? 1 : 0),
+      itemBuilder: (_, index) => index < messages.length
+          ? _AiMessageBubble(
+              key: ObjectKey(messages[index].first),
+              entries: messages[index],
+              standalone: true,
+            )
+          : _AiActivity(
+              key: const ValueKey('ai-activity'),
+              label: task.status,
+              waiting: task.pending != null,
+              startedAt: task.turnStartedAt,
+            ),
+    );
+  }
+
+  Widget _workspaceCentered({required List<Widget> children}) => Center(
+    child: SingleChildScrollView(
+      padding: const EdgeInsets.all(24),
+      child: Column(mainAxisSize: MainAxisSize.min, children: children),
+    ),
+  );
+
+  /// Empty transcript: the expressive mark plus three safe prompts. They only
+  /// prefill the composer — nothing is sent or executed — and an existing
+  /// draft is never overwritten.
+  Widget _workspaceEmpty(BuildContext context, AiTaskController task) {
+    final theme = Theme.of(context);
+    final colors = theme.colorScheme;
+    return _workspaceCentered(
+      children: [
+        const ExpressiveMark(
+          size: 76,
+          flower: true,
+          icon: Icons.auto_awesome_rounded,
+        ),
+        const SizedBox(height: 20),
+        Text('开始一段对话', style: theme.textTheme.titleMedium),
+        const SizedBox(height: 8),
+        Text(
+          '描述你的目标，AI 会在 ${widget.hostName} 上执行命令并汇报结果。',
+          textAlign: TextAlign.center,
+          style: theme.textTheme.bodySmall?.copyWith(
+            color: colors.onSurfaceVariant,
+          ),
+        ),
+        const SizedBox(height: 20),
+        ValueListenableBuilder<TextEditingValue>(
+          valueListenable: _input,
+          builder: (context, value, _) {
+            final blocked = task.running || value.text.trim().isNotEmpty;
+            return Wrap(
+              spacing: 8,
+              runSpacing: 8,
+              alignment: WrapAlignment.center,
+              children: [
+                for (final (index, suggestion) in _workspaceSuggestions.indexed)
+                  OutlinedButton(
+                    key: ValueKey('ai-suggestion-$index'),
+                    onPressed: blocked ? null : () => _prefillDraft(suggestion),
+                    style: OutlinedButton.styleFrom(
+                      shape: HarborShapes.superellipse(
+                        const BorderRadius.all(HarborShapes.md),
+                      ),
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 14,
+                        vertical: 10,
+                      ),
+                    ),
+                    child: Text(suggestion, textAlign: TextAlign.center),
+                  ),
+              ],
+            );
+          },
+        ),
+      ],
+    );
+  }
+
+  /// Approval prompt in its own tonal area above the composer: the command
+  /// scrolls on its own while both decisions stay visible. The approval mode
+  /// itself stays in the composer's options row, so only one mode control is
+  /// ever on screen.
+  Widget _workspaceApproval(BuildContext context, AiTaskController task) {
+    final theme = Theme.of(context);
+    final colors = theme.colorScheme;
+    final pending = task.pending!;
+    return Material(
+      color: colors.surfaceContainerHigh,
+      shape: HarborShapes.superellipse(const BorderRadius.all(HarborShapes.xl)),
+      clipBehavior: Clip.antiAlias,
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Row(
+              children: [
+                Icon(Icons.gpp_maybe_outlined, size: 20, color: colors.primary),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: Text(
+                    '需要审批',
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: theme.textTheme.titleSmall,
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 10),
+            Text(pending.reason, style: theme.textTheme.bodyMedium),
+            const SizedBox(height: 10),
+            DecoratedBox(
+              decoration: ShapeDecoration(
+                color: colors.surfaceContainerLow,
+                shape: HarborShapes.superellipse(
+                  const BorderRadius.all(HarborShapes.sm),
+                ),
+              ),
+              child: ConstrainedBox(
+                constraints: const BoxConstraints(maxHeight: 160),
+                child: SingleChildScrollView(
+                  padding: const EdgeInsets.all(12),
+                  child: SizedBox(
+                    width: double.infinity,
+                    child: SelectableText(
+                      pending.command,
+                      style: theme.textTheme.bodyMedium?.copyWith(
+                        fontFamily: 'monospace',
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+            ),
+            const SizedBox(height: 12),
+            Wrap(
+              alignment: WrapAlignment.end,
+              spacing: 8,
+              runSpacing: 8,
+              children: [
+                TextButton(
+                  onPressed: () => task.approve(false),
+                  child: const Text('取消'),
+                ),
+                FilledButton.tonal(
+                  onPressed: () => task.approve(true),
+                  child: const Text('批准并执行'),
+                ),
+              ],
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  /// Prefills the composer without sending, executing or replacing a draft.
+  void _prefillDraft(String text) {
+    if (widget.task.running) return;
+    if (_input.text.trim().isNotEmpty) return;
+    _input.value = TextEditingValue(
+      text: text,
+      selection: TextSelection.collapsed(offset: text.length),
     );
   }
 }
@@ -1201,10 +2084,19 @@ List<List<AiTaskEntry>> _messageGroups(List<AiTaskEntry> entries) {
 /// collapsible tool calls. The live transcript and the read-only history
 /// preview share it, so a saved conversation renders exactly as it did live.
 class _AiMessageBubble extends StatefulWidget {
-  const _AiMessageBubble({super.key, required this.entries});
+  const _AiMessageBubble({
+    super.key,
+    required this.entries,
+    this.standalone = false,
+  });
 
   /// The bubble's entries in order; the first one decides user/notice/model.
   final List<AiTaskEntry> entries;
+
+  /// Standalone workbench transcript: the bubble aligns to its own side and is
+  /// capped by [_bubbleMaxUserWidth]/[_bubbleMaxAssistantWidth]. The embedded
+  /// panel and the read-only history keep the full-width layout.
+  final bool standalone;
 
   @override
   State<_AiMessageBubble> createState() => _AiMessageBubbleState();
@@ -1393,57 +2285,80 @@ class _AiMessageBubbleState extends State<_AiMessageBubble> {
       );
     }
     final model = entries.map((item) => item.model).nonNulls.firstOrNull;
-    return Padding(
-      padding: EdgeInsets.only(bottom: 16, left: entry.user == true ? 20 : 0),
-      child: Material(
-        key: ObjectKey(entry),
-        color: entry.user == true
-            ? colors.secondaryContainer
-            : colors.surfaceContainerHigh,
-        shape: HarborShapes.superellipse(BorderRadius.circular(20)),
-        child: Padding(
-          padding: const EdgeInsets.all(14),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.stretch,
-            children: [
-              if (entry.user != true) ...[
-                Row(
-                  children: [
-                    Icon(
-                      Icons.auto_awesome_rounded,
-                      size: 16,
-                      color: colors.primary,
-                    ),
-                    const SizedBox(width: 8),
-                    Expanded(
-                      child: Text(
-                        model ?? 'AI',
-                        style: theme.textTheme.labelMedium?.copyWith(
-                          color: colors.primary,
-                        ),
+    final user = entry.user == true;
+    final bubble = Material(
+      key: ObjectKey(entry),
+      color: user ? colors.secondaryContainer : colors.surfaceContainerHigh,
+      shape: HarborShapes.superellipse(BorderRadius.circular(20)),
+      child: Padding(
+        padding: const EdgeInsets.all(14),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            if (!user) ...[
+              Row(
+                children: [
+                  Icon(
+                    Icons.auto_awesome_rounded,
+                    size: 16,
+                    color: colors.primary,
+                  ),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: Text(
+                      model ?? 'AI',
+                      style: theme.textTheme.labelMedium?.copyWith(
+                        color: colors.primary,
                       ),
                     ),
-                  ],
-                ),
-                const SizedBox(height: 10),
-              ],
-              for (var index = 0; index < entries.length; index++) ...[
-                if (index > 0) const SizedBox(height: 12),
-                if (entries[index].command)
-                  _toolEntry(entries[index])
-                else ...[
-                  if (entries[index].images?.isNotEmpty == true) ...[
-                    _thumbnails(entries[index].images!),
-                    if (entries[index].text.isNotEmpty)
-                      const SizedBox(height: 10),
-                  ],
-                  if (entries[index].text.isNotEmpty)
-                    _markdown(entries[index].text),
+                  ),
                 ],
+              ),
+              const SizedBox(height: 10),
+            ],
+            for (var index = 0; index < entries.length; index++) ...[
+              if (index > 0) const SizedBox(height: 12),
+              if (entries[index].command)
+                _toolEntry(entries[index])
+              else ...[
+                if (entries[index].images?.isNotEmpty == true) ...[
+                  _thumbnails(entries[index].images!),
+                  if (entries[index].text.isNotEmpty)
+                    const SizedBox(height: 10),
+                ],
+                if (entries[index].text.isNotEmpty)
+                  _markdown(entries[index].text),
               ],
             ],
-          ),
+          ],
         ),
+      ),
+    );
+    if (!widget.standalone) {
+      return Padding(
+        padding: EdgeInsets.only(bottom: 16, left: user ? 20 : 0),
+        child: bubble,
+      );
+    }
+    // The standalone workbench reads as a chat: the user writes on the right,
+    // the assistant answers on the left, and neither side runs the full width.
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 16),
+      child: LayoutBuilder(
+        builder: (context, constraints) {
+          final maxWidth = math.min(
+            user ? _bubbleMaxUserWidth : _bubbleMaxAssistantWidth,
+            constraints.maxWidth *
+                (user ? _bubbleMaxUserShare : _bubbleMaxAssistantShare),
+          );
+          return Align(
+            alignment: user ? Alignment.centerRight : Alignment.centerLeft,
+            child: ConstrainedBox(
+              constraints: BoxConstraints(maxWidth: maxWidth),
+              child: bubble,
+            ),
+          );
+        },
       ),
     );
   }

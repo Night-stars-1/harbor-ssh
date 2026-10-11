@@ -11,11 +11,12 @@ import 'window_frame.dart';
 
 /// Root of the detached AI window (second Flutter engine, `--ai-window`).
 ///
-/// The window renders the very same [TerminalAiPanel] against a
-/// [RemoteAiTaskController]: it owns no SSH connection, no API client and no
-/// conversation store, it only mirrors the main engine and forwards what the
-/// user does. Theme and title bar follow the main window, so the detached panel
-/// is visually identical to the embedded one.
+/// The window renders [TerminalAiPanel] against a [RemoteAiTaskController]: it
+/// owns no SSH connection, no API client and no conversation store, it only
+/// mirrors the main engine and forwards what the user does. Theme and title bar
+/// follow the main window. The panel recognises the standalone mode from
+/// `onDock` and lays itself out as a workbench (host header, action rail on
+/// large windows) instead of the embedded in-pane layout.
 class AiWindowApp extends StatefulWidget {
   const AiWindowApp({super.key});
 
@@ -27,8 +28,30 @@ class _AiWindowAppState extends State<AiWindowApp> {
   final controller = RemoteAiTaskController();
   late final Future<void> _ready = controller.initialize();
 
+  /// One composer draft per SSH session, so switching sessions and back
+  /// restores the text, the attachments and the transcript scroll offset
+  /// instead of keeping a hidden panel alive for every session.
+  final _drafts = <String, AiPanelDraft>{};
+
+  @override
+  void initState() {
+    super.initState();
+    controller.addListener(_pruneDrafts);
+  }
+
+  /// Drops drafts of sessions the main window has closed. The current session
+  /// is always kept, and an empty catalog (before the first mirror arrives) is
+  /// never treated as "everything is gone".
+  void _pruneDrafts() {
+    final live = {for (final session in controller.sessions) session.id};
+    if (live.isEmpty) return;
+    final current = controller.sessionId;
+    _drafts.removeWhere((id, _) => id != current && !live.contains(id));
+  }
+
   @override
   void dispose() {
+    controller.removeListener(_pruneDrafts);
     controller.dispose();
     super.dispose();
   }
@@ -69,16 +92,24 @@ class _AiWindowAppState extends State<AiWindowApp> {
               if (controller.sessionId == null) {
                 return _ClosedPane(onDock: controller.dock);
               }
+              final sessionId = controller.sessionId!;
               return Scaffold(
                 body: TerminalAiPanel(
+                  // Rebuilding per session gives each one a fresh composer and
+                  // transcript state; the draft map carries what the user typed
+                  // back in when they return.
+                  key: ValueKey('ai-window-$sessionId'),
                   task: controller,
                   hostName: controller.hostName,
+                  sessionSelection: controller,
+                  draft: _drafts[sessionId],
+                  onDraftChanged: (draft) => _drafts[sessionId] = draft,
                   onSettings: controller.settingsAvailable
                       ? () => unawaited(controller.openSettings())
                       : null,
-                  // Both the header close button and the dock button return the
-                  // panel to the main window; the task keeps running there.
-                  onClose: () => unawaited(controller.dock()),
+                  // The workbench renders exactly one window action: the dock
+                  // button that returns the panel to the main window, where the
+                  // task keeps running.
                   onDock: () => unawaited(controller.dock()),
                 ),
               );

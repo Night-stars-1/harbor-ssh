@@ -811,6 +811,112 @@ void main() {
     expect(tester.takeException(), isNull);
     await tester.pumpWidget(const SizedBox.shrink());
   });
+
+  testWidgets('独立窗口切换会话时新会话的嵌入面板隐藏，避免双显', (tester) async {
+    tester.view.devicePixelRatio = 1;
+    tester.view.physicalSize = const Size(2000, 900);
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+      aiWindowChannel,
+      (call) async => null,
+    );
+    addTearDown(
+      () => tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+        aiWindowChannel,
+        null,
+      ),
+    );
+    final host = AiWindowHost(
+      appearance: () => const AppearancePreferences(),
+      pushInterval: Duration.zero,
+    );
+    addTearDown(host.dispose);
+    final first = SshConnection(id: 'pane-a', host: testHost)
+      ..status = ConnectionStatus.connected;
+    final second = SshConnection(id: 'pane-b', host: testHost)
+      ..status = ConnectionStatus.connected;
+    addTearDown(first.dispose);
+    addTearDown(second.dispose);
+
+    AiSettings settings() =>
+        const AiSettings(baseUrl: 'https://ai.example.com/v1', model: 'test');
+    Widget pane(Key key, SshConnection session) => KeyedSubtree(
+      key: key,
+      child: TerminalPane(
+        session: session,
+        onReconnect: () {},
+        aiSettings: settings,
+        aiWindow: host,
+        statusVisible: false,
+      ),
+    );
+
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: harborTheme(),
+        home: Scaffold(
+          body: Row(
+            children: [
+              Expanded(child: pane(const ValueKey('pane-a'), first)),
+              Expanded(child: pane(const ValueKey('pane-b'), second)),
+            ],
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    Finder panelIn(ValueKey<String> paneKey) => find.descendant(
+      of: find.byKey(paneKey),
+      matching: find.byType(TerminalAiPanel),
+    );
+
+    Future<void> openAi(ValueKey<String> paneKey) async {
+      await tester.tap(
+        find.descendant(
+          of: find.byKey(paneKey),
+          matching: find.byKey(const ValueKey('terminal-ai')),
+        ),
+      );
+      await tester.pumpAndSettle();
+    }
+
+    // Both panes have their embedded assistant open.
+    await openAi(const ValueKey('pane-a'));
+    await openAi(const ValueKey('pane-b'));
+    expect(panelIn(const ValueKey('pane-a')), findsOneWidget);
+    expect(panelIn(const ValueKey('pane-b')), findsOneWidget);
+    final taskA =
+        tester.widget<TerminalAiPanel>(panelIn(const ValueKey('pane-a'))).task
+          ..running = true;
+    final taskB =
+        tester.widget<TerminalAiPanel>(panelIn(const ValueKey('pane-b'))).task
+          ..running = true;
+    taskA.notifyListeners();
+    taskB.notifyListeners();
+    await tester.pump();
+
+    // A is popped out: the AI window shows A.
+    await host.open(first.id);
+    await tester.pumpAndSettle();
+    expect(host.isDetached(first.id), isTrue);
+    expect(panelIn(const ValueKey('pane-a')), findsNothing);
+    expect(panelIn(const ValueKey('pane-b')), findsOneWidget);
+
+    // The window switches to B without going through B's pane. B must hide its
+    // embedded panel instead of rendering the same conversation twice.
+    await host.open(second.id);
+    await tester.pumpAndSettle();
+    expect(host.isDetached(second.id), isTrue);
+    expect(host.isDetached(first.id), isFalse);
+    expect(panelIn(const ValueKey('pane-a')), findsOneWidget);
+    expect(panelIn(const ValueKey('pane-b')), findsNothing);
+    expect(taskA.running, isTrue);
+    expect(taskB.running, isTrue);
+    expect(tester.takeException(), isNull);
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
 }
 
 class _ApprovalClient extends TerminalAiClient {

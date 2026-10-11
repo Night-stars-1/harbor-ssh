@@ -2,8 +2,10 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:harbor_ssh/data/ssh_connection.dart';
 import 'package:harbor_ssh/data/terminal_ai.dart';
+import 'package:harbor_ssh/domain/appearance.dart';
 import 'package:harbor_ssh/domain/host.dart';
 import 'package:harbor_ssh/ui/ai_task_controller.dart';
+import 'package:harbor_ssh/ui/ai_window_bridge.dart';
 import 'package:harbor_ssh/ui/terminal_ai_panel.dart';
 import 'package:harbor_ssh/ui/terminal_pane.dart';
 import 'package:harbor_ssh/ui/terminal_workspace.dart';
@@ -366,6 +368,67 @@ void main() {
       await tester.pumpWidget(const SizedBox.shrink());
     });
   }
+
+  testWidgets('独立窗口选中从未打开 AI 的会话后，回到主窗口仍显示面板', (tester) async {
+    tester.view.physicalSize = const Size(390, 800);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+      aiWindowChannel,
+      (call) async => null,
+    );
+    addTearDown(
+      () => tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+        aiWindowChannel,
+        null,
+      ),
+    );
+    final host = AiWindowHost(
+      appearance: () => const AppearancePreferences(),
+      pushInterval: Duration.zero,
+    );
+    addTearDown(host.dispose);
+    final first = _Session('first');
+    final second = _Session('second');
+    addTearDown(first.dispose);
+    addTearDown(second.dispose);
+    final key = GlobalKey<_HarnessState>();
+    await tester.pumpWidget(
+      _Harness(
+        key: key,
+        sessions: [first, second],
+        aiWindow: host,
+        aiSettings: () => const AiSettings(
+          baseUrl: 'https://ai.example.com/v1',
+          model: 'test',
+        ),
+      ),
+    );
+    key.currentState!.controller.selectOption('ai');
+    await tester.pumpAndSettle();
+    final taskA = tester.widget<TerminalAiPanel>(find.byType(TerminalAiPanel)).task;
+    await host.open(first.id);
+    await tester.pumpAndSettle();
+    expect(find.byType(TerminalAiPanel), findsNothing);
+
+    expect(await host.openSession(second.id), isTrue);
+    await tester.pumpAndSettle();
+    expect(
+      tester.widget<TerminalAiPanel>(find.byType(TerminalAiPanel)).task,
+      same(taskA),
+      reason: '窗口改显示 B 后，A 的面板回到主窗口',
+    );
+    await host.dock(second.id);
+    await tester.pumpAndSettle();
+    key.currentState!.select(second.id);
+    await tester.pumpAndSettle();
+    final restored = find.byType(TerminalAiPanel);
+    expect(restored, findsOneWidget);
+    expect(tester.widget<TerminalAiPanel>(restored).task, isNot(same(taskA)));
+    expect(tester.takeException(), isNull);
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
 }
 
 class _Session extends SshConnection {
@@ -378,9 +441,15 @@ class _Session extends SshConnection {
 }
 
 class _Harness extends StatefulWidget {
-  const _Harness({super.key, required this.sessions, this.aiSettings});
+  const _Harness({
+    super.key,
+    required this.sessions,
+    this.aiSettings,
+    this.aiWindow,
+  });
   final List<_Session> sessions;
   final AiSettings Function()? aiSettings;
+  final AiWindowHost? aiWindow;
   @override
   State<_Harness> createState() => _HarnessState();
 }
@@ -416,6 +485,7 @@ class _HarnessState extends State<_Harness> {
           visible: true,
           mobileController: controller,
           aiSettings: widget.aiSettings,
+          aiWindow: widget.aiWindow,
           onSelect: (id) =>
               setState(() => active = sessions.firstWhere((s) => s.id == id)),
           onConnect: (Host host) async => add(_Session('created')),

@@ -9,6 +9,7 @@ import '../data/ai_image.dart';
 import '../data/terminal_ai.dart';
 import '../domain/appearance.dart';
 import 'ai_task_controller.dart';
+import 'ai_window_session.dart';
 
 /// Channel shared with the Windows runner (`harbor/ai_window`).
 ///
@@ -38,6 +39,9 @@ abstract final class AiWindowOp {
   static const deleteConversation = 'deleteConversation';
   static const previewConversation = 'previewConversation';
   static const settings = 'settings';
+
+  /// Switches the detached window to another open SSH session.
+  static const openSession = 'openSession';
 }
 
 /// Owns the AI controller of every SSH session and mirrors the one session that
@@ -47,7 +51,7 @@ abstract final class AiWindowOp {
 /// and the encrypted conversation store; the second engine only renders and
 /// forwards. `changed`/`state` payloads never carry an API key, an SSH secret
 /// or command text typed outside the conversation.
-class AiWindowHost {
+class AiWindowHost extends ChangeNotifier {
   AiWindowHost({
     required this.appearance,
     this.pushInterval = aiWindowPushInterval,
@@ -64,11 +68,46 @@ class AiWindowHost {
   String? _sessionId;
   bool _attached = false;
 
+  /// Supplies every SSH session the main window currently has open, whether or
+  /// not it ever opened the assistant. Installed by [TerminalWorkspace].
+  List<AiWindowSession> Function()? _catalog;
+
+  /// Creates (and registers) the controller of a session that has none yet.
+  Future<bool> Function(String sessionId)? _ensure;
+
+  String _catalogSignature = '';
+
+  /// Binds the authoritative session directory.
+  ///
+  /// [catalog] is re-read on every push, so it always reflects the sessions the
+  /// main window has open. [ensure] lazily materializes the real controller of a
+  /// session that has never opened the assistant, so the detached window can
+  /// switch to it without the main window pre-creating anything.
+  void bindSessions({
+    required List<AiWindowSession> Function() catalog,
+    required Future<bool> Function(String sessionId) ensure,
+  }) {
+    _catalog = catalog;
+    _ensure = ensure;
+    _catalogSignature = '';
+    _refreshCatalog();
+  }
+
+  void unbindSessions() {
+    _catalog = null;
+    _ensure = null;
+    _catalogSignature = '';
+  }
+
   /// Session mirrored by the detached window, or null when it is hidden.
   String? get openSessionId => _sessionId;
 
   /// Whether [sessionId] is the session currently shown in the detached window.
   bool isDetached(String sessionId) => _sessionId == sessionId;
+
+  /// Re-reads the session directory and pushes it when it changed (SSH opened,
+  /// closed, connected or disconnected, a background turn started or stopped).
+  void refreshSessions() => _refreshCatalog();
 
   void attach() {
     if (_attached) return;
@@ -89,7 +128,18 @@ class AiWindowHost {
     required VoidCallback onDock,
     VoidCallback? onSettings,
   }) {
-    final previous = _sessions.remove(sessionId);
+    final previous = _sessions[sessionId];
+    // The very same controller (the pane adopted one the workspace created
+    // lazily, or re-registered itself) keeps its generation and conversation:
+    // only the metadata and the dock callback are refreshed.
+    if (previous != null && identical(previous.task, task)) {
+      previous
+        ..hostName = hostName
+        ..onDock = onDock
+        ..onSettings = onSettings;
+      if (_sessionId == sessionId) previous.markDirty(immediate: true);
+      return;
+    }
     final session = _DetachedSession(
       this,
       sessionId,
@@ -103,6 +153,7 @@ class AiWindowHost {
     task.addListener(session.markDirty);
     previous?.detach();
     if (_sessionId == sessionId) session.rebuild();
+    _refreshCatalog();
   }
 
   /// Releases [sessionId]. A detached window is told that the session is gone
@@ -111,9 +162,15 @@ class AiWindowHost {
     final session = _sessions.remove(sessionId);
     if (session == null) return;
     session.detach();
-    if (_sessionId != sessionId) return;
+    if (_sessionId != sessionId) {
+      _refreshCatalog();
+      return;
+    }
     _sessionId = null;
+    // The list must already reflect the removal when the window is told.
+    _refreshCatalog();
     session.announceClosed();
+    notifyListeners();
   }
 
   /// Creates (or wakes) the single native AI window and mirrors [sessionId].
@@ -122,10 +179,12 @@ class AiWindowHost {
   /// [isDetached] afterwards: a window that could not be created leaves the
   /// session embedded in the main window.
   Future<void> open(String sessionId) async {
-    final session = _sessions[sessionId];
+    final session = await _materialize(sessionId);
     if (session == null) return;
     final previous = _sessionId;
-    _setSession(sessionId);
+    // The session is claimed silently: the panes must not see an embedded
+    // panel flicker while the native window is still being created.
+    _setSession(sessionId, notify: false);
     // Entries are mirrored from scratch (the window may show another
     // conversation), but image bytes are content addressed and stay cached for
     // as long as the child engine lives: a wake-up never re-uploads them.
@@ -136,6 +195,8 @@ class AiWindowHost {
       // Keep the conversation that is actually on screen. A failed open must
       // not embed that pane while the native window is still showing it.
       if (_sessionId == sessionId) _sessionId = previous;
+      notifyListeners();
+      _refreshCatalog();
       return;
     }
     if (_sessionId != sessionId) return;
@@ -144,7 +205,30 @@ class AiWindowHost {
     if (previous != null && previous != sessionId) {
       _sessions[previous]?.reembed();
     }
+    notifyListeners();
+    _refreshCatalog();
     await session.flush();
+  }
+
+  /// Ensures [sessionId] has a controller and mirrors it in the native window.
+  ///
+  /// A session that never opened the assistant is materialized on demand by the
+  /// catalog's `ensure` hook, so the window can switch to any open SSH session.
+  /// Returns whether the window ended up showing [sessionId].
+  Future<bool> openSession(String sessionId) async {
+    await open(sessionId);
+    return _sessionId == sessionId;
+  }
+
+  /// The registered session, materializing its controller through the catalog
+  /// hook when the window has never shown it.
+  Future<_DetachedSession?> _materialize(String sessionId) async {
+    final existing = _sessions[sessionId];
+    if (existing != null) return existing;
+    final ensure = _ensure;
+    if (ensure == null) return null;
+    if (!await ensure(sessionId)) return null;
+    return _sessions[sessionId];
   }
 
   /// Returns [sessionId] to the main window and hides the native window.
@@ -165,6 +249,7 @@ class AiWindowHost {
     _sessions[id]?.markDirty(immediate: true);
   }
 
+  @override
   void dispose() {
     for (final session in _sessions.values) {
       session.detach();
@@ -175,14 +260,49 @@ class AiWindowHost {
       aiWindowChannel.setMethodCallHandler(null);
       _attached = false;
     }
+    super.dispose();
   }
 
-  void _setSession(String? id) {
+  void _setSession(String? id, {bool notify = true}) {
     if (_sessionId == id) return;
     // Mirror caches survive a switch: image bytes are content addressed and the
     // child engine keeps its cache, so returning to a session only resends the
     // entries. A child that restarts clears them through its `state` handshake.
     _sessionId = id;
+    if (notify) notifyListeners();
+  }
+
+  /// Sessions the main window has open, as last read from the catalog.
+  List<AiWindowSession> _sessionsList() {
+    final catalog = _catalog;
+    if (catalog == null) return const [];
+    try {
+      return catalog();
+    } catch (_) {
+      return const [];
+    }
+  }
+
+  List<Map<String, Object?>> _encodedSessions() => [
+    for (final session in _sessionsList()) session.toJson(),
+  ];
+
+  /// Pushes the session directory when its visible shape changed. Cheap to call
+  /// on every SSH or task notification: an unchanged list never pushes.
+  void _refreshCatalog() {
+    final signature = _sessionsList()
+        .map(
+          (session) =>
+              '${session.id}|${session.hostName}|${session.endpoint}'
+              '|${session.connected}|${session.running}'
+              '|${session.waitingApproval}',
+        )
+        .join('\n');
+    if (signature == _catalogSignature) return;
+    _catalogSignature = signature;
+    final id = _sessionId;
+    if (id == null) return;
+    _sessions[id]?.markDirty(immediate: true);
   }
 
   /// Entry point of the native relay (also used by tests).
@@ -216,14 +336,17 @@ class AiWindowHost {
 
   Future<Object?> _action(Object? arguments) async {
     final map = arguments is Map ? arguments : const {};
+    final op = map['op'];
+    if (op is! String) {
+      throw PlatformException(code: 'op', message: '无效的 AI 窗口操作');
+    }
+    // A switch carries the session the window is on right now; it must be
+    // validated against the main engine before the window is moved.
+    if (op == AiWindowOp.openSession) return _openSessionAction(map);
     final requested = map['sessionId'];
     final session = _sessions[requested is String ? requested : _sessionId];
     if (session == null) {
       throw PlatformException(code: 'session', message: 'AI 会话已关闭，请从主窗口重新打开');
-    }
-    final op = map['op'];
-    if (op is! String) {
-      throw PlatformException(code: 'op', message: '无效的 AI 窗口操作');
     }
     final argumentsMap = map['args'] is Map
         ? Map<String, Object?>.from(map['args'] as Map)
@@ -246,6 +369,45 @@ class AiWindowHost {
           current?.snapshot(full: true) ??
           const <String, Object?>{'sessionId': null},
       'result': result,
+    };
+  }
+
+  /// Switches the detached window to another open SSH session.
+  ///
+  /// The request carries the origin session and its mirror generation. A select
+  /// that arrives after the window already moved (or after its pane was
+  /// rebuilt) is rejected instead of dragging the user back to an old session.
+  Future<Object?> _openSessionAction(Map map) async {
+    final args = map['args'] is Map
+        ? Map<String, Object?>.from(map['args'] as Map)
+        : const <String, Object?>{};
+    final target = args['id'];
+    final requested = map['sessionId'];
+    final current = _sessionId == null ? null : _sessions[_sessionId];
+    if (_sessionId != null) {
+      // The window is on a session: the origin must still be that session with
+      // the generation the window saw, otherwise this is a late select.
+      final origin = requested is String ? _sessions[requested] : null;
+      final generation = map['generation'];
+      if (origin == null ||
+          _sessionId != requested ||
+          origin.generation != generation) {
+        return <String, Object?>{'state': current?.snapshot(full: true)};
+      }
+    }
+    if (target is! String || target.isEmpty) {
+      return <String, Object?>{'state': current?.snapshot(full: true)};
+    }
+    if (target == _sessionId) {
+      return <String, Object?>{
+        'state': _sessions[target]?.snapshot(full: false),
+      };
+    }
+    final switched = await openSession(target);
+    final session = _sessionId == null ? null : _sessions[_sessionId];
+    return <String, Object?>{
+      'state': session?.snapshot(full: true),
+      'result': switched,
     };
   }
 
@@ -294,9 +456,9 @@ class _DetachedSession {
   final AiWindowHost host;
   final String sessionId;
   final AiTaskController task;
-  final String hostName;
-  final VoidCallback onDock;
-  final VoidCallback? onSettings;
+  String hostName;
+  VoidCallback onDock;
+  VoidCallback? onSettings;
 
   /// Bumped whenever a session id is re-registered with a new controller.
   final int generation;
@@ -312,7 +474,13 @@ class _DetachedSession {
   bool get _mirrored => host.openSessionId == sessionId;
 
   void markDirty({bool immediate = false}) {
-    if (_disposed || !_mirrored) return;
+    if (_disposed) return;
+    if (!_mirrored) {
+      // A background session's turn state is part of the session directory the
+      // window shows; refresh it without touching the mirrored conversation.
+      host._refreshCatalog();
+      return;
+    }
     _dirty = true;
     if (immediate || host.pushInterval <= Duration.zero) {
       _timer?.cancel();
@@ -363,6 +531,7 @@ class _DetachedSession {
         'sessionId': sessionId,
         'generation': generation,
         'closed': true,
+        'sessions': host._encodedSessions(),
       }),
     );
     unawaited(host._invoke('hide'));
@@ -519,6 +688,7 @@ class _DetachedSession {
       'settings': _publicSettings(task.settings()),
       'appearance': host.appearance().toJson(),
       'settingsAvailable': onSettings != null,
+      'sessions': host._encodedSessions(),
       'history': <String, Object?>{
         'loading': task.historyLoading,
         'failure': task.historyFailure,
@@ -657,7 +827,8 @@ String _imageRef(String name, Uint8List bytes) =>
 /// it owns no API client, no command executor and no conversation store: every
 /// read is a mirror of the main engine and every write is forwarded. The panel
 /// therefore renders and behaves exactly as it does inside the main window.
-class RemoteAiTaskController extends AiTaskController {
+class RemoteAiTaskController extends AiTaskController
+    implements AiWindowSessionSelection {
   RemoteAiTaskController._(_RemoteMirror mirror)
     : _mirror = mirror,
       super(
@@ -674,6 +845,7 @@ class RemoteAiTaskController extends AiTaskController {
   Future<void> _pipeline = Future<void>.value();
   bool _disposed = false;
   bool _resyncPending = false;
+  bool _selecting = false;
 
   @override
   List<AiConversationSummary> get conversations =>
@@ -689,7 +861,18 @@ class RemoteAiTaskController extends AiTaskController {
   String? get historyFailure => _mirror.historyFailure;
 
   /// Session mirrored into this window, or null when it is closed.
+  @override
   String? get sessionId => _mirror.sessionId;
+
+  /// Every SSH session the main window has open, mirrored for the session
+  /// picker. Credential-free: id, host name, endpoint and live state only.
+  /// Empty until the first mirror arrives.
+  @override
+  List<AiWindowSession> get sessions => _mirror.sessions;
+
+  /// Whether a switch is in flight; the picker disables itself meanwhile.
+  @override
+  bool get selectingSession => _selecting;
 
   String get hostName => _mirror.hostName;
 
@@ -700,6 +883,30 @@ class RemoteAiTaskController extends AiTaskController {
   /// Completes when every mirror received so far has been applied.
   @visibleForTesting
   Future<void> get applied => _pipeline;
+
+  /// Asks the main engine to show [id] in this window.
+  ///
+  /// Returns whether the window ended up on that session. The request carries
+  /// the origin session and generation so a late select cannot drag the window
+  /// back to a session it already left. Concurrent selects are ignored.
+  @override
+  Future<bool> selectSession(String id) async {
+    if (_disposed) return false;
+    if (_mirror.sessionId == id) return true;
+    if (_selecting) return false;
+    _selecting = true;
+    notifyListeners();
+    try {
+      await _forward(AiWindowOp.openSession, <String, Object?>{'id': id});
+      await _pipeline;
+      return !_disposed && _mirror.sessionId == id;
+    } finally {
+      if (!_disposed) {
+        _selecting = false;
+        notifyListeners();
+      }
+    }
+  }
 
   /// Startup handshake: registers the relay and asks the main engine for the
   /// first mirror. Missing native support leaves the window in its closed state
@@ -880,6 +1087,7 @@ class RemoteAiTaskController extends AiTaskController {
     try {
       reply = await aiWindowChannel.invokeMethod<Object?>('action', {
         'sessionId': session,
+        'generation': generation,
         'op': op,
         'args': arguments ?? const <String, Object?>{},
       });
@@ -925,6 +1133,9 @@ class RemoteAiTaskController extends AiTaskController {
       return;
     }
     if (raw['closed'] == true) {
+      // The closed session is already gone from the directory; keep the rest so
+      // the window can still offer another SSH session.
+      _applySessions(raw);
       _clear();
       return;
     }
@@ -1045,6 +1256,7 @@ class RemoteAiTaskController extends AiTaskController {
     }
     if (raw['hostName'] is String) _mirror.hostName = raw['hostName'] as String;
     _mirror.settingsAvailable = raw['settingsAvailable'] == true;
+    _applySessions(raw);
     final history = raw['history'];
     if (history is Map) {
       _mirror.historyLoading = history['loading'] == true;
@@ -1068,6 +1280,17 @@ class RemoteAiTaskController extends AiTaskController {
             ),
       ];
     }
+  }
+
+  /// Mirrors the SSH session directory. Absent on older payloads, in which case
+  /// the last known list is kept.
+  void _applySessions(Map raw) {
+    final rows = raw['sessions'];
+    if (rows is! List) return;
+    _mirror.sessions = [
+      for (final row in rows)
+        if (row is Map) AiWindowSession.fromJson(row),
+    ];
   }
 
   /// The main engine dropped the session (its SSH pane was closed).
@@ -1192,6 +1415,7 @@ class _RemoteMirror {
   bool settingsAvailable = false;
   String? sessionId;
   int generation = 0;
+  List<AiWindowSession> sessions = const [];
   List<AiConversationSummary> conversations = const [];
   String? activeConversationId;
   bool historyLoading = false;

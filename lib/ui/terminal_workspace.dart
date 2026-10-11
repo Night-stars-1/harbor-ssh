@@ -3,6 +3,7 @@ import 'dart:math' as math;
 import 'package:flutter/material.dart';
 
 import 'ai_window_bridge.dart';
+import 'ai_window_session.dart';
 import '../data/ai_conversation_store.dart';
 import '../data/ssh_connection.dart';
 import '../data/terminal_ai.dart';
@@ -62,6 +63,7 @@ class _TerminalWorkspaceState extends State<TerminalWorkspace> {
   final _keys = <String, GlobalKey>{};
   final _paneKeys = <int, GlobalKey>{};
   final _controllers = <String, TerminalPaneController>{};
+  final _aiWatched = <SshConnection>{};
   late final _aiRetention = TerminalAiRetention(
     (id) => _sessions.containsKey(id),
   );
@@ -100,12 +102,17 @@ class _TerminalWorkspaceState extends State<TerminalWorkspace> {
   @override
   void initState() {
     super.initState();
+    _bindAiWindow();
     _sync();
   }
 
   @override
   void didUpdateWidget(TerminalWorkspace oldWidget) {
     super.didUpdateWidget(oldWidget);
+    if (oldWidget.aiWindow != widget.aiWindow) {
+      oldWidget.aiWindow?.unbindSessions();
+      _bindAiWindow();
+    }
     _sync();
     if (widget.visible &&
         (!oldWidget.visible || oldWidget.desktop != widget.desktop)) {
@@ -113,9 +120,95 @@ class _TerminalWorkspaceState extends State<TerminalWorkspace> {
     }
   }
 
+  /// Hands the detached window the authoritative session directory and the
+  /// hook that lazily creates a controller for a session that never opened the
+  /// assistant.
+  void _bindAiWindow() {
+    widget.aiWindow?.bindSessions(
+      catalog: _aiSessionCatalog,
+      ensure: _ensureAiSession,
+    );
+  }
+
+  /// Every open SSH session, as the detached window's picker sees it. Carries
+  /// no credential: id, host name, endpoint and live run/approval state only.
+  List<AiWindowSession> _aiSessionCatalog() => [
+    for (final session in _sessions.values)
+      AiWindowSession(
+        id: session.id,
+        hostName: session.host.name,
+        endpoint: session.host.endpoint,
+        connected: session.status == ConnectionStatus.connected,
+        running: _aiRetention.taskOf(session.id)?.running ?? false,
+        waitingApproval:
+            _aiRetention.taskOf(session.id)?.pending?.requiresApproval ?? false,
+      ),
+  ];
+
+  /// Materializes the real controller of [id] when the detached window selects
+  /// a session that has never opened the assistant, and registers it with the
+  /// host exactly like an opened pane does.
+  Future<bool> _ensureAiSession(String id) async {
+    final host = widget.aiWindow;
+    final settings = widget.aiSettings;
+    if (host == null || settings == null) return false;
+    final session = _sessions[id];
+    if (session == null) return false;
+    if (_aiRetention.taskOf(id) == null) {
+      final historyStore = widget.aiHistoryStore;
+      final historyScope = historyStore == null
+          ? null
+          : '${session.host.id}|${session.host.endpoint}|${session.host.username}';
+      final task = _aiRetention.create(
+        sessionId: id,
+        settings: settings,
+        executorFactory: () => session.createAiExecutor(),
+        connected: () => session.status == ConnectionStatus.connected,
+        historyStore: historyStore,
+        historyScope: historyScope,
+      );
+      // The pane is not mounted yet. Park the slot as the detached, open
+      // panel so docking or switching away can restore it in the main window;
+      // a mounted pane claims it immediately and takes the watch over.
+      _aiRetention.park(
+        id,
+        open: true,
+        detached: true,
+        session: session,
+        settings: settings,
+        executorFactory: () => session.createAiExecutor(),
+        connected: () => session.status == ConnectionStatus.connected,
+      );
+      host.register(
+        id,
+        task,
+        session.host.name,
+        onDock: () => _aiRetention.noteDocked(id),
+        onSettings: widget.onAiSettings,
+      );
+    }
+    return true;
+  }
+
+  /// Watches every open session so a connection change (connected, dropped)
+  /// refreshes the directory the detached window shows.
+  void _watchAiSessions() {
+    final next = _sessions.values.toSet();
+    for (final session in _aiWatched.toList()) {
+      if (next.contains(session)) continue;
+      session.removeListener(_aiSessionChanged);
+      _aiWatched.remove(session);
+    }
+    for (final session in next) {
+      if (_aiWatched.add(session)) session.addListener(_aiSessionChanged);
+    }
+  }
+
+  void _aiSessionChanged() => widget.aiWindow?.refreshSessions();
+
   void _sync() {
     final sessions = _sessions;
-    for (final id in _aiRetention.parkedIds.toList()) {
+    for (final id in _aiRetention.ids.toList()) {
       if (sessions.containsKey(id)) continue;
       widget.aiWindow?.unregister(id);
       _aiRetention.drop(id);
@@ -144,6 +237,8 @@ class _TerminalWorkspaceState extends State<TerminalWorkspace> {
       _requestFocus(active);
     }
     _lastActiveId = active;
+    _watchAiSessions();
+    widget.aiWindow?.refreshSessions();
   }
 
   void _requestFocus(String? id) {
@@ -158,7 +253,12 @@ class _TerminalWorkspaceState extends State<TerminalWorkspace> {
 
   @override
   void dispose() {
-    for (final id in _aiRetention.parkedIds.toList()) {
+    widget.aiWindow?.unbindSessions();
+    for (final session in _aiWatched.toList()) {
+      session.removeListener(_aiSessionChanged);
+    }
+    _aiWatched.clear();
+    for (final id in _aiRetention.ids.toList()) {
       widget.aiWindow?.unregister(id);
     }
     _aiRetention.dispose();

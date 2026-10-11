@@ -2,6 +2,7 @@ import 'dart:async';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/gestures.dart';
+import 'package:flutter/scheduler.dart';
 import 'package:flutter/services.dart';
 import 'package:xterm/xterm.dart';
 
@@ -173,7 +174,7 @@ class _TerminalPaneState extends State<TerminalPane> {
     required AiSettings Function()? settings,
   }) {
     final task = _ai;
-    if (retention != null && task != null && retention.keeps(session.id)) {
+    if (task != null && retention != null && retention.keeps(session.id)) {
       retention.park(
         session.id,
         open: _aiOpen,
@@ -190,13 +191,15 @@ class _TerminalPaneState extends State<TerminalPane> {
         onDock: () => retention.noteDocked(session.id),
         onSettings: onSettings,
       );
-    } else if (retention != null && task != null) {
+    } else if (task != null && retention != null) {
       host?.unregister(session.id);
       retention.drop(session.id);
-    } else {
+    } else if (task != null) {
       host?.unregister(session.id);
-      task?.dispose();
+      task.dispose();
     }
+    // A pane that owns no controller must not unregister one the workspace
+    // created lazily for the detached window.
     _ai = null;
     _aiOpen = false;
     _aiDetached = false;
@@ -220,6 +223,42 @@ class _TerminalPaneState extends State<TerminalPane> {
     setState(() {
       _aiOpen = true;
       _aiDetached = false;
+    });
+  }
+
+  /// The main window's AI host moved the detached window (or closed it). Only
+  /// the mirrored session keeps its panel hidden; every other pane must show
+  /// its embedded panel again, so no two places render the same conversation.
+  void _aiHostChanged() {
+    if (!mounted) return;
+    final detached = widget.aiWindow?.isDetached(widget.session.id) ?? false;
+    if (detached && _ai == null) {
+      // The workspace materialized this session's controller so the detached
+      // window could show it; adopt the very same instance here.
+      _claimAi();
+    }
+    if (detached == _aiDetached) return;
+    _applyDetached(detached);
+  }
+
+  void _applyDetached(bool detached) {
+    if (!mounted || detached == _aiDetached) return;
+    // A notification can land while another widget builds; deferring the
+    // rebuild keeps the framework from throwing mid-build.
+    if (SchedulerBinding.instance.schedulerPhase ==
+        SchedulerPhase.persistentCallbacks) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!mounted || detached == _aiDetached) return;
+        setState(() {
+          _aiDetached = detached;
+          if (detached) _aiOpen = true;
+        });
+      });
+      return;
+    }
+    setState(() {
+      _aiDetached = detached;
+      if (detached) _aiOpen = true;
     });
   }
 
@@ -436,6 +475,7 @@ class _TerminalPaneState extends State<TerminalPane> {
     _applyLineWrap();
     _syncMetrics();
     _claimAi();
+    widget.aiWindow?.addListener(_aiHostChanged);
   }
 
   void _reportFocus() {
@@ -512,9 +552,12 @@ class _TerminalPaneState extends State<TerminalPane> {
       }
       _syncMetrics();
     } else if (oldWidget.aiWindow != widget.aiWindow) {
+      oldWidget.aiWindow?.removeListener(_aiHostChanged);
       oldWidget.aiWindow?.unregister(widget.session.id);
+      widget.aiWindow?.addListener(_aiHostChanged);
       _aiDetached = false;
       _registerAi();
+      _aiHostChanged();
     }
     if (oldWidget.session == widget.session) _retargetAi();
   }
@@ -545,6 +588,7 @@ class _TerminalPaneState extends State<TerminalPane> {
   void dispose() {
     _stopMetrics(notify: false);
     widget.session.removeListener(_connectionChanged);
+    widget.aiWindow?.removeListener(_aiHostChanged);
     _releaseAi(
       widget.session,
       retention: widget.aiRetention,
@@ -1065,6 +1109,19 @@ class TerminalAiRetention {
   final _slots = <String, _RetainedAi>{};
 
   bool keeps(String sessionId) => _alive(sessionId);
+
+  /// The controller of [sessionId], whether or not its panel is open. Used by
+  /// the workspace to mirror live run/approval state into the session list.
+  AiTaskController? taskOf(String sessionId) => _slots[sessionId]?.task;
+
+  /// Every session that owns a controller, mounted pane or not.
+  Iterable<String> get ids => _slots.keys.toList();
+
+  /// Watches [session] for a dropped connection on behalf of a controller the
+  /// workspace created for a session whose pane never opened the panel. The
+  /// pane takes the watch over as soon as it claims the controller.
+  void watch(String sessionId, SshConnection session) =>
+      _slots[sessionId]?.watch(session);
 
   Iterable<String> get parkedIds => [
     for (final entry in _slots.entries)
