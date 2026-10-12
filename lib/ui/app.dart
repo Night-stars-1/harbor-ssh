@@ -1070,6 +1070,25 @@ class _WorkspaceState extends State<Workspace> {
                           children: [
                             Expanded(
                               child: ExpressiveIndexedStack(
+                                motion: wide
+                                    ? ExpressivePageMotion.fadeThrough
+                                    : ExpressivePageMotion.sharedAxis,
+                                // Connection, favorites and credentials share
+                                // the home child; animate their logical switch
+                                // without replacing it or resetting its state.
+                                transitionIndex: wide
+                                    ? null
+                                    : model.showingSettings
+                                    ? 5
+                                    : model.showingPortForwards
+                                    ? 4
+                                    : model.showingFiles
+                                    ? 3
+                                    : model.showingUsers
+                                    ? 2
+                                    : model.favoritesOnly
+                                    ? 1
+                                    : 0,
                                 index: model.showingSettings
                                     ? 2
                                     : model.showingPortForwards

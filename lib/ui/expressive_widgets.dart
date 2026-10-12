@@ -143,10 +143,16 @@ class ExpressiveIndexedStack extends StatefulWidget {
     required this.children,
     this.motion = ExpressivePageMotion.fadeThrough,
     this.depthOf,
+    this.transitionIndex,
     this.sizing = StackFit.loose,
   });
   final int index;
   final List<Widget> children;
+
+  /// Logical destination order when multiple destinations share one child.
+  /// Changes restart the entrance without replacing that child's state;
+  /// defaults to [index]. Also determines the direction of shared-axis motion.
+  final int? transitionIndex;
   final ExpressivePageMotion motion;
 
   /// Hierarchy level of a child for [ExpressivePageMotion.sharedAxis];
@@ -170,9 +176,11 @@ class _ExpressiveIndexedStackState extends State<ExpressiveIndexedStack>
   @override
   void didUpdateWidget(ExpressiveIndexedStack oldWidget) {
     super.didUpdateWidget(oldWidget);
-    if (oldWidget.index == widget.index) return;
+    final previous = oldWidget.transitionIndex ?? oldWidget.index;
+    final next = widget.transitionIndex ?? widget.index;
+    if (oldWidget.index == widget.index && previous == next) return;
     final depth = widget.depthOf ?? (int index) => index;
-    _backwards = depth(widget.index) < depth(oldWidget.index);
+    _backwards = depth(next) < depth(previous);
     _controller.duration = expressiveDuration(context);
     _controller.forward(from: 0);
   }

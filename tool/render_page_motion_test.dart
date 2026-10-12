@@ -97,6 +97,38 @@ void main() {
       await tester.tap(find.byKey(const ValueKey('settings-category-back')));
     });
   });
+
+  testWidgets('手机主导航与收藏只滑动淡入', (tester) async {
+    await setUpFonts(tester);
+    tester.view.physicalSize = const Size(390, 800);
+    final repository = memoryRepository();
+    await repository.saveHosts([testHost]);
+    await tester.pumpWidget(
+      _shoot(HarborApp(model: WorkspaceModel(repository))),
+    );
+    await tester.pumpAndSettle();
+    await sheet(tester, 'mobile-favorites', () async {
+      await tester.tap(find.byTooltip('收藏'));
+    });
+    await sheet(tester, 'mobile-connections', () async {
+      await tester.tap(find.byTooltip('显示全部连接'));
+    });
+    await sheet(tester, 'mobile-sftp', () async {
+      await tester.tap(
+        find.descendant(
+          of: find.byType(NavigationBar),
+          matching: find.text('SFTP'),
+        ),
+      );
+    });
+    await sheet(tester, 'mobile-forwards', () async {
+      await tester.tap(find.byKey(const ValueKey('mobile-port-forwards')));
+    });
+    await sheet(tester, 'mobile-settings', () async {
+      await tester.tap(find.byKey(const ValueKey('settings-button')));
+    });
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
 }
 
 const _shot = ValueKey('shot');

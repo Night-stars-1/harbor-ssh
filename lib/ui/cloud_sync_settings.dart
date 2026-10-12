@@ -295,71 +295,79 @@ class _CloudSyncSettingsState extends State<CloudSyncSettings> {
             ],
           ),
           const SizedBox(height: 24),
-          AnimatedSize(
-            duration: expressiveDuration(context),
-            curve: expressiveCurve,
-            alignment: Alignment.topCenter,
-            child: ExpressiveSwitcher(
-              child: _provider == SyncProvider.gist
-                  ? SettingsGroup(
-                      key: const ValueKey(SyncProvider.gist),
-                      title: 'GitHub Gist',
-                      children: [
-                        GitHubSignIn(
-                          controller: widget.controller,
-                          enabled: _activeAction == null && !sync.busy,
-                          onBusyChanged: (value) => setState(() {
-                            if (value) {
-                              _hadGitHubAccount =
-                                  widget
-                                      .controller
-                                      .settings
-                                      ?.token
-                                      .isNotEmpty ==
-                                  true;
-                            }
-                            _authenticating = value;
-                            if (!value &&
-                                _hadGitHubAccount &&
-                                widget.controller.settings?.token.isEmpty ==
-                                    true) {
-                              _automatic = false;
-                            }
-                          }),
-                        ),
-                      ],
-                    )
-                  : SettingsGroup(
-                      key: const ValueKey(SyncProvider.webdav),
-                      title: 'WebDAV 服务',
-                      children: [
-                        SettingsRow(
-                          title: '目录地址',
-                          description: '坚果云或自建服务中的已有目录',
-                          control: _field(
-                            '目录地址',
-                            _url,
-                            hint: 'https://dav.example.com/HarborSSH/',
-                            enabled: !busy,
+          Builder(
+            builder: (context) {
+              final content = ExpressiveSwitcher(
+                child: _provider == SyncProvider.gist
+                    ? SettingsGroup(
+                        key: const ValueKey(SyncProvider.gist),
+                        title: 'GitHub Gist',
+                        children: [
+                          GitHubSignIn(
+                            controller: widget.controller,
+                            enabled: _activeAction == null && !sync.busy,
+                            onBusyChanged: (value) => setState(() {
+                              if (value) {
+                                _hadGitHubAccount =
+                                    widget
+                                        .controller
+                                        .settings
+                                        ?.token
+                                        .isNotEmpty ==
+                                    true;
+                              }
+                              _authenticating = value;
+                              if (!value &&
+                                  _hadGitHubAccount &&
+                                  widget.controller.settings?.token.isEmpty ==
+                                      true) {
+                                _automatic = false;
+                              }
+                            }),
                           ),
-                        ),
-                        SettingsRow(
-                          title: '用户名',
-                          control: _field('用户名', _username, enabled: !busy),
-                        ),
-                        SettingsRow(
-                          title: '密码',
-                          description: 'WebDAV 密码或应用密码',
-                          control: _field(
-                            '密码 / 应用密码',
-                            _password,
-                            secret: true,
-                            enabled: !busy,
+                        ],
+                      )
+                    : SettingsGroup(
+                        key: const ValueKey(SyncProvider.webdav),
+                        title: 'WebDAV 服务',
+                        children: [
+                          SettingsRow(
+                            title: '目录地址',
+                            description: '坚果云或自建服务中的已有目录',
+                            control: _field(
+                              '目录地址',
+                              _url,
+                              hint: 'https://dav.example.com/HarborSSH/',
+                              enabled: !busy,
+                            ),
                           ),
-                        ),
-                      ],
-                    ),
-            ),
+                          SettingsRow(
+                            title: '用户名',
+                            control: _field('用户名', _username, enabled: !busy),
+                          ),
+                          SettingsRow(
+                            title: '密码',
+                            description: 'WebDAV 密码或应用密码',
+                            control: _field(
+                              '密码 / 应用密码',
+                              _password,
+                              secret: true,
+                              enabled: !busy,
+                            ),
+                          ),
+                        ],
+                      ),
+              );
+              // A zero-duration AnimatedSize can restart its controller during
+              // layout. Reduced motion needs no size animation at all.
+              if (MediaQuery.disableAnimationsOf(context)) return content;
+              return AnimatedSize(
+                duration: expressiveDuration(context),
+                curve: expressiveCurve,
+                alignment: Alignment.topCenter,
+                child: content,
+              );
+            },
           ),
           const SizedBox(height: 24),
           SettingsGroup(
