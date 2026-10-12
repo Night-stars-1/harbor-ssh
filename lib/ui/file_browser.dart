@@ -7,6 +7,7 @@ import '../data/local_transfer.dart';
 import '../data/picked_transfer.dart';
 import '../data/ssh_connection.dart';
 import '../domain/remote_file.dart';
+import 'expressive_widgets.dart';
 import 'remote_file_tile.dart';
 import 'remote_text_editor_dialog.dart';
 import 'theme.dart';
@@ -349,7 +350,7 @@ class _FileBrowserState extends State<FileBrowser> {
       Navigator.of(context).pop();
       return;
     }
-    final leave = await showDialog<bool>(
+    final leave = await showExpressiveDialog<bool>(
       context: context,
       builder: (context) => AlertDialog(
         title: Text(_pending != null ? '暂停传输并返回？' : '取消传输并返回？'),

@@ -1695,7 +1695,8 @@ Future<void> openRemoteEditor(WidgetTester tester, Finder row) async {
   await tester.pumpAndSettle();
   await tester.tap(find.byKey(const ValueKey('edit-remote-file')));
   await tester.pump();
-  await tester.pump(const Duration(milliseconds: 300));
+  // Covers the 500 ms emphasized dialog entrance so geometry is final.
+  await tester.pump(const Duration(milliseconds: 600));
 }
 
 /// 远端代码编辑器的内容控制器。

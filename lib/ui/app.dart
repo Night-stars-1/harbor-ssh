@@ -249,7 +249,7 @@ class _WorkspaceState extends State<Workspace> {
         if (value != null) userCredentials[user.id] = value;
       }
       if (!mounted) return;
-      await showDialog<void>(
+      await showExpressiveDialog<void>(
         context: context,
         barrierDismissible: false,
         builder: (_) => HostEditor(
@@ -277,7 +277,7 @@ class _WorkspaceState extends State<Workspace> {
           ? null
           : await model.repository.userCredentials(user.id);
       if (!mounted) return;
-      await showDialog<void>(
+      await showExpressiveDialog<void>(
         context: context,
         barrierDismissible: false,
         builder: (_) => UserEditor(
@@ -468,7 +468,7 @@ class _WorkspaceState extends State<Workspace> {
     String? previousKey,
   }) async {
     if (!mounted) return false;
-    return await showDialog<bool>(
+    return await showExpressiveDialog<bool>(
           context: context,
           barrierDismissible: false,
           builder: (_) => HostIdentityDialog(
@@ -482,7 +482,7 @@ class _WorkspaceState extends State<Workspace> {
   }
 
   Future<bool> _confirm(String title, String body, String action) async =>
-      await showDialog<bool>(
+      await showExpressiveDialog<bool>(
         context: context,
         builder: (context) => AlertDialog(
           title: Text(title),
@@ -629,7 +629,7 @@ class _WorkspaceState extends State<Workspace> {
           : '正在通过已连接的会话写入 $targetPath…',
     );
     BuildContext? progressContext;
-    final progress = showDialog<void>(
+    final progress = showExpressiveDialog<void>(
       context: context,
       barrierDismissible: false,
       builder: (dialogContext) {
@@ -1069,7 +1069,7 @@ class _WorkspaceState extends State<Workspace> {
                         child: Column(
                           children: [
                             Expanded(
-                              child: IndexedStack(
+                              child: ExpressiveIndexedStack(
                                 index: model.showingSettings
                                     ? 2
                                     : model.showingPortForwards
@@ -1083,7 +1083,10 @@ class _WorkspaceState extends State<Workspace> {
                                         model.showingSettings ||
                                         model.showingFiles ||
                                         model.showingPortForwards,
-                                    child: IndexedStack(
+                                    child: ExpressiveIndexedStack(
+                                      // Opening a terminal goes one level
+                                      // deeper than the connection list.
+                                      motion: ExpressivePageMotion.sharedAxis,
                                       index: model.activeSession == null
                                           ? 0
                                           : 1,

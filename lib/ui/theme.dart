@@ -115,6 +115,15 @@ ThemeData harborTheme({
   );
   return base.copyWith(
     scaffoldBackgroundColor: colors.surfaceContainerLow,
+    // Pushed pages share the M3 fade-forward motion on every platform.
+    pageTransitionsTheme: PageTransitionsTheme(
+      builders: {
+        for (final platform in TargetPlatform.values)
+          platform: FadeForwardsPageTransitionsBuilder(
+            backgroundColor: colors.surface,
+          ),
+      },
+    ),
     textTheme: base.textTheme.copyWith(
       displaySmall: base.textTheme.displaySmall?.copyWith(
         fontWeight: FontWeight.w700,

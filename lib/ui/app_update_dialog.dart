@@ -18,7 +18,7 @@ Future<void> showAppUpdateDialog(
   required UpdateCheck check,
   required AppUpdater Function() updaterFactory,
   ValueChanged<String>? onSkip,
-}) => showDialog<void>(
+}) => showExpressiveDialog<void>(
   context: context,
   barrierDismissible: false,
   builder: (_) => AppUpdateDialog(
@@ -135,11 +135,11 @@ class _AppUpdateDialogState extends State<AppUpdateDialog> {
               mainAxisSize: MainAxisSize.min,
               crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
-                const Center(
-                  child: ExpressiveMark(
-                    size: 72,
-                    flower: true,
-                    icon: Icons.system_update_alt_rounded,
+                Center(
+                  child: ExpressiveSwitcher(
+                    spin: true,
+                    alignment: Alignment.center,
+                    child: _mark(colors),
                   ),
                 ),
                 const SizedBox(height: 16),
@@ -231,15 +231,56 @@ class _AppUpdateDialogState extends State<AppUpdateDialog> {
                   duration: expressiveDuration(context),
                   curve: expressiveCurve,
                   alignment: Alignment.topCenter,
-                  child: _status(context),
+                  child: ExpressiveSwitcher(child: _status(context)),
                 ),
                 const SizedBox(height: 20),
-                _actionBar(),
+                ExpressiveSwitcher(
+                  alignment: AlignmentDirectional.centerEnd,
+                  child: KeyedSubtree(
+                    key: ValueKey(_phase),
+                    child: _actionBar(),
+                  ),
+                ),
               ],
             ),
           ),
         ),
       ),
+    );
+  }
+
+  /// The mark follows the phase so progress and outcome read at a glance.
+  Widget _mark(ColorScheme colors) {
+    final (icon, fill, glyph) = switch (_phase) {
+      _Phase.ready => (
+        Icons.system_update_alt_rounded,
+        colors.primaryContainer,
+        colors.onPrimaryContainer,
+      ),
+      _Phase.downloading => (
+        Icons.downloading_rounded,
+        colors.secondaryContainer,
+        colors.onSecondaryContainer,
+      ),
+      _Phase.installing => (
+        Icons.install_desktop_rounded,
+        colors.tertiaryContainer,
+        colors.onTertiaryContainer,
+      ),
+      _Phase.opened => (Icons.check_rounded, colors.primary, colors.onPrimary),
+      _Phase.failed => (
+        Icons.priority_high_rounded,
+        colors.errorContainer,
+        colors.onErrorContainer,
+      ),
+    };
+    return ExpressiveMark(
+      key: ValueKey(_phase),
+      size: 72,
+      flower: true,
+      icon: icon,
+      color: fill,
+      foreground: glyph,
     );
   }
 
@@ -250,10 +291,16 @@ class _AppUpdateDialogState extends State<AppUpdateDialog> {
     final asset = _release.asset;
     switch (_phase) {
       case _Phase.ready:
-        return const SizedBox(width: double.infinity);
+        return const SizedBox(
+          key: ValueKey('status-ready'),
+          width: double.infinity,
+        );
       case _Phase.downloading:
       case _Phase.installing:
+        // Downloading and installing share one keyed child, so the progress
+        // block stays put while only its contents change.
         return Padding(
+          key: const ValueKey('status-progress'),
           padding: const EdgeInsets.only(top: 20),
           child: ValueListenableBuilder<int>(
             valueListenable: _received,
@@ -284,17 +331,23 @@ class _AppUpdateDialogState extends State<AppUpdateDialog> {
                     ],
                   ),
                   const SizedBox(height: 10),
-                  LinearProgressIndicator(
-                    key: const ValueKey('update-progress'),
-                    value: fraction,
-                    minHeight: 8,
-                    borderRadius: const BorderRadius.all(Radius.circular(4)),
-                    stopIndicatorRadius: 4,
-                    trackGap: 4,
-                    // Flutter still gates the current M3 indicator behind this
-                    // temporary migration flag.
-                    // ignore: deprecated_member_use
-                    year2023: false,
+                  // Chunks arrive in bursts; ease the bar between them.
+                  TweenAnimationBuilder<double>(
+                    tween: Tween(end: fraction ?? 1),
+                    duration: expressiveDuration(context),
+                    curve: expressiveCurve,
+                    builder: (context, value, _) => LinearProgressIndicator(
+                      key: const ValueKey('update-progress'),
+                      value: installing ? null : value,
+                      minHeight: 8,
+                      borderRadius: const BorderRadius.all(Radius.circular(4)),
+                      stopIndicatorRadius: 4,
+                      trackGap: 4,
+                      // Flutter still gates the current M3 indicator behind
+                      // this temporary migration flag.
+                      // ignore: deprecated_member_use
+                      year2023: false,
+                    ),
                   ),
                   const SizedBox(height: 8),
                   Text(
@@ -316,6 +369,7 @@ class _AppUpdateDialogState extends State<AppUpdateDialog> {
         );
       case _Phase.opened:
         return _Banner(
+          key: const ValueKey('status-opened'),
           icon: Icons.check_circle_outline_rounded,
           message: '已打开安装包，请将 Harbor SSH 拖入「应用程序」替换旧版本。',
           background: colors.primaryContainer,
@@ -323,6 +377,7 @@ class _AppUpdateDialogState extends State<AppUpdateDialog> {
         );
       case _Phase.failed:
         return _Banner(
+          key: ValueKey('status-failed-$_error'),
           icon: Icons.error_outline_rounded,
           message: _error,
           background: colors.errorContainer,
@@ -429,6 +484,7 @@ class _VersionBadge extends StatelessWidget {
 
 class _Banner extends StatelessWidget {
   const _Banner({
+    super.key,
     required this.icon,
     required this.message,
     required this.background,

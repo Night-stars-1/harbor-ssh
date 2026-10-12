@@ -11,6 +11,7 @@ import 'package:re_editor/re_editor.dart';
 import '../data/remote_text_editor.dart';
 import '../domain/remote_file.dart';
 import 'file_workspace_model.dart' show fileError;
+import 'expressive_widgets.dart';
 import 'remote_code_highlight.dart';
 import 'theme.dart';
 
@@ -23,7 +24,7 @@ Future<bool> showRemoteTextEditor(
   required RemoteFileSystem files,
   required RemoteFile file,
 }) async {
-  final saved = await showDialog<bool>(
+  final saved = await showExpressiveDialog<bool>(
     context: context,
     barrierDismissible: false,
     builder: (context) => RemoteTextEditorDialog(files: files, file: file),
@@ -199,7 +200,7 @@ class _RemoteTextEditorDialogState extends State<RemoteTextEditorDialog> {
   }
 
   Future<bool> _confirmDiscard() async {
-    final discard = await showDialog<bool>(
+    final discard = await showExpressiveDialog<bool>(
       context: context,
       builder: (context) => AlertDialog(
         title: const Text('放弃未保存的修改？'),

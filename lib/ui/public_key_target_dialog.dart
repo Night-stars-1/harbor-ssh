@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/widget_previews.dart';
 
 import '../domain/host.dart';
+import 'expressive_widgets.dart';
 import 'theme.dart';
 
 /// 选择把公钥安装到哪台已保存的服务器。
@@ -41,7 +42,7 @@ class PublicKeyTargetDialog extends StatefulWidget {
     required String publicKey,
     required List<Host> hosts,
     Set<String> liveSessionHostIds = const {},
-  }) => showDialog<Host>(
+  }) => showExpressiveDialog<Host>(
     context: context,
     barrierDismissible: false,
     builder: (_) => PublicKeyTargetDialog(

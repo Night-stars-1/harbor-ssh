@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/widget_previews.dart';
 
 import '../domain/host.dart';
+import 'expressive_widgets.dart';
 import 'host_identity_dialog.dart';
 import 'theme.dart';
 
@@ -32,7 +33,7 @@ Widget _preview(Brightness brightness) => MaterialApp(
     builder: (context) => Scaffold(
       body: Center(
         child: FilledButton(
-          onPressed: () => showDialog<bool>(
+          onPressed: () => showExpressiveDialog<bool>(
             context: context,
             barrierDismissible: false,
             builder: (_) => const HostIdentityDialog(

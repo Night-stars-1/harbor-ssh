@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/widget_previews.dart';
 
 import '../domain/host.dart';
+import 'expressive_widgets.dart';
 import 'host_editor.dart';
 import 'localization.dart';
 import 'theme.dart';
@@ -57,7 +58,7 @@ class _JumpHostPreviewState extends State<_JumpHostPreview> {
     WidgetsBinding.instance.addPostFrameCallback((_) => _edit());
   }
 
-  Future<void> _edit() => showDialog<void>(
+  Future<void> _edit() => showExpressiveDialog<void>(
     context: context,
     builder: (_) => HostEditor(
       host: _target,

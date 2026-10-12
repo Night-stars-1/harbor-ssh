@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import '../data/port_forward_manager.dart';
 import '../data/ssh_connection.dart';
 import '../domain/port_forward.dart';
+import 'expressive_widgets.dart';
 import 'port_forward_panel.dart';
 
 class PortForwardDialog extends StatefulWidget {
@@ -112,7 +113,7 @@ class _PortForwardRulesState extends State<PortForwardRules> {
   }
 
   Future<void> _edit([PortForwardRule? current]) async {
-    final result = await showDialog<PortForwardRule>(
+    final result = await showExpressiveDialog<PortForwardRule>(
       context: context,
       builder: (_) => PortForwardEditor(rule: current),
     );

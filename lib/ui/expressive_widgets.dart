@@ -62,6 +62,241 @@ class ExpressiveMark extends StatelessWidget {
   }
 }
 
+/// Swaps keyed content with a fade and a short emphasized scale.
+///
+/// [spin] lets marks and icons turn in with a slight overshoot. Outgoing
+/// content stops receiving taps as soon as it starts leaving, so a fading
+/// button can never act on a state that has already changed.
+class ExpressiveSwitcher extends StatelessWidget {
+  const ExpressiveSwitcher({
+    super.key,
+    required this.child,
+    this.alignment = Alignment.topCenter,
+    this.spin = false,
+  });
+  final Widget child;
+  final AlignmentGeometry alignment;
+  final bool spin;
+
+  // Static so AnimatedSwitcher keeps its transitions across rebuilds.
+  static Widget _fade(Widget child, Animation<double> animation) => _guard(
+    animation,
+    ScaleTransition(
+      scale: animation.drive(Tween(begin: .96, end: 1)),
+      child: child,
+    ),
+  );
+
+  static Widget _spin(Widget child, Animation<double> animation) => _guard(
+    animation,
+    RotationTransition(
+      turns: animation.drive(Tween(begin: -.12, end: 0)),
+      child: ScaleTransition(
+        scale: animation
+            .drive(CurveTween(curve: Curves.easeOutBack))
+            .drive(Tween(begin: .6, end: 1)),
+        child: child,
+      ),
+    ),
+  );
+
+  static Widget _guard(Animation<double> animation, Widget child) =>
+      AnimatedBuilder(
+        animation: animation,
+        builder: (context, child) => IgnorePointer(
+          ignoring: animation.status == AnimationStatus.reverse,
+          child: child,
+        ),
+        child: FadeTransition(opacity: animation, child: child),
+      );
+
+  @override
+  Widget build(BuildContext context) => AnimatedSwitcher(
+    duration: expressiveDuration(context, emphasized: spin),
+    switchInCurve: expressiveCurve,
+    switchOutCurve: Easing.emphasizedAccelerate,
+    transitionBuilder: spin ? _spin : _fade,
+    layoutBuilder: (current, previous) =>
+        Stack(alignment: alignment, children: [...previous, ?current]),
+    child: child,
+  );
+}
+
+enum ExpressivePageMotion {
+  /// Peer destinations: the incoming page fades in while growing slightly.
+  fadeThrough,
+
+  /// Hierarchy: deeper pages slide in from the end, shallower from the start.
+  sharedAxis,
+}
+
+/// An [IndexedStack] that animates the page it switches to.
+///
+/// Every child keeps its state exactly as in [IndexedStack]: all children get
+/// the same wrapper, and only the animation driving the selected one changes,
+/// so terminals, transfers and scroll positions are never rebuilt. Hidden
+/// pages are neither painted nor hit-tested, so only the incoming page moves.
+class ExpressiveIndexedStack extends StatefulWidget {
+  const ExpressiveIndexedStack({
+    super.key,
+    required this.index,
+    required this.children,
+    this.motion = ExpressivePageMotion.fadeThrough,
+    this.depthOf,
+    this.sizing = StackFit.loose,
+  });
+  final int index;
+  final List<Widget> children;
+  final ExpressivePageMotion motion;
+
+  /// Hierarchy level of a child for [ExpressivePageMotion.sharedAxis];
+  /// defaults to the index itself.
+  final int Function(int index)? depthOf;
+  final StackFit sizing;
+
+  @override
+  State<ExpressiveIndexedStack> createState() => _ExpressiveIndexedStackState();
+}
+
+class _ExpressiveIndexedStackState extends State<ExpressiveIndexedStack>
+    with SingleTickerProviderStateMixin {
+  late final _controller = AnimationController(vsync: this, value: 1);
+  late final _entrance = CurvedAnimation(
+    parent: _controller,
+    curve: expressiveCurve,
+  );
+  bool _backwards = false;
+
+  @override
+  void didUpdateWidget(ExpressiveIndexedStack oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.index == widget.index) return;
+    final depth = widget.depthOf ?? (int index) => index;
+    _backwards = depth(widget.index) < depth(oldWidget.index);
+    _controller.duration = expressiveDuration(context);
+    _controller.forward(from: 0);
+  }
+
+  @override
+  void dispose() {
+    _entrance.dispose();
+    _controller.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) => IndexedStack(
+    index: widget.index,
+    sizing: widget.sizing,
+    children: [
+      for (final (i, child) in widget.children.indexed)
+        _PageEntrance(
+          animation: i == widget.index ? _entrance : kAlwaysCompleteAnimation,
+          motion: widget.motion,
+          backwards: _backwards,
+          child: child,
+        ),
+    ],
+  );
+}
+
+class _PageEntrance extends StatelessWidget {
+  const _PageEntrance({
+    required this.animation,
+    required this.motion,
+    required this.backwards,
+    required this.child,
+  });
+  final Animation<double> animation;
+  final ExpressivePageMotion motion;
+  final bool backwards;
+  final Widget child;
+
+  @override
+  Widget build(BuildContext context) => FadeTransition(
+    opacity: animation,
+    child: AnimatedBuilder(
+      animation: animation,
+      builder: (context, child) {
+        final remaining = 1 - animation.value;
+        return switch (motion) {
+          ExpressivePageMotion.fadeThrough => Transform.scale(
+            scale: 1 - remaining * .04,
+            child: child,
+          ),
+          ExpressivePageMotion.sharedAxis => Transform.translate(
+            offset: Offset(
+              remaining *
+                  32 *
+                  (backwards ? -1 : 1) *
+                  (Directionality.of(context) == TextDirection.rtl ? -1 : 1),
+              0,
+            ),
+            child: child,
+          ),
+        };
+      },
+      child: child,
+    ),
+  );
+}
+
+/// [showDialog] whose surface grows out of the screen centre with a slight
+/// overshoot, layered on the route's own fade. Use it for every dialog so the
+/// whole app shares one entrance.
+Future<T?> showExpressiveDialog<T>({
+  required BuildContext context,
+  required WidgetBuilder builder,
+  bool barrierDismissible = true,
+}) => showDialog<T>(
+  context: context,
+  barrierDismissible: barrierDismissible,
+  animationStyle: AnimationStyle(
+    duration: expressiveDuration(context, emphasized: true),
+    reverseDuration: expressiveDuration(context),
+  ),
+  builder: (context) => _DialogEntrance(child: Builder(builder: builder)),
+);
+
+class _DialogEntrance extends StatefulWidget {
+  const _DialogEntrance({required this.child});
+  final Widget child;
+
+  @override
+  State<_DialogEntrance> createState() => _DialogEntranceState();
+}
+
+class _DialogEntranceState extends State<_DialogEntrance> {
+  CurvedAnimation? _scale;
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    final route = ModalRoute.of(context)?.animation;
+    if (route == null || route == _scale?.parent) return;
+    _scale?.dispose();
+    _scale = CurvedAnimation(
+      parent: route,
+      curve: Curves.easeOutBack,
+      reverseCurve: Easing.emphasizedAccelerate,
+    );
+  }
+
+  @override
+  void dispose() {
+    _scale?.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) => _scale == null
+      ? widget.child
+      : ScaleTransition(
+          scale: _scale!.drive(Tween(begin: .85, end: 1)),
+          child: widget.child,
+        );
+}
+
 List<String> _hostBadges(Host host) =>
     host.tags.isEmpty ? const ['未分组'] : host.tags;
 

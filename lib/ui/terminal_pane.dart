@@ -11,6 +11,7 @@ import '../data/ssh_connection.dart';
 import '../data/remote_metrics.dart';
 import '../data/web_link.dart';
 import '../data/terminal_ai.dart';
+import 'expressive_widgets.dart';
 import 'ai_task_controller.dart';
 import 'ai_window_bridge.dart';
 import 'remote_status_bar.dart';
@@ -707,7 +708,7 @@ class _TerminalPaneState extends State<TerminalPane> {
     }
     final text = data!.text!;
     if (text.contains('\n') || text.contains('\r')) {
-      final confirmed = await showDialog<bool>(
+      final confirmed = await showExpressiveDialog<bool>(
         context: context,
         builder: (context) => AlertDialog(
           title: const Text('粘贴多行内容？'),

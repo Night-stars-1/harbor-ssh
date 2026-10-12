@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 
 import '../data/terminal_ai.dart';
 import '../data/sync_config.dart';
+import 'expressive_widgets.dart';
 import 'settings_widgets.dart';
 import 'sync_settings_controller.dart';
 import 'theme.dart';
@@ -268,7 +269,7 @@ class _AiSettingsPageState extends State<AiSettingsPage> {
     String initial = '',
   }) {
     final controller = TextEditingController(text: initial);
-    return showDialog<String>(
+    return showExpressiveDialog<String>(
       context: context,
       builder: (context) => AlertDialog(
         title: Text(title),
@@ -333,7 +334,7 @@ class _AiSettingsPageState extends State<AiSettingsPage> {
   Future<void> _deleteProvider() async {
     if (_saving || !_isCustomProvider(_provider)) return;
     final name = _providerNames[_provider] ?? _provider;
-    final confirmed = await showDialog<bool>(
+    final confirmed = await showExpressiveDialog<bool>(
       context: context,
       builder: (context) => AlertDialog(
         title: const Text('删除服务商？'),

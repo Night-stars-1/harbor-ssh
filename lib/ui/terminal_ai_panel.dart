@@ -455,7 +455,7 @@ class _TerminalAiPanelState extends State<TerminalAiPanel> {
         // to a comfortable reading width, and both panes need bounded height.
         final width = math.min(1000.0, size.width - 48);
         final height = math.min(640.0, size.height - 48);
-        await showDialog<void>(
+        await showExpressiveDialog<void>(
           context: context,
           builder: (_) => Dialog(
             clipBehavior: Clip.antiAlias,
@@ -2454,7 +2454,7 @@ class _AiHistoryWorkspaceState extends State<_AiHistoryWorkspace> {
     if (task.running || task.historyLoading || _busyId != null) return;
     // Unsent input belongs to the conversation being left; ask before dropping.
     if (widget.hasDraft()) {
-      final confirmed = await showDialog<bool>(
+      final confirmed = await showExpressiveDialog<bool>(
         context: context,
         builder: (context) => AlertDialog(
           title: const Text('切换对话？'),
@@ -2494,7 +2494,7 @@ class _AiHistoryWorkspaceState extends State<_AiHistoryWorkspace> {
   Future<void> _delete(String id, String title) async {
     final task = widget.task;
     if (task.running || task.historyLoading || _busyId != null) return;
-    final confirmed = await showDialog<bool>(
+    final confirmed = await showExpressiveDialog<bool>(
       context: context,
       builder: (context) => AlertDialog(
         title: const Text('删除历史对话？'),

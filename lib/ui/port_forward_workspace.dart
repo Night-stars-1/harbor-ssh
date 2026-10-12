@@ -8,6 +8,7 @@ import '../data/port_forward_manager.dart';
 import '../data/ssh_connection.dart';
 import '../domain/host.dart';
 import '../domain/port_forward.dart';
+import 'expressive_widgets.dart';
 import 'port_forward_panel.dart';
 
 class PortForwardWorkspace extends StatefulWidget {
@@ -193,7 +194,7 @@ class _PortForwardWorkspaceState extends State<PortForwardWorkspace> {
       );
       return;
     }
-    final result = await showDialog<_RuleDraft>(
+    final result = await showExpressiveDialog<_RuleDraft>(
       context: context,
       builder: (dialogContext) => PortForwardEditor(
         rule: current?.rule,

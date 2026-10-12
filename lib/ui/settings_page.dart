@@ -5,6 +5,7 @@ import 'cloud_sync_settings.dart';
 import 'appearance_settings.dart';
 import 'ai_settings.dart';
 import 'local_file_settings.dart';
+import 'expressive_widgets.dart';
 import 'theme.dart';
 import 'settings_widgets.dart';
 import 'sidebar_navigation_item.dart';
@@ -234,7 +235,13 @@ class _SettingsPageState extends State<SettingsPage> {
                             ),
                           ),
                         Expanded(
-                          child: IndexedStack(
+                          child: ExpressiveIndexedStack(
+                            // Wide layouts switch between peer sections; narrow
+                            // ones drill from the category list into a section.
+                            motion: wide
+                                ? ExpressivePageMotion.fadeThrough
+                                : ExpressivePageMotion.sharedAxis,
+                            depthOf: (index) => index == _titles.length ? 0 : 1,
                             index: detail ? _section : _titles.length,
                             children: [
                               ExcludeFocus(

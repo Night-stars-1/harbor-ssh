@@ -172,7 +172,16 @@ class _AboutSettingsState extends State<AboutSettings> {
                 padding: const EdgeInsets.all(16),
                 child: Row(
                   children: [
-                    Icon(statusIcon, size: 22, color: statusColor),
+                    ExpressiveSwitcher(
+                      spin: true,
+                      alignment: Alignment.center,
+                      child: Icon(
+                        statusIcon,
+                        key: ValueKey(statusIcon),
+                        size: 22,
+                        color: statusColor,
+                      ),
+                    ),
                     const SizedBox(width: 12),
                     Expanded(
                       child: Column(
@@ -180,40 +189,49 @@ class _AboutSettingsState extends State<AboutSettings> {
                         children: [
                           Text('检查更新', style: theme.textTheme.titleSmall),
                           const SizedBox(height: 4),
-                          Text(
-                            statusText,
-                            key: const ValueKey('update-status'),
-                            style: theme.textTheme.bodySmall?.copyWith(
-                              color: statusColor,
+                          ExpressiveSwitcher(
+                            alignment: AlignmentDirectional.centerStart,
+                            child: Text(
+                              statusText,
+                              key: ValueKey(statusText),
+                              style: theme.textTheme.bodySmall?.copyWith(
+                                color: statusColor,
+                              ),
                             ),
                           ),
                         ],
                       ),
                     ),
                     const SizedBox(width: 16),
-                    if (result?.available == true && !checking)
-                      FilledButton(
-                        key: const ValueKey('update-show'),
-                        onPressed: () => showAppUpdateDialog(
-                          context,
-                          check: result!,
-                          updaterFactory: widget.updaterFactory,
-                        ),
-                        child: const Text('查看'),
-                      )
-                    else
-                      FilledButton.tonal(
-                        key: const ValueKey('update-check'),
-                        onPressed: checking ? null : _check,
-                        child: checking
-                            ? const SizedBox.square(
-                                dimension: 20,
-                                child: CircularProgressIndicator(
-                                  strokeWidth: 2.5,
-                                ),
-                              )
-                            : const Text('检查'),
-                      ),
+                    ExpressiveSwitcher(
+                      alignment: AlignmentDirectional.centerEnd,
+                      child: result?.available == true && !checking
+                          ? FilledButton(
+                              key: const ValueKey('update-show'),
+                              onPressed: () => showAppUpdateDialog(
+                                context,
+                                check: result!,
+                                updaterFactory: widget.updaterFactory,
+                              ),
+                              child: const Text('查看'),
+                            )
+                          : FilledButton.tonal(
+                              key: const ValueKey('update-check'),
+                              onPressed: checking ? null : _check,
+                              child: AnimatedSwitcher(
+                                duration: expressiveDuration(context),
+                                child: checking
+                                    ? const SizedBox.square(
+                                        key: ValueKey('checking'),
+                                        dimension: 20,
+                                        child: CircularProgressIndicator(
+                                          strokeWidth: 2.5,
+                                        ),
+                                      )
+                                    : const Text('检查'),
+                              ),
+                            ),
+                    ),
                   ],
                 ),
               ),

@@ -7,6 +7,7 @@ import 'package:flutter/services.dart';
 import '../data/ssh_connection.dart';
 import '../domain/host.dart';
 import '../domain/remote_file.dart';
+import 'expressive_widgets.dart';
 import 'file_workspace_model.dart';
 import 'remote_text_editor_dialog.dart';
 import 'theme.dart';
@@ -463,7 +464,7 @@ class _FileWorkspaceState extends State<FileWorkspace> {
     final targetPath = target.path;
     final conflicts = model.conflicts(data, target);
     if (conflicts.isEmpty) return const [];
-    final confirmed = await showDialog<bool>(
+    final confirmed = await showExpressiveDialog<bool>(
       context: context,
       builder: (context) => AlertDialog(
         title: Text('覆盖 ${conflicts.length} 个同名项目？'),
@@ -883,7 +884,7 @@ class _FileWorkspaceState extends State<FileWorkspace> {
       return;
     }
     if (action != 'delete' || !mounted || !model.canDelete(data)) return;
-    final confirmed = await showDialog<bool>(
+    final confirmed = await showExpressiveDialog<bool>(
       context: context,
       builder: (context) => AlertDialog(
         title: Text('删除 ${data.files.length} 个文件？'),
