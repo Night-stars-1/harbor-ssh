@@ -1,9 +1,11 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:harbor_ssh/ui/app.dart';
+import 'package:harbor_ssh/ui/expressive_widgets.dart';
 import 'package:harbor_ssh/ui/file_workspace.dart';
 import 'package:harbor_ssh/ui/port_forward_workspace.dart';
 import 'package:harbor_ssh/ui/settings_page.dart';
+import 'package:harbor_ssh/ui/sidebar_navigation_item.dart';
 import 'package:harbor_ssh/ui/workspace_model.dart';
 
 import 'support.dart';
@@ -121,6 +123,43 @@ void main() {
     final settled = tester.getRect(find.byType(SettingsPage));
     expect(midway.width, lessThan(settled.width));
     expect(midway.height, lessThan(settled.height));
+    expect(tester.takeException(), isNull);
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
+
+  testWidgets('桌面侧栏切换所有连接、收藏、凭证同样缩放淡入', (tester) async {
+    tester.view.physicalSize = const Size(1200, 800);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    final model = WorkspaceModel(memoryRepository());
+    await tester.pumpWidget(HarborApp(model: model));
+    await tester.pumpAndSettle();
+    // The nested stack is the home child shared by all three destinations.
+    final home = find.byType(ExpressiveIndexedStack).at(1);
+
+    Future<void> switchTo(String title) async {
+      await tester.tap(
+        find.descendant(
+          of: find.byType(SidebarNavigationItem),
+          matching: find.text(title),
+        ),
+      );
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 40));
+      final midway = tester.getRect(home);
+      await tester.pumpAndSettle();
+      final settled = tester.getRect(home);
+      expect(midway.width, lessThan(settled.width));
+      expect(midway.height, lessThan(settled.height));
+    }
+
+    await switchTo('收藏');
+    expect(model.favoritesOnly, isTrue);
+    await switchTo('凭证');
+    expect(model.showingUsers, isTrue);
+    await switchTo('所有连接');
+    expect(model.showingUsers || model.favoritesOnly, isFalse);
     expect(tester.takeException(), isNull);
     await tester.pumpWidget(const SizedBox.shrink());
   });

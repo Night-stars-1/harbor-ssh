@@ -100,9 +100,7 @@ class _PublicKeyTargetDialogState extends State<PublicKeyTargetDialog> {
                 children: [
                   Icon(Icons.key_rounded, color: colors.primary),
                   const SizedBox(width: 12),
-                  Expanded(
-                    child: Text('安装公钥到服务器', style: type.titleLarge),
-                  ),
+                  Expanded(child: Text('安装公钥到服务器', style: type.titleLarge)),
                 ],
               ),
               const SizedBox(height: 10),
@@ -227,7 +225,17 @@ class _PublicKeyTargetDialogState extends State<PublicKeyTargetDialog> {
                     child: Column(
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
-                        Text(host.name, style: type.titleSmall),
+                        Row(
+                          children: [
+                            if (live) ...[
+                              const HostOnlineDot(),
+                              const SizedBox(width: 8),
+                            ],
+                            Flexible(
+                              child: Text(host.name, style: type.titleSmall),
+                            ),
+                          ],
+                        ),
                         const SizedBox(height: 2),
                         Text(
                           host.destination,
@@ -255,7 +263,6 @@ class _PublicKeyTargetDialogState extends State<PublicKeyTargetDialog> {
       ),
     );
   }
-
 }
 
 /// `<算法> <base64> [注释]` 的 base64 主体太长，只留首尾便于核对。
@@ -268,8 +275,7 @@ const _previewCredential = SshUser(
   name: '生产部署密钥',
   username: 'deploy',
   authMethod: AuthMethod.privateKey,
-  publicKey:
-      'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIH0mGm2Yf3D1RSQ0FQ3vVd8dHjK0PqW1sB7uXm9tYzAB deploy@laptop',
+  publicKey: 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIH0mGm2Yf3D1RSQ0FQ3vVd8dHjK0PqW1sB7uXm9tYzAB deploy@laptop',
 );
 
 const _previewHosts = [

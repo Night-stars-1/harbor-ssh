@@ -13,6 +13,7 @@ import 'package:harbor_ssh/data/ssh_connection.dart';
 import 'package:harbor_ssh/domain/remote_file.dart';
 import 'package:harbor_ssh/domain/host.dart';
 import 'package:harbor_ssh/ui/app.dart';
+import 'package:harbor_ssh/ui/expressive_widgets.dart';
 import 'package:harbor_ssh/ui/file_workspace.dart';
 import 'package:harbor_ssh/ui/file_workspace_model.dart';
 import 'package:harbor_ssh/ui/localization.dart';
@@ -691,6 +692,20 @@ void main() {
       expect(find.text(session.host.name), findsOneWidget);
       expect(find.text(saved.name), findsOneWidget);
       expect(find.byType(AlertDialog), findsNothing);
+      expect(
+        find.descendant(
+          of: find.byKey(ValueKey('add-file-host-0-${session.host.id}')),
+          matching: find.byType(HostOnlineDot),
+        ),
+        findsOneWidget,
+      );
+      expect(
+        find.descendant(
+          of: find.byKey(ValueKey('add-file-host-0-${saved.id}')),
+          matching: find.byType(HostOnlineDot),
+        ),
+        findsNothing,
+      );
       await tester.tap(
         find.byKey(ValueKey('add-file-host-0-${session.host.id}')),
       );

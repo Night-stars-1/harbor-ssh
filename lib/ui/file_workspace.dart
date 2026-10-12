@@ -144,8 +144,10 @@ class _FileWorkspaceState extends State<FileWorkspace> {
     key: ValueKey(expanded ? 'empty-add-file-tab-$side' : 'add-file-tab-$side'),
     enabled: !_adding,
     tooltip: '',
+    popUpAnimationStyle: HarborMotion.popup(context),
     position: PopupMenuPosition.under,
     constraints: const BoxConstraints(minWidth: 240, maxWidth: 320),
+    borderRadius: HarborShapes.tile,
     icon: expanded
         ? null
         : const Icon(Icons.add_rounded, semanticLabel: '添加文件标签'),
@@ -185,10 +187,20 @@ class _FileWorkspaceState extends State<FileWorkspace> {
                     child: Column(
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
-                        Text(
-                          host.name,
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
+                        Row(
+                          children: [
+                            if (connected.containsKey(host.id)) ...[
+                              const HostOnlineDot(),
+                              const SizedBox(width: 8),
+                            ],
+                            Flexible(
+                              child: Text(
+                                host.name,
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                              ),
+                            ),
+                          ],
                         ),
                         Text(
                           'SSH · ${host.endpoint}',
@@ -840,6 +852,7 @@ class _FileWorkspaceState extends State<FileWorkspace> {
     final colors = Theme.of(context).colorScheme;
     final action = await showMenu<Object>(
       context: context,
+      popUpAnimationStyle: HarborMotion.popup(context),
       // 相等的左右锚距让菜单按阅读方向从鼠标右侧展开；
       // 空间不足时 Flutter 仍会将自适应宽度的菜单限制在屏幕内。
       position: RelativeRect.fromLTRB(anchorX, point.dy, anchorX, 0),

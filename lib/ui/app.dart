@@ -257,6 +257,10 @@ class _WorkspaceState extends State<Workspace> {
           credentials: credentials,
           users: model.users,
           hosts: model.hosts,
+          onlineHostIds: {
+            for (final session in model.sessions)
+              if (session.status == ConnectionStatus.connected) session.host.id,
+          },
           userCredentials: userCredentials,
           onSave: model.saveHost,
           onTest: _testConnection,
@@ -1076,9 +1080,7 @@ class _WorkspaceState extends State<Workspace> {
                                 // Connection, favorites and credentials share
                                 // the home child; animate their logical switch
                                 // without replacing it or resetting its state.
-                                transitionIndex: wide
-                                    ? null
-                                    : model.showingSettings
+                                transitionIndex: model.showingSettings
                                     ? 5
                                     : model.showingPortForwards
                                     ? 4

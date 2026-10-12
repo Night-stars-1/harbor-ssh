@@ -1306,6 +1306,7 @@ class TerminalOptionsButton extends StatelessWidget {
   @override
   Widget build(BuildContext context) => PopupMenuButton<String>(
     tooltip: '终端选项',
+    popUpAnimationStyle: HarborMotion.popup(context),
     onSelected: onSelected ?? controller!.selectOption,
     itemBuilder: (_) => [
       if (MediaQuery.sizeOf(context).width < 900) ...[

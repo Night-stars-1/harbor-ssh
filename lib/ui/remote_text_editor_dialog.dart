@@ -665,6 +665,7 @@ class _RemoteSelectionToolbarController implements SelectionToolbarController {
       final localizations = MaterialLocalizations.of(context);
       final action = await showMenu<String>(
         context: context,
+        popUpAnimationStyle: HarborMotion.popup(context),
         position: RelativeRect.fromLTRB(
           x,
           y,

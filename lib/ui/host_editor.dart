@@ -20,6 +20,7 @@ class HostEditor extends StatefulWidget {
     this.credentials,
     this.users = const [],
     this.hosts = const [],
+    this.onlineHostIds = const {},
     this.userCredentials = const {},
     required this.onSave,
     required this.onTest,
@@ -28,6 +29,9 @@ class HostEditor extends StatefulWidget {
   final Credentials? credentials;
   final List<SshUser> users;
   final List<Host> hosts;
+
+  /// 已有已连接会话的主机 id，在中转主机列表中名称前显示在线圆点。
+  final Set<String> onlineHostIds;
   final Map<String, Credentials> userCredentials;
   final SaveHost onSave;
   final TestHost onTest;
@@ -178,12 +182,14 @@ class _HostEditorState extends State<HostEditor> {
     T value,
     String label, {
     required bool selected,
+    bool online = false,
   }) {
     final theme = Theme.of(context);
     final colors = theme.colorScheme;
     return DropdownMenuEntry<T>(
       value: value,
       label: label,
+      leadingIcon: online ? const HostOnlineDot() : null,
       trailingIcon: selected ? const Icon(Icons.check_rounded, size: 20) : null,
       style: MenuItemButton.styleFrom(
         minimumSize: const Size(0, 48),
@@ -422,6 +428,7 @@ class _HostEditorState extends State<HostEditor> {
                             host,
                             host.name,
                             selected: host.id == _jumpHostId,
+                            online: widget.onlineHostIds.contains(host.id),
                           ),
                       ],
                       onSelected: (host) => setState(() {

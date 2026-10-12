@@ -8,6 +8,7 @@ import '../data/ai_conversation_store.dart';
 import '../data/ssh_connection.dart';
 import '../data/terminal_ai.dart';
 import '../domain/host.dart';
+import 'expressive_widgets.dart';
 import 'terminal_pane.dart';
 import 'theme.dart';
 
@@ -342,6 +343,7 @@ class _TerminalWorkspaceState extends State<TerminalWorkspace> {
   Widget _splitButton(int side) => PopupMenuButton<String>(
     key: ValueKey('terminal-split-menu-$side'),
     tooltip: '',
+    popUpAnimationStyle: HarborMotion.popup(context),
     icon: const Icon(
       Icons.splitscreen_rounded,
       size: 20,
@@ -361,6 +363,7 @@ class _TerminalWorkspaceState extends State<TerminalWorkspace> {
   Widget _sessionPicker(int side, String title) => PopupMenuButton<Object>(
     key: ValueKey('terminal-session-picker-$side'),
     tooltip: '',
+    popUpAnimationStyle: HarborMotion.popup(context),
     position: PopupMenuPosition.under,
     onSelected: (value) {
       if (value is SshConnection) {
@@ -395,6 +398,14 @@ class _TerminalWorkspaceState extends State<TerminalWorkspace> {
             children: [
               const Icon(Icons.add_rounded, size: 18),
               const SizedBox(width: 10),
+              if (_sessions.values.any(
+                (s) =>
+                    s.host.id == host.id &&
+                    s.status == ConnectionStatus.connected,
+              )) ...[
+                const HostOnlineDot(),
+                const SizedBox(width: 8),
+              ],
               Flexible(
                 child: Text(
                   '新建 · ${host.name}',

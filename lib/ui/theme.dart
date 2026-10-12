@@ -474,4 +474,13 @@ abstract final class HarborMotion {
   static const effectsDuration = Duration(milliseconds: 180);
   static Duration effects(BuildContext context) =>
       MediaQuery.disableAnimationsOf(context) ? Duration.zero : effectsDuration;
+
+  /// Popup menus open almost instantly; Flutter's 300 ms default feels laggy.
+  static AnimationStyle popup(BuildContext context) =>
+      MediaQuery.disableAnimationsOf(context)
+      ? AnimationStyle.noAnimation
+      : const AnimationStyle(
+          duration: Duration(milliseconds: 120),
+          reverseDuration: Duration(milliseconds: 80),
+        );
 }

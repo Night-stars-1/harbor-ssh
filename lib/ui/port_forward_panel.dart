@@ -876,11 +876,15 @@ class PortForwardEditor extends StatefulWidget {
     super.key,
     this.rule,
     this.hosts = const [],
+    this.onlineHostIds = const {},
     this.initialHostId,
     this.onSaveForHost,
   });
   final PortForwardRule? rule;
   final List<Host> hosts;
+
+  /// 已有已连接会话的主机 id，在主机选择列表中名称前显示在线圆点。
+  final Set<String> onlineHostIds;
   final String? initialHostId;
   final void Function(PortForwardRule rule, String hostId)? onSaveForHost;
   @override
@@ -972,6 +976,7 @@ class _PortForwardEditorState extends State<PortForwardEditor> {
     required ValueChanged<T> onSelected,
     FormFieldValidator<T>? validator,
     Widget? leadingIcon,
+    Set<T> online = const {},
   }) {
     final theme = Theme.of(context);
     final colors = theme.colorScheme;
@@ -996,6 +1001,9 @@ class _PortForwardEditorState extends State<PortForwardEditor> {
             DropdownMenuEntry<T>(
               value: entry.key,
               label: entry.value,
+              leadingIcon: online.contains(entry.key)
+                  ? const HostOnlineDot()
+                  : null,
               trailingIcon: entry.key == value
                   ? const Icon(Icons.check_rounded, size: 20)
                   : null,
@@ -1057,6 +1065,7 @@ class _PortForwardEditorState extends State<PortForwardEditor> {
                   options: {
                     for (final host in widget.hosts) host.id: host.name,
                   },
+                  online: widget.onlineHostIds,
                   onSelected: (value) => setState(() => _hostId = value),
                   validator: (value) => value == null ? '请选择 SSH 主机' : null,
                 ),

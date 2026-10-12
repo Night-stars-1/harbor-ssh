@@ -62,6 +62,26 @@ class ExpressiveMark extends StatelessWidget {
   }
 }
 
+/// 主机选择列表中标记「已有已连接会话」的主机，放在主机名称前。
+class HostOnlineDot extends StatelessWidget {
+  const HostOnlineDot({super.key});
+
+  @override
+  Widget build(BuildContext context) => Semantics(
+    label: '在线',
+    child: Container(
+      width: 8,
+      height: 8,
+      decoration: BoxDecoration(
+        color: Theme.of(context).brightness == Brightness.dark
+            ? const Color(0xFF8ED8AD)
+            : const Color(0xFF21683E),
+        shape: BoxShape.circle,
+      ),
+    ),
+  );
+}
+
 /// Swaps keyed content with a fade and a short emphasized scale.
 ///
 /// [spin] lets marks and icons turn in with a slight overshoot. Outgoing
@@ -697,6 +717,7 @@ class _ConnectionTileState extends State<_ConnectionTile>
       final action = await showMenu<String>(
         context: context,
         semanticLabel: widget.menuLabel,
+        popUpAnimationStyle: HarborMotion.popup(context),
         position: RelativeRect.fromRect(
           Rect.fromLTWH(anchor.dx, anchor.dy, 0, 0),
           Offset.zero & overlay.size,

@@ -199,6 +199,10 @@ class _PortForwardWorkspaceState extends State<PortForwardWorkspace> {
       builder: (dialogContext) => PortForwardEditor(
         rule: current?.rule,
         hosts: hosts,
+        onlineHostIds: {
+          for (final session in widget.sessions)
+            if (session.status == ConnectionStatus.connected) session.host.id,
+        },
         initialHostId: current?.host.id ?? _hostId,
         onSaveForHost: (rule, hostId) =>
             Navigator.pop(dialogContext, _RuleDraft(hostId, rule)),
