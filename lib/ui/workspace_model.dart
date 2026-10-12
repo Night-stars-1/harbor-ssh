@@ -17,6 +17,7 @@ import '../data/webdav_sync.dart';
 import '../domain/sync_snapshot.dart';
 import '../domain/host.dart';
 import '../domain/appearance.dart';
+import '../domain/app_update.dart';
 import 'file_workspace_model.dart';
 
 class WorkspaceModel extends ChangeNotifier {
@@ -83,6 +84,37 @@ class WorkspaceModel extends ChangeNotifier {
       }
     } catch (_) {
       // An unreadable appearance preference must not prevent loading connections.
+    }
+  }
+
+  UpdatePreferences updatePreferences = const UpdatePreferences();
+  static const _updateKey = 'harbor.update.v1';
+  Future<void> _updateWrite = Future.value();
+
+  Future<void> saveUpdatePreferences(UpdatePreferences value) {
+    final operation = _updateWrite.then((_) async {
+      await repository.preferences.write(
+        _updateKey,
+        jsonEncode(value.toJson()),
+      );
+      if (_disposed) return;
+      updatePreferences = value;
+      _notify();
+    });
+    _updateWrite = operation.catchError((Object _) {});
+    return operation;
+  }
+
+  Future<void> _loadUpdatePreferences() async {
+    try {
+      final saved = await repository.preferences.read(_updateKey);
+      if (saved != null && !_disposed) {
+        updatePreferences = UpdatePreferences.fromJson(
+          jsonDecode(saved) as Map,
+        );
+      }
+    } catch (_) {
+      // An unreadable update preference falls back to automatic checks.
     }
   }
 
@@ -233,6 +265,7 @@ class WorkspaceModel extends ChangeNotifier {
     loadError = null;
     _notify();
     await _loadAppearance();
+    await _loadUpdatePreferences();
     await _loadAiSettings();
     await _loadHostOrder();
     var stage = StartupStage.localDirectory;

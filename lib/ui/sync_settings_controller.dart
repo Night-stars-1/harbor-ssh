@@ -4,6 +4,7 @@ import '../data/webdav_sync.dart';
 import '../data/terminal_ai.dart';
 import '../domain/sync_snapshot.dart';
 import '../domain/appearance.dart';
+import '../domain/app_update.dart';
 import 'workspace_model.dart';
 
 /// Both windows use the main workspace's sync service and storage lock.
@@ -12,6 +13,8 @@ abstract class SyncSettingsController extends ChangeNotifier {
   Future<void> saveAiSettings(AiSettings settings);
   AppearancePreferences get appearance;
   Future<void> saveAppearance(AppearancePreferences value);
+  UpdatePreferences get updatePreferences;
+  Future<void> saveUpdatePreferences(UpdatePreferences value);
   CloudSyncConfig? get settings;
   bool get busy;
   bool get failed;
@@ -47,6 +50,11 @@ class LocalSyncSettingsController extends SyncSettingsController {
   @override
   Future<void> saveAppearance(AppearancePreferences value) =>
       model.saveAppearance(value);
+  @override
+  UpdatePreferences get updatePreferences => model.updatePreferences;
+  @override
+  Future<void> saveUpdatePreferences(UpdatePreferences value) =>
+      model.saveUpdatePreferences(value);
   @override
   String get defaultLocalPath => model.defaultLocalPath;
   @override

@@ -6,6 +6,7 @@ import '../data/webdav_sync.dart';
 import '../data/terminal_ai.dart';
 import '../domain/sync_snapshot.dart';
 import '../domain/appearance.dart';
+import '../domain/app_update.dart';
 import 'sync_settings_controller.dart';
 
 const settingsWindowChannel = MethodChannel('harbor/settings_window');
@@ -28,6 +29,7 @@ class SettingsWindowHost {
     'message': controller.message,
     'lastSync': controller.lastSync?.toIso8601String(),
     'appearance': controller.appearance.toJson(),
+    'updatePreferences': controller.updatePreferences.toJson(),
     'defaultLocalPath': controller.defaultLocalPath,
     'aiSettings': controller.aiSettings.toJson(),
   };
@@ -53,6 +55,10 @@ class SettingsWindowHost {
         case 'saveAppearance':
           await controller.saveAppearance(
             AppearancePreferences.fromJson(call.arguments as Map),
+          );
+        case 'saveUpdatePreferences':
+          await controller.saveUpdatePreferences(
+            UpdatePreferences.fromJson(call.arguments as Map),
           );
         case 'saveAiSettings':
           await controller.saveAiSettings(
@@ -127,6 +133,12 @@ class RemoteSyncSettingsController extends SyncSettingsController {
   @override
   Future<void> saveAppearance(AppearancePreferences value) =>
       _request('saveAppearance', value.toJson());
+  @override
+  UpdatePreferences get updatePreferences =>
+      UpdatePreferences.fromJson(_state['updatePreferences'] as Map? ?? {});
+  @override
+  Future<void> saveUpdatePreferences(UpdatePreferences value) =>
+      _request('saveUpdatePreferences', value.toJson());
   @override
   String get defaultLocalPath => _state['defaultLocalPath'] as String? ?? '';
   @override

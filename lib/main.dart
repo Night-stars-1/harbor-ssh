@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:path_provider/path_provider.dart';
 
 import 'data/ai_conversation_store.dart';
+import 'data/app_update.dart';
 import 'ui/ai_window_app.dart';
 import 'ui/ai_window_bridge.dart';
 import 'data/host_repository.dart';
@@ -42,5 +43,12 @@ Future<void> main(List<String> arguments) async {
   final host = usesWindowsTitleBar
       ? (SettingsWindowHost(LocalSyncSettingsController(model))..attach())
       : null;
-  runApp(HarborApp(model: model, settingsWindow: host, aiWindow: aiWindow));
+  runApp(
+    HarborApp(
+      model: model,
+      settingsWindow: host,
+      aiWindow: aiWindow,
+      updaterFactory: AppUpdater.new,
+    ),
+  );
 }

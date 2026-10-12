@@ -3,11 +3,13 @@ import 'dart:async';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 
+import '../data/app_update.dart';
 import '../data/public_key_install.dart';
 import '../data/ssh_connection.dart';
 import '../domain/host.dart';
 import '../domain/appearance.dart';
 import 'ai_window_bridge.dart';
+import 'app_update_dialog.dart';
 import 'host_editor.dart';
 import 'host_identity_dialog.dart';
 import 'localization.dart';
@@ -34,10 +36,14 @@ class HarborApp extends StatefulWidget {
     required this.model,
     this.settingsWindow,
     this.aiWindow,
+    this.updaterFactory,
   });
   final WorkspaceModel model;
   final SettingsWindowHost? settingsWindow;
   final AiWindowHost? aiWindow;
+
+  /// Enables the launch-time update check; tests and previews leave it null.
+  final AppUpdater Function()? updaterFactory;
   @override
   State<HarborApp> createState() => _HarborAppState();
 }
@@ -92,6 +98,7 @@ class _HarborAppState extends State<HarborApp> {
           builder: (context) => Workspace(
             model: widget.model,
             aiWindow: widget.aiWindow,
+            updaterFactory: widget.updaterFactory,
             onOpenSettings: widget.settingsWindow == null
                 ? null
                 : () => widget.settingsWindow!.open(),
@@ -124,11 +131,13 @@ class Workspace extends StatefulWidget {
     required this.onToggleTheme,
     this.onOpenSettings,
     this.aiWindow,
+    this.updaterFactory,
   });
   final WorkspaceModel model;
   final VoidCallback onToggleTheme;
   final Future<void> Function()? onOpenSettings;
   final AiWindowHost? aiWindow;
+  final AppUpdater Function()? updaterFactory;
   @override
   State<Workspace> createState() => _WorkspaceState();
 }
@@ -160,10 +169,60 @@ class _WorkspaceState extends State<Workspace> {
   String _tagLabel(String tag) => tag == _ungroupedLabel ? '$tag（标签）' : tag;
 
   @override
+  void initState() {
+    super.initState();
+    if (widget.updaterFactory != null) {
+      model.addListener(_checkUpdatesOnce);
+      _checkUpdatesOnce();
+    }
+  }
+
+  @override
   void dispose() {
+    model.removeListener(_checkUpdatesOnce);
+    _updater?.cancel();
     _search.dispose();
     _settingsNavigation.dispose();
     super.dispose();
+  }
+
+  AppUpdater? _updater;
+
+  /// Checks GitHub Releases once, after local preferences have loaded.
+  /// Failures stay silent: the launch prompt is a convenience, and the About
+  /// page reports errors when the user checks by hand.
+  void _checkUpdatesOnce() {
+    if (model.loading) return;
+    model.removeListener(_checkUpdatesOnce);
+    final preferences = model.updatePreferences;
+    if (!preferences.autoCheck) return;
+    final updater = _updater = widget.updaterFactory!();
+    unawaited(() async {
+      try {
+        final check = await updater.check();
+        if (!mounted ||
+            !check.available ||
+            check.release.version == model.updatePreferences.skippedVersion) {
+          return;
+        }
+        await showAppUpdateDialog(
+          context,
+          check: check,
+          updaterFactory: widget.updaterFactory!,
+          onSkip: (version) => unawaited(
+            model
+                .saveUpdatePreferences(
+                  model.updatePreferences.copyWith(skippedVersion: version),
+                )
+                .catchError((Object _) {}),
+          ),
+        );
+      } catch (_) {
+        // Offline or rate-limited launches simply skip the prompt.
+      } finally {
+        if (identical(_updater, updater)) _updater = null;
+      }
+    }());
   }
 
   bool _opening = false;

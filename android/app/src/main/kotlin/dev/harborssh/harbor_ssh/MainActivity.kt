@@ -5,12 +5,15 @@ import android.content.Intent
 import android.net.Uri
 import android.os.Build
 import android.provider.DocumentsContract
+import android.provider.Settings
+import androidx.core.content.FileProvider
 import android.view.View
 import android.view.ViewGroup
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.android.FlutterView
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.MethodChannel
+import java.io.File
 import java.io.OutputStream
 import java.util.concurrent.Executors
 
@@ -21,6 +24,8 @@ class MainActivity : FlutterActivity() {
     private var output: OutputStream? = null
     @Volatile private var outputUri: Uri? = null
     private val createDocumentRequest = 4831
+    private val installPermissionRequest = 4832
+    private var pendingInstall: Pair<MethodChannel.Result, File>? = null
 
     override fun onPostResume() {
         super.onPostResume()
@@ -86,10 +91,60 @@ class MainActivity : FlutterActivity() {
                     }
                 } else result.notImplemented()
             }
+        MethodChannel(flutterEngine.dartExecutor.binaryMessenger, "dev.harborssh/app_update")
+            .setMethodCallHandler { call, result ->
+                when (call.method) {
+                    "abis" -> result.success(Build.SUPPORTED_ABIS.toList())
+                    "install" -> {
+                        val apk = File(call.arguments as String)
+                        // Only packages this app downloaded into its own cache may be installed.
+                        if (!apk.canonicalPath.startsWith(File(cacheDir, "harbor-update").canonicalPath + File.separator)) {
+                            result.error("install_failed", "安装包位置无效", null)
+                        } else if (pendingInstall != null) {
+                            result.error("busy", "正在等待安装授权", null)
+                        } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O && !packageManager.canRequestPackageInstalls()) {
+                            pendingInstall = result to apk
+                            try {
+                                startActivityForResult(
+                                    Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES, Uri.parse("package:$packageName")),
+                                    installPermissionRequest,
+                                )
+                            } catch (error: Exception) {
+                                pendingInstall = null
+                                result.error("install_failed", error.message, null)
+                            }
+                        } else installApk(apk, result)
+                    }
+                    else -> result.notImplemented()
+                }
+            }
+    }
+
+    private fun installApk(apk: File, result: MethodChannel.Result) {
+        try {
+            val uri = FileProvider.getUriForFile(this, "$packageName.updates", apk)
+            startActivity(Intent(Intent.ACTION_VIEW).apply {
+                setDataAndType(uri, "application/vnd.android.package-archive")
+                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_ACTIVITY_NEW_TASK)
+            })
+            result.success(null)
+        } catch (error: Exception) {
+            result.error("install_failed", error.message, null)
+        }
     }
 
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
         super.onActivityResult(requestCode, resultCode, data)
+        if (requestCode == installPermissionRequest) {
+            val (result, apk) = pendingInstall ?: return
+            pendingInstall = null
+            if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O || packageManager.canRequestPackageInstalls()) {
+                installApk(apk, result)
+            } else {
+                result.error("permission_denied", "未允许安装未知应用", null)
+            }
+            return
+        }
         if (requestCode != createDocumentRequest) return
         val result = pendingCreate ?: return
         pendingCreate = null
@@ -122,6 +177,8 @@ class MainActivity : FlutterActivity() {
     override fun onDestroy() {
         pendingCreate?.error("closed", "文件选择已结束", null)
         pendingCreate = null
+        pendingInstall?.first?.error("closed", "安装授权已结束", null)
+        pendingInstall = null
         transfers.execute { try { cleanupDownload() } catch (_: Exception) {} }
         transfers.shutdown()
         super.onDestroy()
