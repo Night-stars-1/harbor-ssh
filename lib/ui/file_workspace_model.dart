@@ -66,7 +66,7 @@ class FileLocationTab extends ChangeNotifier {
     notifyListeners();
     try {
       if (!connected) throw StateError('连接已断开，点击重试以重新连接');
-      final directory = await files.browse(target);
+      final directory = await _browseStart(target);
       if (_disposed || request != _request) return;
       if (path != directory.path) {
         query = '';
@@ -88,6 +88,19 @@ class FileLocationTab extends ChangeNotifier {
         loading = false;
         notifyListeners();
       }
+    }
+  }
+
+  /// 主机设置的起始目录失效（被删除或无权限）时退回主目录，避免标签一打开
+  /// 就停在错误页；用户手动输入的路径仍照常报错。
+  Future<RemoteDirectory> _browseStart(String target) async {
+    if (path != '~' || target == '~' || target != initialPath) {
+      return files.browse(target);
+    }
+    try {
+      return await files.browse(target);
+    } catch (_) {
+      return files.browse('~');
     }
   }
 
@@ -387,7 +400,7 @@ class FileWorkspaceModel extends ChangeNotifier {
             id: tab.id,
             name: session.host.name,
             files: session.files,
-            initialPath: tab.initialPath,
+            initialPath: session.host.sftpStartPath,
             session: session,
             ownsSession: ownsSession,
           )

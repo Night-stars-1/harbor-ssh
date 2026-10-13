@@ -58,7 +58,16 @@ class _FileBrowserState extends State<FileBrowser> {
       _transferred = _pending!.transferred;
       _total = _pending!.total;
     }
-    unawaited(_browse('~'));
+    unawaited(_open());
+  }
+
+  /// 先进入主机设置的 SFTP 起始目录；该目录失效时退回主目录。
+  Future<void> _open() async {
+    final start = widget.session.host.sftpStartPath;
+    await _browse(start);
+    if (mounted && start != '~' && _error != null && _path == '~') {
+      await _browse('~');
+    }
   }
 
   void _speedChanged() {

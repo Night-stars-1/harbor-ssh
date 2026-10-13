@@ -732,6 +732,105 @@ void main() {
     });
   }
 
+  testWidgets('SFTP 目录书签：收藏当前目录、从列表跳回、移除，并按主机保存', (tester) async {
+    tester.view.physicalSize = const Size(1100, 640);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    final session = FileTestSession();
+    addTearDown(session.dispose);
+    final model = FileWorkspaceModel();
+    addTearDown(model.dispose);
+    var hosts = [session.host];
+    final saves = <(String, List<String>)>[];
+    late StateSetter rebuild;
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: harborTheme(),
+        home: Scaffold(
+          body: StatefulBuilder(
+            builder: (context, setState) {
+              rebuild = setState;
+              return FileWorkspace(
+                model: model,
+                initializeLocal: false,
+                hosts: hosts,
+                sessions: [session],
+                onConnect: (_) async => null,
+                onSaveBookmarks: (hostId, paths) async {
+                  saves.add((hostId, paths));
+                  rebuild(() {
+                    hosts = [
+                      for (final host in hosts)
+                        host.id == hostId
+                            ? host.withSftpBookmarks(paths)
+                            : host,
+                    ];
+                  });
+                },
+              );
+            },
+          ),
+        ),
+      ),
+    );
+    final tab = model.add(
+      0,
+      name: session.host.name,
+      files: session.files,
+      session: session,
+    );
+    await tester.pumpAndSettle();
+    expect(tab.path, '/home/tester');
+    final menu = find.byKey(ValueKey('file-bookmarks-${tab.id}'));
+    final toggle = find.byKey(ValueKey('file-bookmark-toggle-${tab.id}'));
+
+    await tester.tap(menu);
+    await tester.pumpAndSettle();
+    expect(find.text('收藏当前目录'), findsOneWidget);
+    await tester.tap(toggle);
+    await tester.pumpAndSettle();
+    expect(saves.last.$1, session.host.id);
+    expect(saves.last.$2, ['/home/tester']);
+
+    await tab.browse('/home/tester/documents');
+    await tester.pumpAndSettle();
+    await tester.tap(menu);
+    await tester.pumpAndSettle();
+    await tester.tap(toggle);
+    await tester.pumpAndSettle();
+    expect(saves.last.$2, ['/home/tester', '/home/tester/documents']);
+
+    await tester.tap(menu);
+    await tester.pumpAndSettle();
+    expect(find.text('移除当前目录书签'), findsOneWidget);
+    await tester.tap(find.byKey(const ValueKey('file-bookmark-/home/tester')));
+    await tester.pumpAndSettle();
+    expect(tab.path, '/home/tester');
+
+    await tester.tap(menu);
+    await tester.pumpAndSettle();
+    await tester.tap(
+      find.byKey(const ValueKey('file-bookmark-remove-/home/tester/documents')),
+    );
+    await tester.pumpAndSettle();
+    expect(saves.last.$2, ['/home/tester']);
+    expect(tab.path, '/home/tester');
+    expect(tester.takeException(), isNull);
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
+
+  test('书签随主机 JSON 往返，编辑主机其他字段不丢失书签', () {
+    final host = Host.fromJson({
+      ...testHost.toJson(),
+      'sftpBookmarks': ['/srv', '', 3, '/var/log'],
+    });
+    expect(host.sftpBookmarks, ['/srv', '/var/log']);
+    expect(Host.fromJson(host.toJson()).sftpBookmarks, ['/srv', '/var/log']);
+    expect(host.withFavorite(true).sftpBookmarks, ['/srv', '/var/log']);
+    expect(testHost.toJson().containsKey('sftpBookmarks'), isFalse);
+  });
+
   test('默认本地标签使用平台安全目录，仅初始化一次且保留已有标签', () async {
     Directory? macDocuments;
     if (Platform.isMacOS) {
@@ -774,6 +873,43 @@ void main() {
     final remote = existing.add(0, name: 'server', files: MemoryFiles());
     existing.initializeDefaultLocal();
     expect(existing.panes[0].tabs, [remote]);
+  });
+
+  test('主机 SFTP 起始目录：打开即进入，目录失效退回主目录，手动路径照常报错', () async {
+    final files = _MissingAwareFiles()
+      ..directories.add('/var/www')
+      ..data['/var/www/index.html'] = Uint8List(1);
+    final model = FileWorkspaceModel();
+    addTearDown(model.dispose);
+    final tab = model.add(
+      0,
+      name: 'server',
+      files: files,
+      initialPath: const Host(
+        id: 'h',
+        name: 'server',
+        address: 'a',
+        username: 'u',
+        sftpPath: '/var/www',
+      ).sftpStartPath,
+    );
+    await tab.browse();
+    expect(tab.path, '/var/www');
+    expect(tab.error, isNull);
+
+    final stale = model.add(
+      0,
+      name: 'stale',
+      files: files,
+      initialPath: '/removed',
+    );
+    await stale.browse();
+    expect(stale.path, '/');
+    expect(stale.error, isNull);
+
+    await stale.browse('/also-missing');
+    expect(stale.path, '/');
+    expect(stale.error, isNotNull);
   });
 
   test('范围选择遵循可见顺序，跳过目录并在切换筛选后重置锚点', () async {
@@ -1888,6 +2024,17 @@ class MemoryFiles implements RemoteFileSystem {
     }
     cancellation.check();
     data[path] = bytes.takeBytes();
+  }
+}
+
+/// Like a real SFTP server, rejects directories that do not exist.
+class _MissingAwareFiles extends MemoryFiles {
+  @override
+  Future<RemoteDirectory> browse(String path) {
+    if (path != '~' && !directories.contains(path)) {
+      throw StateError('no such directory');
+    }
+    return super.browse(path);
   }
 }
 

@@ -449,6 +449,23 @@ class WorkspaceModel extends ChangeNotifier {
     }
   }
 
+  Future<void> saveSftpBookmarks(String hostId, List<String> paths) async {
+    if (saving) throw StateError('正在保存，请稍后重试');
+    saving = true;
+    _notify();
+    try {
+      final next = _hosts
+          .map((h) => h.id == hostId ? h.withSftpBookmarks(paths) : h)
+          .toList();
+      await repository.saveHosts(next);
+      _hosts = next;
+      _scheduleSync();
+    } finally {
+      saving = false;
+      _notify();
+    }
+  }
+
   Future<void> saveUser(SshUser user, Credentials? credentials) async {
     if (saving) throw StateError('正在保存，请稍后重试');
     saving = true;

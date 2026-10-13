@@ -15,8 +15,17 @@ class Host {
     this.favorite = false,
     this.userId = '',
     this.jumpHostId = '',
+    this.sftpPath = '',
+    this.sftpBookmarks = const [],
   });
   final String id, name, address, username, userId, jumpHostId;
+
+  /// SFTP 打开该主机时进入的目录；为空时进入登录用户的主目录。
+  final String sftpPath;
+  String get sftpStartPath => sftpPath.isEmpty ? '~' : sftpPath;
+
+  /// SFTP 中收藏的远程目录（服务器返回的绝对路径），按收藏顺序排列。
+  final List<String> sftpBookmarks;
   final List<String> tags;
   final int port;
   final AuthMethod authMethod;
@@ -24,7 +33,9 @@ class Host {
   String get endpoint => '${address.toLowerCase()}:$port';
   String get destination =>
       '$username@${address.contains(':') ? '[$address]' : address}:$port';
-  Host withFavorite(bool value) => Host(
+  Host withFavorite(bool value) => _copy(favorite: value);
+  Host withSftpBookmarks(List<String> paths) => _copy(sftpBookmarks: paths);
+  Host _copy({bool? favorite, List<String>? sftpBookmarks}) => Host(
     id: id,
     name: name,
     address: address,
@@ -32,9 +43,11 @@ class Host {
     port: port,
     tags: tags,
     authMethod: authMethod,
-    favorite: value,
+    favorite: favorite ?? this.favorite,
     userId: userId,
     jumpHostId: jumpHostId,
+    sftpPath: sftpPath,
+    sftpBookmarks: sftpBookmarks ?? this.sftpBookmarks,
   );
   Map<String, Object> toJson() => {
     'id': id,
@@ -47,6 +60,8 @@ class Host {
     'favorite': favorite,
     'userId': userId,
     if (jumpHostId.isNotEmpty) 'jumpHostId': jumpHostId,
+    if (sftpPath.isNotEmpty) 'sftpPath': sftpPath,
+    if (sftpBookmarks.isNotEmpty) 'sftpBookmarks': sftpBookmarks,
   };
   factory Host.fromJson(Map<String, dynamic> json) => Host(
     id: json['id'] as String,
@@ -59,6 +74,11 @@ class Host {
     favorite: json['favorite'] as bool? ?? false,
     userId: json['userId'] as String? ?? '',
     jumpHostId: json['jumpHostId'] as String? ?? '',
+    sftpPath: json['sftpPath'] as String? ?? '',
+    sftpBookmarks: [
+      for (final path in json['sftpBookmarks'] as List? ?? const [])
+        if (path is String && path.isNotEmpty) path,
+    ],
   );
 
   /// `tags` 数组优先；仅当字段缺失（或为 null）时才把旧数据的

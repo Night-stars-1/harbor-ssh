@@ -419,6 +419,7 @@ class _WorkspaceState extends State<Workspace> {
         1,
         name: session.host.name,
         files: session.files,
+        initialPath: session.host.sftpStartPath,
         session: session,
       );
     } else {
@@ -1181,6 +1182,7 @@ class _WorkspaceState extends State<Workspace> {
                                       hosts: model.hosts,
                                       sessions: model.sessions,
                                       onConnect: _connectFiles,
+                                      onSaveBookmarks: model.saveSftpBookmarks,
                                       showTitle: false,
                                       initializeLocal:
                                           !model.loading &&

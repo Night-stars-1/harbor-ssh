@@ -83,6 +83,23 @@ void main() {
     await save();
     final saved = (await repository.loadHosts()).last;
     expect(saved.jumpHostId, gateway.id);
+    expect(saved.sftpPath, isEmpty);
+
+    final pathField = find.byKey(const ValueKey('host-sftp-path'));
+    await open(saved);
+    await tester.ensureVisible(pathField);
+    await tester.enterText(pathField, 'var/www');
+    await save();
+    expect(find.text('请以 / 或 ~/ 开头'), findsOneWidget);
+    expect((await repository.loadHosts()).last.sftpPath, isEmpty);
+    await tester.enterText(pathField, ' /var/www ');
+    await save();
+    expect((await repository.loadHosts()).last.sftpPath, '/var/www');
+    await open((await repository.loadHosts()).last);
+    expect(find.text('/var/www'), findsOneWidget);
+    await tester.enterText(pathField, '');
+    await save();
+    expect((await repository.loadHosts()).last.sftpPath, isEmpty);
 
     await open(saved);
     expect(find.text('公网堡垒机'), findsWidgets);

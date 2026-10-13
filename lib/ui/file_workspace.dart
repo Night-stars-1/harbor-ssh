@@ -21,6 +21,7 @@ class FileWorkspace extends StatefulWidget {
     required this.onConnect,
     this.showTitle = false,
     this.initializeLocal = true,
+    this.onSaveBookmarks,
   });
   final FileWorkspaceModel model;
   final List<Host> hosts;
@@ -28,6 +29,10 @@ class FileWorkspace extends StatefulWidget {
   final Future<SshConnection?> Function(Host) onConnect;
   final bool showTitle;
   final bool initializeLocal;
+
+  /// 保存主机的 SFTP 目录书签；为空时不显示书签按钮。
+  final Future<void> Function(String hostId, List<String> paths)?
+  onSaveBookmarks;
   @override
   State<FileWorkspace> createState() => _FileWorkspaceState();
 }
@@ -252,6 +257,7 @@ class _FileWorkspaceState extends State<FileWorkspace> {
           side,
           name: session.host.name,
           files: session.files,
+          initialPath: session.host.sftpStartPath,
           session: session,
           ownsSession: chosen is Host,
         );
@@ -673,6 +679,10 @@ class _FileWorkspaceState extends State<FileWorkspace> {
                 });
               },
             ),
+            if (!tab.isLocal &&
+                tab.session != null &&
+                widget.onSaveBookmarks != null)
+              _bookmarkMenu(tab, enabled, extent),
             button(
               Icons.refresh_rounded,
               '刷新目录',
@@ -795,6 +805,123 @@ class _FileWorkspaceState extends State<FileWorkspace> {
                     ? '复制 ${tab.selected.length} 项'
                     : '粘贴 ${model.clipboard!.files.length} 项',
               ),
+            ),
+          ),
+      ],
+    );
+  }
+
+  List<String> _bookmarks(FileLocationTab tab) {
+    final id = tab.session!.host.id;
+    return (widget.hosts.where((host) => host.id == id).firstOrNull ??
+            tab.session!.host)
+        .sftpBookmarks;
+  }
+
+  Future<void> _saveBookmarks(FileLocationTab tab, List<String> paths) async {
+    try {
+      await widget.onSaveBookmarks!(tab.session!.host.id, paths);
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context)
+            .showSnackBar(SnackBar(content: Text('书签保存失败：${fileError(e)}')));
+      }
+    }
+  }
+
+  Widget _bookmarkMenu(FileLocationTab tab, bool enabled, double extent) {
+    final bookmarks = _bookmarks(tab);
+    final marked = bookmarks.contains(tab.path);
+    final colors = Theme.of(context).colorScheme;
+    return PopupMenuButton<(String, String)>(
+      key: ValueKey('file-bookmarks-${tab.id}'),
+      enabled: enabled,
+      tooltip: '目录书签',
+      iconColor: colors.onSurfaceVariant,
+      popUpAnimationStyle: HarborMotion.popup(context),
+      position: PopupMenuPosition.under,
+      constraints: const BoxConstraints(minWidth: 240, maxWidth: 360),
+      style: IconButton.styleFrom(
+        minimumSize: Size.square(extent),
+        maximumSize: Size.square(extent),
+        padding: EdgeInsets.zero,
+        tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+      ),
+      icon: Icon(
+        marked ? Icons.bookmark_rounded : Icons.bookmark_border_rounded,
+        size: 20,
+        semanticLabel: '目录书签',
+      ),
+      onSelected: (choice) {
+        final (action, path) = choice;
+        final current = _bookmarks(tab);
+        switch (action) {
+          case 'open':
+            tab.browse(path);
+          case 'add':
+            if (!current.contains(path)) {
+              unawaited(_saveBookmarks(tab, [...current, path]));
+            }
+          case 'remove':
+            unawaited(
+              _saveBookmarks(tab, [
+                for (final item in current)
+                  if (item != path) item,
+              ]),
+            );
+        }
+      },
+      itemBuilder: (menuContext) => [
+        HarborPopupMenuItem(
+          key: ValueKey('file-bookmark-toggle-${tab.id}'),
+          value: (marked ? 'remove' : 'add', tab.path),
+          child: Row(
+            children: [
+              Icon(
+                marked
+                    ? Icons.bookmark_remove_outlined
+                    : Icons.bookmark_add_outlined,
+                size: 20,
+              ),
+              const SizedBox(width: 12),
+              Text(marked ? '移除当前目录书签' : '收藏当前目录'),
+            ],
+          ),
+        ),
+        if (bookmarks.isNotEmpty) const PopupMenuDivider(),
+        for (final path in bookmarks)
+          HarborPopupMenuItem(
+            key: ValueKey('file-bookmark-$path'),
+            value: ('open', path),
+            padding: const EdgeInsets.only(left: 12),
+            child: Row(
+              children: [
+                Icon(
+                  path == tab.path
+                      ? Icons.folder_rounded
+                      : Icons.folder_outlined,
+                  size: 20,
+                  color: path == tab.path ? colors.primary : null,
+                ),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: Tooltip(
+                    message: path,
+                    child: Text(
+                      path,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                  ),
+                ),
+                IconButton(
+                  key: ValueKey('file-bookmark-remove-$path'),
+                  tooltip: '移除书签',
+                  onPressed: () =>
+                      Navigator.of(menuContext).pop(('remove', path)),
+                  icon: const Icon(Icons.close_rounded, size: 18),
+                ),
+              ],
             ),
           ),
       ],

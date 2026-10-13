@@ -55,6 +55,7 @@ class _HostEditorState extends State<HostEditor> {
         : widget.credentials?.password ??
               widget.userCredentials[widget.host?.userId]?.password,
   );
+  late final _sftpPath = TextEditingController(text: widget.host?.sftpPath);
   late AuthMethod _auth = widget.host?.authMethod ?? AuthMethod.password;
   bool _passwordVisible = false;
   late final _users = widget.users
@@ -90,6 +91,7 @@ class _HostEditorState extends State<HostEditor> {
       _tagInput,
       _username,
       _password,
+      _sftpPath,
     ]) {
       controller.dispose();
     }
@@ -253,6 +255,8 @@ class _HostEditorState extends State<HostEditor> {
       favorite: widget.host?.favorite ?? false,
       userId: _auth == AuthMethod.privateKey ? _userId : '',
       jumpHostId: _jumpHostId,
+      sftpPath: _sftpPath.text.trim(),
+      sftpBookmarks: widget.host?.sftpBookmarks ?? const [],
     );
     try {
       if (test) {
@@ -437,6 +441,27 @@ class _HostEditorState extends State<HostEditor> {
                       }),
                       validator: (_) => _validateJumpHost(),
                     );
+                  },
+                ),
+                const SizedBox(height: 16),
+                TextFormField(
+                  key: const ValueKey('host-sftp-path'),
+                  controller: _sftpPath,
+                  enabled: !_busy,
+                  autocorrect: false,
+                  enableSuggestions: false,
+                  decoration: const InputDecoration(
+                    labelText: 'SFTP 起始目录（可选）',
+                    hintText: '留空进入主目录，例如：/var/www 或 ~/projects',
+                  ),
+                  validator: (value) {
+                    final path = value?.trim() ?? '';
+                    return path.isEmpty ||
+                            path == '~' ||
+                            path.startsWith('/') ||
+                            path.startsWith('~/')
+                        ? null
+                        : '请以 / 或 ~/ 开头';
                   },
                 ),
                 const SizedBox(height: 16),
