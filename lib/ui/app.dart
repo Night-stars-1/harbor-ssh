@@ -1182,7 +1182,7 @@ class _WorkspaceState extends State<Workspace> {
                                       hosts: model.hosts,
                                       sessions: model.sessions,
                                       onConnect: _connectFiles,
-                                      onSaveBookmarks: model.saveSftpBookmarks,
+                                      onSetBookmark: model.setSftpBookmark,
                                       showTitle: false,
                                       initializeLocal:
                                           !model.loading &&

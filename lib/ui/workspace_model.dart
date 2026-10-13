@@ -172,14 +172,14 @@ class WorkspaceModel extends ChangeNotifier {
       for (final host in global)
         if (visibleIds.contains(host.id)) reordered[cursor++] else host.id,
     ];
-    saving = true;
+    _saving = true;
     _notify();
     try {
       await repository.preferences.write(_hostOrderKey, jsonEncode(next));
       if (_disposed) return;
       _hostRank = {for (var i = 0; i < next.length; i++) next[i]: i};
     } finally {
-      saving = false;
+      _saving = false;
       _notify();
     }
   }
@@ -225,10 +225,21 @@ class WorkspaceModel extends ChangeNotifier {
     }
   }
 
-  bool loading = true, saving = false;
+  bool loading = true;
+
+  /// 本地写入占用：书签、主机、用户等本地变更。
+  bool _saving = false;
+
+  /// 网络同步占用：仅 [syncNow] 期间为 true。
+  bool _syncing = false;
+
+  /// 界面沿用旧语义：本地写入或网络同步任一进行中都显示为保存中。
+  bool get saving => _saving || _syncing;
   String? loadError;
   bool _disposed = false;
   int _sequence = 0;
+  Future<void> _bookmarkWrite = Future.value();
+  Completer<void>? _idleCompleter;
   SshConnection? get activeSession {
     for (final session in _sessions) {
       if (session.id == activeSessionId) return session;
@@ -369,20 +380,24 @@ class WorkspaceModel extends ChangeNotifier {
     if (saving || loading) throw const SyncFailure('正在保存或加载，请稍后同步');
     if (loadError != null) throw const SyncFailure('请先恢复本地数据读取后再同步');
     _syncDelay?.cancel();
-    saving = true;
+    _syncing = true;
     _notify();
     try {
       await cloudSync.synchronize(choice: choice);
     } finally {
       try {
-        await SyncStorage(repository).recover();
-        _hosts = await repository.loadHosts();
-        _users = await repository.loadUsers();
+        // 本地恢复与重载是仓库事务：只做读取/写入，绝不在网络阶段持有。
+        await repository.withLocalData(() async {
+          await SyncStorage(repository).recover();
+          _hosts = await repository.loadHosts();
+          _users = await repository.loadUsers();
+        });
       } catch (_) {
         loadError = '本地同步数据尚未恢复，请检查存储权限后重试';
         rethrow;
       } finally {
-        saving = false;
+        // 只释放网络同步占用，绝不清掉并发书签写入的 _saving。
+        _syncing = false;
         _notify();
       }
     }
@@ -390,7 +405,7 @@ class WorkspaceModel extends ChangeNotifier {
 
   Future<void> saveHost(Host host, Credentials? credentials) async {
     if (saving) throw StateError('正在保存，请稍后重试');
-    saving = true;
+    _saving = true;
     _notify();
     try {
       final previousCredentials = await repository.credentials(host.id);
@@ -411,14 +426,14 @@ class WorkspaceModel extends ChangeNotifier {
       _hosts = next;
       _scheduleSync();
     } finally {
-      saving = false;
+      _saving = false;
       _notify();
     }
   }
 
   Future<void> deleteHost(Host host) async {
     if (saving) throw StateError('正在保存，请稍后重试');
-    saving = true;
+    _saving = true;
     _notify();
     try {
       await repository.saveCredentials(host.id, null);
@@ -427,14 +442,14 @@ class WorkspaceModel extends ChangeNotifier {
       _hosts = next;
       _scheduleSync();
     } finally {
-      saving = false;
+      _saving = false;
       _notify();
     }
   }
 
   Future<void> toggleFavorite(Host host) async {
     if (saving) return;
-    saving = true;
+    _saving = true;
     _notify();
     try {
       final next = _hosts
@@ -444,31 +459,80 @@ class WorkspaceModel extends ChangeNotifier {
       _hosts = next;
       _scheduleSync();
     } finally {
-      saving = false;
+      _saving = false;
       _notify();
     }
   }
 
-  Future<void> saveSftpBookmarks(String hostId, List<String> paths) async {
-    if (saving) throw StateError('正在保存，请稍后重试');
-    saving = true;
-    _notify();
-    try {
-      final next = _hosts
-          .map((h) => h.id == hostId ? h.withSftpBookmarks(paths) : h)
-          .toList();
-      await repository.saveHosts(next);
-      _hosts = next;
-      _scheduleSync();
-    } finally {
-      saving = false;
+  /// 单个收藏路径的写入排队执行：保存后立刻删除不会因为前一次写入或同步
+  /// 占用而被拒绝。
+  ///
+  /// 每次只提交一个路径的意图，并在本地事务内基于磁盘最新主机派生结果，
+  /// 因此即使短暂排在同步的本地提交之后，也不会用菜单里的旧整表覆盖掉
+  /// 云端新增的其它收藏或其它字段。
+  Future<void> setSftpBookmark(
+    String hostId,
+    String path, {
+    required bool saved,
+  }) {
+    final operation = _bookmarkWrite.then((_) async {
+      await _waitForIdle();
+      if (_disposed) return;
+      _saving = true;
       _notify();
+      try {
+        await repository.withLocalData(() async {
+          final latest = await repository.loadHosts();
+          final index = latest.indexWhere((host) => host.id == hostId);
+          if (index < 0) {
+            // 主机已在云端被删除并写回本地：绝不能把这次意图静默丢弃成“已保存”。
+            throw StateError('主机已不存在，无法保存书签');
+          }
+          final next = [...latest];
+          next[index] = latest[index].withSftpBookmarks(
+            _bookmarksWith(latest[index].sftpBookmarks, path, saved),
+          );
+          await repository.saveHosts(next);
+          if (_disposed) return;
+          _hosts = next;
+          _scheduleSync();
+        });
+      } finally {
+        _saving = false;
+        _notify();
+      }
+    });
+    _bookmarkWrite = operation.catchError((Object _) {});
+    return operation;
+  }
+
+  /// 单个路径的收藏意图：新增保持既有顺序并追加到末尾，取消则只移除该路径。
+  static List<String> _bookmarksWith(
+    List<String> current,
+    String path,
+    bool saved,
+  ) {
+    if (!saved) {
+      return [
+        for (final value in current)
+          if (value != path) value,
+      ];
+    }
+    if (current.contains(path)) return current;
+    return [...current, path];
+  }
+
+  /// 等待其它保存或加载结束后再独占写入，避免与正在进行的操作交错。
+  Future<void> _waitForIdle() async {
+    while (!_disposed && (_saving || loading)) {
+      _idleCompleter ??= Completer<void>();
+      await _idleCompleter!.future;
     }
   }
 
   Future<void> saveUser(SshUser user, Credentials? credentials) async {
     if (saving) throw StateError('正在保存，请稍后重试');
-    saving = true;
+    _saving = true;
     _notify();
     try {
       final previous = await repository.userCredentials(user.id);
@@ -489,14 +553,14 @@ class WorkspaceModel extends ChangeNotifier {
       _users = next;
       _scheduleSync();
     } finally {
-      saving = false;
+      _saving = false;
       _notify();
     }
   }
 
   Future<void> deleteUser(SshUser user) async {
     if (saving) throw StateError('正在保存，请稍后重试');
-    saving = true;
+    _saving = true;
     _notify();
     try {
       await repository.saveUserCredentials(user.id, null);
@@ -505,7 +569,7 @@ class WorkspaceModel extends ChangeNotifier {
       _users = next;
       _scheduleSync();
     } finally {
-      saving = false;
+      _saving = false;
       _notify();
     }
   }
@@ -584,6 +648,10 @@ class WorkspaceModel extends ChangeNotifier {
 
   void _notify() {
     if (!_disposed) notifyListeners();
+    if (!_saving && !loading) {
+      _idleCompleter?.complete();
+      _idleCompleter = null;
+    }
   }
 
   void showFiles() {
@@ -617,6 +685,8 @@ class WorkspaceModel extends ChangeNotifier {
   @override
   void dispose() {
     _disposed = true;
+    _idleCompleter?.complete();
+    _idleCompleter = null;
     _syncDelay?.cancel();
     _syncPoll?.cancel();
     cloudSync.dispose();

@@ -482,7 +482,10 @@ class CloudSync extends ChangeNotifier {
       // settings write failed. Keep using that ID instead of creating another.
       await repository.secrets.write(_settingsKey, jsonEncode(config.toJson()));
       final storage = SyncStorage(repository);
-      await storage.recover();
+      // Recovery and the initial snapshot are two separate local commits; the
+      // backend work in between — ID resolution included — stays outside the
+      // local lock so it can never block a bookmark write.
+      await repository.withLocalData(storage.recover);
       final backend = _backend(config);
       if (backend is GistSyncBackend) {
         final resolvedId = await backend.resolve();
@@ -496,7 +499,7 @@ class CloudSync extends ChangeNotifier {
           );
         }
       }
-      final local = await storage.capture();
+      final local = await repository.withLocalData(storage.capture);
       final baseData = await repository.preferences.read(config.baselineKey);
       final base = baseData == null
           ? SyncSnapshot.empty()
@@ -544,10 +547,36 @@ class CloudSync extends ChangeNotifier {
           );
         }
       }
-      if (!SyncSnapshot.same(local.records, merged.records)) {
-        await storage.apply(merged);
-      }
-      await repository.preferences.write(config.baselineKey, encrypted!);
+      final baselineKey = config.baselineKey;
+      // The final local commit runs under the local lock: read the local state
+      // as it is now, fold any bookmark edit made during the upload back onto
+      // the merged result, and only then write. The baseline records the
+      // uploaded [encrypted] payload — never the rebased local changes — so the
+      // next sync uploads those edits from a clean three-way base. Rollback and
+      // journal recovery stay inside this critical section.
+      await repository.withLocalData(() async {
+        final current = await storage.capture();
+        final SyncSnapshot rebased;
+        try {
+          rebased = merged.rebaseLocalBookmarks(
+            started: local,
+            current: current,
+          );
+        } on SyncConflict {
+          // Publish the same review state as a merge conflict, so the user's
+          // version choice can be applied by the next sync instead of being
+          // rejected as "冲突内容已发生变化". The remote review snapshot is the
+          // archive the server now holds — the uploaded one when this sync
+          // wrote, not the stale body it read before.
+          _reviewedRemote = encrypted;
+          _reviewedLocal = current;
+          rethrow;
+        }
+        if (!SyncSnapshot.same(current.records, rebased.records)) {
+          await storage.apply(rebased);
+        }
+        await repository.preferences.write(baselineKey, encrypted!);
+      });
       lastSync = DateTime.now();
       await repository.preferences.write(
         _lastSyncKey(config),

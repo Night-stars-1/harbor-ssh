@@ -1,8 +1,29 @@
+import 'dart:async';
+
 import 'package:flutter_test/flutter_test.dart';
+import 'package:harbor_ssh/data/host_repository.dart';
 import 'package:harbor_ssh/domain/host.dart';
 import 'package:harbor_ssh/ui/workspace_model.dart';
 
 import 'support.dart';
+
+class _GatedStore extends MemoryStore {
+  Completer<void>? gate;
+  final entered = Completer<void>();
+
+  @override
+  Future<void> write(String key, String value) async {
+    final pending = gate;
+    if (pending != null) {
+      if (!entered.isCompleted) entered.complete();
+      await pending.future;
+    }
+    await super.write(key, value);
+  }
+}
+
+HostRepository _gatedRepository(_GatedStore store) =>
+    HostRepository(preferences: store, secrets: MemoryStore());
 
 void main() {
   test('未分组按空标签归类，与同名标签隔离且可组合搜索收藏', () async {
@@ -216,5 +237,116 @@ void main() {
       'broken',
     );
     model.dispose();
+  });
+  test('收藏保存后立刻删除按序落盘为空且不报错', () async {
+    final store = _GatedStore();
+    final repository = _gatedRepository(store);
+    final model = WorkspaceModel(repository);
+    await model.initialize();
+    await model.saveHost(testHost, null);
+
+    store.gate = Completer<void>();
+    final addA = model.setSftpBookmark(testHost.id, '/srv/a', saved: true);
+    await store.entered.future;
+    final addB = model.setSftpBookmark(testHost.id, '/srv/b', saved: true);
+    final removeA = model.setSftpBookmark(testHost.id, '/srv/a', saved: false);
+    final removeB = model.setSftpBookmark(testHost.id, '/srv/b', saved: false);
+    store.gate!.complete();
+    store.gate = null;
+    await addA;
+    await addB;
+    await removeA;
+    await removeB;
+
+    expect((await repository.loadHosts()).single.sftpBookmarks, isEmpty);
+    expect(model.hosts.single.sftpBookmarks, isEmpty);
+    expect(model.saving, isFalse);
+    model.dispose();
+  });
+  test('收藏写入等待进行中的主机编辑并保留新字段与凭据', () async {
+    final store = _GatedStore();
+    final repository = _gatedRepository(store);
+    final model = WorkspaceModel(repository);
+    await model.initialize();
+    await model.saveHost(testHost, const Credentials(password: 'original'));
+
+    store.gate = Completer<void>();
+    const edited = Host(
+      id: 'host-1',
+      name: '新名字',
+      address: 'dev.example.com',
+      username: 'deploy',
+      tags: ['开发', '新标签'],
+      sftpPath: '/srv/app',
+    );
+    final pendingEdit = model.saveHost(
+      edited,
+      const Credentials(password: 'updated'),
+    );
+    await store.entered.future;
+    final bookmark = model.setSftpBookmark(
+      testHost.id,
+      '/srv/data',
+      saved: true,
+    );
+    store.gate!.complete();
+    store.gate = null;
+    await pendingEdit;
+    await bookmark;
+
+    final saved = (await repository.loadHosts()).single;
+    expect(saved.name, '新名字');
+    expect(saved.tags, ['开发', '新标签']);
+    expect(saved.sftpPath, '/srv/app');
+    expect(saved.sftpBookmarks, ['/srv/data']);
+    expect((await repository.credentials(testHost.id))!.password, 'updated');
+    model.dispose();
+  });
+  test('收藏写入失败不阻断后续删除且磁盘状态一致', () async {
+    final store = _GatedStore();
+    final repository = _gatedRepository(store);
+    final model = WorkspaceModel(repository);
+    await model.initialize();
+    await model.saveHost(testHost, null);
+    await model.setSftpBookmark(testHost.id, '/srv/a', saved: true);
+    expect(model.hosts.single.sftpBookmarks, ['/srv/a']);
+
+    store.failWrites = true;
+    await expectLater(
+      model.setSftpBookmark(testHost.id, '/srv/a', saved: false),
+      throwsA(isA<StateError>()),
+    );
+    expect(model.saving, isFalse);
+    expect(model.hosts.single.sftpBookmarks, ['/srv/a']);
+    expect((await repository.loadHosts()).single.sftpBookmarks, ['/srv/a']);
+
+    store.failWrites = false;
+    await model.setSftpBookmark(testHost.id, '/srv/a', saved: false);
+    expect(model.hosts.single.sftpBookmarks, isEmpty);
+    expect((await repository.loadHosts()).single.sftpBookmarks, isEmpty);
+    model.dispose();
+  });
+  test('释放时等待中的收藏写入被唤醒且不落盘', () async {
+    final store = _GatedStore();
+    final repository = _gatedRepository(store);
+    final model = WorkspaceModel(repository);
+    await model.initialize();
+    await model.saveHost(testHost, null);
+
+    store.gate = Completer<void>();
+    final pendingEdit = model.saveHost(
+      testHost,
+      const Credentials(password: 'updated'),
+    );
+    await store.entered.future;
+    final bookmark = model.setSftpBookmark(testHost.id, '/srv/a', saved: true);
+    await Future<void>.delayed(Duration.zero);
+    model.dispose();
+    store.gate!.complete();
+    store.gate = null;
+
+    await pendingEdit;
+    await bookmark;
+    expect((await repository.loadHosts()).single.sftpBookmarks, isEmpty);
   });
 }

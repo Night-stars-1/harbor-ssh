@@ -741,33 +741,24 @@ void main() {
     addTearDown(session.dispose);
     final model = FileWorkspaceModel();
     addTearDown(model.dispose);
-    var hosts = [session.host];
-    final saves = <(String, List<String>)>[];
-    late StateSetter rebuild;
+    final workspace = WorkspaceModel(memoryRepository());
+    addTearDown(workspace.dispose);
+    await workspace.repository.saveHosts([session.host]);
+    await workspace.initialize();
     await tester.pumpWidget(
       MaterialApp(
         theme: harborTheme(),
         home: Scaffold(
-          body: StatefulBuilder(
-            builder: (context, setState) {
-              rebuild = setState;
+          body: ListenableBuilder(
+            listenable: workspace,
+            builder: (context, _) {
               return FileWorkspace(
                 model: model,
                 initializeLocal: false,
-                hosts: hosts,
+                hosts: workspace.hosts,
                 sessions: [session],
                 onConnect: (_) async => null,
-                onSaveBookmarks: (hostId, paths) async {
-                  saves.add((hostId, paths));
-                  rebuild(() {
-                    hosts = [
-                      for (final host in hosts)
-                        host.id == hostId
-                            ? host.withSftpBookmarks(paths)
-                            : host,
-                    ];
-                  });
-                },
+                onSetBookmark: workspace.setSftpBookmark,
               );
             },
           ),
@@ -790,8 +781,9 @@ void main() {
     expect(find.text('收藏当前目录'), findsOneWidget);
     await tester.tap(toggle);
     await tester.pumpAndSettle();
-    expect(saves.last.$1, session.host.id);
-    expect(saves.last.$2, ['/home/tester']);
+    expect((await workspace.repository.loadHosts()).single.sftpBookmarks, [
+      '/home/tester',
+    ]);
 
     await tab.browse('/home/tester/documents');
     await tester.pumpAndSettle();
@@ -799,7 +791,10 @@ void main() {
     await tester.pumpAndSettle();
     await tester.tap(toggle);
     await tester.pumpAndSettle();
-    expect(saves.last.$2, ['/home/tester', '/home/tester/documents']);
+    expect((await workspace.repository.loadHosts()).single.sftpBookmarks, [
+      '/home/tester',
+      '/home/tester/documents',
+    ]);
 
     await tester.tap(menu);
     await tester.pumpAndSettle();
@@ -814,7 +809,9 @@ void main() {
       find.byKey(const ValueKey('file-bookmark-remove-/home/tester/documents')),
     );
     await tester.pumpAndSettle();
-    expect(saves.last.$2, ['/home/tester']);
+    expect((await workspace.repository.loadHosts()).single.sftpBookmarks, [
+      '/home/tester',
+    ]);
     expect(tab.path, '/home/tester');
     expect(tester.takeException(), isNull);
     await tester.pumpWidget(const SizedBox.shrink());

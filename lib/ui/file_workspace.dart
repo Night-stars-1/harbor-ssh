@@ -21,7 +21,7 @@ class FileWorkspace extends StatefulWidget {
     required this.onConnect,
     this.showTitle = false,
     this.initializeLocal = true,
-    this.onSaveBookmarks,
+    this.onSetBookmark,
   });
   final FileWorkspaceModel model;
   final List<Host> hosts;
@@ -30,9 +30,13 @@ class FileWorkspace extends StatefulWidget {
   final bool showTitle;
   final bool initializeLocal;
 
-  /// 保存主机的 SFTP 目录书签；为空时不显示书签按钮。
-  final Future<void> Function(String hostId, List<String> paths)?
-  onSaveBookmarks;
+  /// 设置单个 SFTP 目录的书签状态；为空时不显示书签按钮。
+  final Future<void> Function(
+    String hostId,
+    String path, {
+    required bool saved,
+  })?
+  onSetBookmark;
   @override
   State<FileWorkspace> createState() => _FileWorkspaceState();
 }
@@ -681,7 +685,7 @@ class _FileWorkspaceState extends State<FileWorkspace> {
             ),
             if (!tab.isLocal &&
                 tab.session != null &&
-                widget.onSaveBookmarks != null)
+                widget.onSetBookmark != null)
               _bookmarkMenu(tab, enabled, extent),
             button(
               Icons.refresh_rounded,
@@ -818,9 +822,13 @@ class _FileWorkspaceState extends State<FileWorkspace> {
         .sftpBookmarks;
   }
 
-  Future<void> _saveBookmarks(FileLocationTab tab, List<String> paths) async {
+  Future<void> _setBookmark(
+    FileLocationTab tab,
+    String path, {
+    required bool saved,
+  }) async {
     try {
-      await widget.onSaveBookmarks!(tab.session!.host.id, paths);
+      await widget.onSetBookmark!(tab.session!.host.id, path, saved: saved);
     } catch (e) {
       if (mounted) {
         ScaffoldMessenger.of(context)
@@ -854,21 +862,13 @@ class _FileWorkspaceState extends State<FileWorkspace> {
       ),
       onSelected: (choice) {
         final (action, path) = choice;
-        final current = _bookmarks(tab);
         switch (action) {
           case 'open':
             tab.browse(path);
           case 'add':
-            if (!current.contains(path)) {
-              unawaited(_saveBookmarks(tab, [...current, path]));
-            }
+            unawaited(_setBookmark(tab, path, saved: true));
           case 'remove':
-            unawaited(
-              _saveBookmarks(tab, [
-                for (final item in current)
-                  if (item != path) item,
-              ]),
-            );
+            unawaited(_setBookmark(tab, path, saved: false));
         }
       },
       itemBuilder: (menuContext) => [

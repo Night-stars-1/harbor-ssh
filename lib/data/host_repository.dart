@@ -164,6 +164,25 @@ class HostRepository {
     return result;
   }
 
+  Future<void> _localCommits = Future<void>.value();
+
+  /// Runs [action] while holding the repository's local-data lock, so a
+  /// snapshot/read/write/recovery commit can never interleave with another
+  /// one. The queue is error resilient: a failed commit does not poison the
+  /// following ones.
+  ///
+  /// Non-reentrant: [action] must not call [withLocalData] again — directly or
+  /// through a method that acquires it — or it deadlocks. Keep it short and
+  /// strictly local: only snapshotting, reading, writing and recovery belong
+  /// inside. Network requests, OAuth exchanges and encryption/decryption MUST
+  /// run outside the lock, because a slow upload must never block a local
+  /// bookmark write.
+  Future<T> withLocalData<T>(Future<T> Function() action) {
+    final result = _localCommits.then((_) => action());
+    _localCommits = result.then<void>((_) {}, onError: (Object _) {});
+    return result;
+  }
+
   Future<List<Host>> loadHosts() async {
     final value = await preferences.read(_hostsKey);
     if (value == null) return [];

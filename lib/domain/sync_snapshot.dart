@@ -210,4 +210,95 @@ class SyncSnapshot {
     merged.requireCompletePrivateKeys();
     return merged;
   }
+
+  static List<String> _bookmarks(Map<dynamic, dynamic> data) => [
+    for (final path in data['sftpBookmarks'] as List? ?? const [])
+      if (path is String && path.isNotEmpty) path,
+  ];
+
+  /// Re-applies the local bookmark edits made while an upload was in flight on
+  /// top of the already merged cloud snapshot [this].
+  ///
+  /// [started] is the local snapshot the sync captured before it left for the
+  /// network, [current] the local snapshot read again at commit time. Only
+  /// concurrent `sftpBookmarks` deltas are carried over: additions are appended
+  /// to the incoming merged list and removals are dropped from it, so
+  /// remote-added paths, remote host fields and remote credentials all survive.
+  ///
+  /// Nothing else local may be silently overwritten. Any other concurrent local
+  /// change to a host record — another field or its secret, or the host being
+  /// added/removed locally — and a remote deletion of a host whose bookmarks
+  /// changed locally are reported as [SyncConflict] instead.
+  ///
+  /// When [started] and [current] are equal the incoming merge is returned
+  /// untouched: re-running the merge or its credential validation could undo a
+  /// conflict choice the user already approved, such as clearing a password.
+  /// No input map is mutated.
+  SyncSnapshot rebaseLocalBookmarks({
+    required SyncSnapshot started,
+    required SyncSnapshot current,
+  }) {
+    if (same(started.records, current.records)) return this;
+    final result = <String, Map<String, dynamic>>{...records};
+    final conflicts = <String>[];
+    for (final id in {...started.records.keys, ...current.records.keys}) {
+      final before = started.records[id];
+      final after = current.records[id];
+      if (same(before, after)) continue;
+      final name = ((after ?? before)!['data'] as Map)['name'] as String;
+      if (!id.startsWith('host:') || before == null || after == null) {
+        conflicts.add(name);
+        continue;
+      }
+      final beforeData = before['data'] as Map;
+      final afterData = after['data'] as Map;
+      // Restore the original field presence of the one field this rebase is
+      // allowed to change, so everything else can be compared verbatim.
+      final normalized = <String, dynamic>{...afterData};
+      if (beforeData.containsKey('sftpBookmarks')) {
+        normalized['sftpBookmarks'] = beforeData['sftpBookmarks'];
+      } else {
+        normalized.remove('sftpBookmarks');
+      }
+      if (!same(normalized, beforeData) ||
+          !same(after['secret'], before['secret'])) {
+        conflicts.add(name);
+        continue;
+      }
+      final incoming = records[id];
+      if (incoming == null) {
+        // The merge dropped this host (remote deletion): applying it would
+        // throw away the bookmarks the user just edited.
+        conflicts.add(name);
+        continue;
+      }
+      final beforePaths = _bookmarks(beforeData);
+      final afterPaths = _bookmarks(afterData);
+      final removals = beforePaths
+          .where((path) => !afterPaths.contains(path))
+          .toSet();
+      final incomingData = incoming['data'] as Map;
+      final incomingPaths = _bookmarks(incomingData);
+      final paths = <String>[
+        for (final path in incomingPaths)
+          if (!removals.contains(path)) path,
+      ];
+      for (final path in afterPaths) {
+        if (!beforePaths.contains(path) && !paths.contains(path)) {
+          paths.add(path);
+        }
+      }
+      final data = <String, dynamic>{...incomingData};
+      if (paths.isEmpty) {
+        // An empty list is the same as no bookmarks: keep the optional JSON
+        // field absent, exactly like Host.toJson.
+        data.remove('sftpBookmarks');
+      } else {
+        data['sftpBookmarks'] = paths;
+      }
+      result[id] = {...incoming, 'data': data};
+    }
+    if (conflicts.isNotEmpty) throw SyncConflict(conflicts);
+    return SyncSnapshot(result);
+  }
 }
