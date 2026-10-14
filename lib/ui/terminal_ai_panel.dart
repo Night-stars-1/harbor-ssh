@@ -12,6 +12,7 @@ import '../data/ai_image.dart';
 import '../data/ai_image_input.dart';
 import '../data/terminal_ai.dart';
 
+import 'ai_approval_mode_menu.dart';
 import 'ai_task_controller.dart';
 import 'ai_window_session.dart';
 import 'ai_markdown_code_block.dart';
@@ -529,16 +530,8 @@ class _TerminalAiPanelState extends State<TerminalAiPanel> {
     );
   }
 
-  ButtonStyle _floatingMenuItemStyle({bool selected = false}) {
-    final colors = Theme.of(context).colorScheme;
-    return MenuItemButton.styleFrom(
-      minimumSize: const Size(0, 48),
-      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-      shape: HarborShapes.superellipse(const BorderRadius.all(HarborShapes.sm)),
-      backgroundColor: selected ? colors.secondaryContainer : null,
-      foregroundColor: selected ? colors.onSecondaryContainer : null,
-    );
-  }
+  ButtonStyle _floatingMenuItemStyle({bool selected = false}) =>
+      aiMenuItemStyle(context, selected: selected);
 
   Widget _modelMenuContent(AiTaskController task) {
     final models = <String>{
@@ -645,70 +638,15 @@ class _TerminalAiPanelState extends State<TerminalAiPanel> {
   Widget _compactModelPicker(AiTaskController task) =>
       _modelPicker(task, compact: true);
 
-  /// Shared wording for the approval control, its menu and the rail facts.
-  String _approvalLabel(AiApprovalMode mode) => switch (mode) {
-    AiApprovalMode.auto => '自动审批',
-    AiApprovalMode.readOnly => '只读模式',
-    AiApprovalMode.manual => '手动审批',
-  };
-
-  IconData _approvalIcon(AiApprovalMode mode) => switch (mode) {
-    AiApprovalMode.auto => Icons.verified_user_rounded,
-    AiApprovalMode.readOnly => Icons.visibility_outlined,
-    AiApprovalMode.manual => Icons.gpp_maybe_outlined,
-  };
-
   Widget _approvalMode(AiTaskController task, {bool compact = false}) {
     final mode = task.approvalMode;
-    final label = _approvalLabel(mode);
-    final message = switch (mode) {
-      AiApprovalMode.auto => '高风险命令将自动执行',
-      AiApprovalMode.readOnly => 'AI 只发起工具调用，命令由客户端执行',
-      AiApprovalMode.manual => '高风险命令执行前询问',
-    };
-    final icon = _approvalIcon(mode);
-    return MenuAnchor(
+    final icon = aiApprovalIcon(mode);
+    return AiApprovalModeMenu(
       controller: _approvalMenu,
-      alignmentOffset: const Offset(0, 4),
-      menuChildren: [
-        for (final item in [
-          (
-            AiApprovalMode.manual,
-            '手动审批',
-            '高风险命令执行前询问',
-            Icons.gpp_maybe_outlined,
-          ),
-          (
-            AiApprovalMode.auto,
-            '自动审批',
-            '高风险命令将自动执行',
-            Icons.verified_user_rounded,
-          ),
-          (
-            AiApprovalMode.readOnly,
-            '只读模式',
-            'AI 只能调用读取工具，命令由客户端执行',
-            Icons.visibility_outlined,
-          ),
-        ])
-          MenuItemButton(
-            style: _floatingMenuItemStyle(selected: mode == item.$1),
-            leadingIcon: Icon(
-              mode == item.$1 ? Icons.check_rounded : item.$4,
-              size: 18,
-            ),
-            onPressed: () => task.setApprovalMode(item.$1),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(item.$2),
-                Text(item.$3, style: Theme.of(context).textTheme.bodySmall),
-              ],
-            ),
-          ),
-      ],
+      mode: mode,
+      onSelected: task.setApprovalMode,
       builder: (context, controller, child) => Tooltip(
-        message: message,
+        message: mode.description,
         child: compact
             ? SizedBox.square(
                 dimension: 40,
@@ -732,7 +670,7 @@ class _TerminalAiPanelState extends State<TerminalAiPanel> {
                     ? controller.close
                     : controller.open,
                 icon: Icon(icon, size: 16),
-                label: Text(label),
+                label: Text(mode.label),
                 style: TextButton.styleFrom(
                   padding: const EdgeInsets.symmetric(horizontal: 6),
                   minimumSize: const Size(0, 40),

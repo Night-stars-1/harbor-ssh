@@ -13,6 +13,16 @@ enum AiProtocol { openai, anthropic }
 
 enum AiToolMode { command, readOnly }
 
+enum AiApprovalMode {
+  manual('手动审批', '高风险命令执行前询问'),
+  auto('自动审批', '高风险命令将自动执行'),
+  readOnly('只读模式', 'AI 只能调用读取工具，命令由客户端执行');
+
+  const AiApprovalMode(this.label, this.description);
+  final String label;
+  final String description;
+}
+
 class AiProviderPreset {
   const AiProviderPreset(this.id, this.name, this.baseUrl, this.protocol);
   final String id, name, baseUrl;
@@ -125,12 +135,14 @@ class AiSettings {
     this.approvalModel = '',
     this.approvalProvider = '',
     this.profiles = const [],
+    this.defaultApprovalMode = AiApprovalMode.manual,
   });
   final String baseUrl, apiKey, model, approvalModel, approvalProvider;
   final List<AiProviderProfile> profiles;
   // Objects created before these fields were added can survive a hot reload.
   final AiProtocol? protocol;
   final String? provider;
+  final AiApprovalMode defaultApprovalMode;
   bool get configured => baseUrl.isNotEmpty && model.isNotEmpty;
 
   AiSettings withModel(String model) => AiSettings(
@@ -142,6 +154,7 @@ class AiSettings {
     approvalModel: approvalModel,
     approvalProvider: approvalProvider,
     profiles: profiles,
+    defaultApprovalMode: defaultApprovalMode,
   );
 
   AiSettings settingsFor(String? providerId, {String? model}) {
@@ -166,6 +179,7 @@ class AiSettings {
       approvalModel: approvalModel,
       approvalProvider: approvalProvider,
       profiles: profiles,
+      defaultApprovalMode: defaultApprovalMode,
     );
   }
 
@@ -185,6 +199,7 @@ class AiSettings {
     'provider': provider ?? 'custom',
     'approvalModel': approvalModel,
     'approvalProvider': approvalProvider,
+    'defaultApprovalMode': defaultApprovalMode.name,
     if (profiles.isNotEmpty)
       'profiles': [for (final profile in profiles) profile.toJson()],
   };
@@ -206,6 +221,11 @@ class AiSettings {
       for (final item in (json['profiles'] as List? ?? const []))
         if (item is Map) AiProviderProfile.fromJson(item),
     ],
+    defaultApprovalMode:
+        AiApprovalMode.values
+            .where((value) => value.name == json['defaultApprovalMode'])
+            .firstOrNull ??
+        AiApprovalMode.manual,
   );
 
   Uri get endpoint => _endpoint(

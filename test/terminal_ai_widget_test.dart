@@ -269,6 +269,85 @@ void main() {
     model.dispose();
   });
 
+  testWidgets('审批模式默认选择：三种模式可切换、保存并在重新打开时恢复', (tester) async {
+    tester.view.physicalSize = const Size(1280, 1400);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    final model = WorkspaceModel(memoryRepository());
+    await model.initialize();
+    final controller = LocalSyncSettingsController(model);
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: harborTheme(),
+        home: Scaffold(body: AiSettingsPage(controller: controller)),
+      ),
+    );
+
+    Future<void> select(String field, String option) async {
+      final menu = find.byKey(ValueKey('ai-setting-$field'));
+      await tester.ensureVisible(menu);
+      await tester.tap(menu);
+      await tester.pumpAndSettle();
+      await tester.tap(
+        find.widgetWithText(MenuItemButton, option).hitTestable(),
+      );
+      await tester.pumpAndSettle();
+    }
+
+    Finder shown(String label) => find.descendant(
+      of: find.byKey(const ValueKey('ai-setting-approval-mode')),
+      matching: find.text(label),
+    );
+
+    expect(find.text('默认审批模式'), findsOneWidget);
+    expect(shown('手动审批'), findsOneWidget);
+
+    await select('approval-mode', '自动审批');
+    expect(shown('自动审批'), findsOneWidget);
+
+    await tester.enterText(
+      find.byKey(const ValueKey('ai-setting-url')),
+      'https://api.openai.com/v1',
+    );
+    await tester.enterText(
+      find.byKey(const ValueKey('ai-setting-model')),
+      'gpt-4o',
+    );
+    await tester.ensureVisible(find.text('保存'));
+    await tester.tap(find.text('保存'));
+    await tester.pumpAndSettle();
+    await tester.pump(const Duration(seconds: 4));
+    await tester.pumpAndSettle();
+
+    expect(model.aiSettings.defaultApprovalMode, AiApprovalMode.auto);
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: harborTheme(),
+        home: Scaffold(
+          body: AiSettingsPage(
+            key: UniqueKey(),
+            controller: controller,
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+    expect(shown('自动审批'), findsOneWidget);
+
+    await select('approval-mode', '只读模式');
+    expect(shown('只读模式'), findsOneWidget);
+    await tester.ensureVisible(find.text('保存'));
+    await tester.tap(find.text('保存'));
+    await tester.pumpAndSettle();
+
+    expect(model.aiSettings.defaultApprovalMode, AiApprovalMode.readOnly);
+    expect(tester.takeException(), isNull);
+    await tester.pumpWidget(const SizedBox.shrink());
+    controller.dispose();
+    model.dispose();
+  });
+
   testWidgets('新建的自定义服务商可以删除', (tester) async {
     tester.view.physicalSize = const Size(1280, 1000);
     tester.view.devicePixelRatio = 1;

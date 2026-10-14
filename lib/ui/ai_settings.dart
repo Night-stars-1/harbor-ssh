@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 
 import '../data/terminal_ai.dart';
 import '../data/sync_config.dart';
+import 'ai_approval_mode_menu.dart';
 import 'expressive_widgets.dart';
 import 'settings_widgets.dart';
 import 'sync_settings_controller.dart';
@@ -41,6 +42,8 @@ class _AiSettingsPageState extends State<AiSettingsPage> {
       widget.controller.aiSettings.approvalProvider.trim().isNotEmpty
       ? widget.controller.aiSettings.approvalProvider
       : _provider;
+  late AiApprovalMode _defaultApprovalMode =
+      widget.controller.aiSettings.defaultApprovalMode;
   final _drafts = <String, AiSettings>{};
   final _providerNames = <String, String>{};
   final _models = <String, List<String>>{};
@@ -421,6 +424,7 @@ class _AiSettingsPageState extends State<AiSettingsPage> {
           model: _model.text.trim(),
           approvalModel: _approvalModel.text.trim(),
           approvalProvider: _approvalProvider,
+          defaultApprovalMode: _defaultApprovalMode,
           protocol: selected.protocol,
           provider: _modelProvider,
           profiles: _profilesForSave(),
@@ -797,6 +801,45 @@ class _AiSettingsPageState extends State<AiSettingsPage> {
                 fetchKey: 'ai-fetch-approval-models',
                 fetchProviderId: _approvalProvider,
                 clearable: true,
+              ),
+            ),
+            SettingsRow(
+              title: '默认审批模式',
+              control: LayoutBuilder(
+                builder: (context, constraints) => AiApprovalModeMenu(
+                  mode: _defaultApprovalMode,
+                  onSelected: (value) =>
+                      setState(() => _defaultApprovalMode = value),
+                  builder: (context, menu, child) => InkWell(
+                    key: const ValueKey('ai-setting-approval-mode'),
+                    borderRadius: BorderRadius.circular(12),
+                    onTap: _saving
+                        ? null
+                        : () => menu.isOpen ? menu.close() : menu.open(),
+                    child: SizedBox(
+                      width: constraints.maxWidth,
+                      child: InputDecorator(
+                        isFocused: menu.isOpen,
+                        decoration: InputDecoration(
+                          enabled: !_saving,
+                          prefixIcon: Icon(
+                            aiApprovalIcon(_defaultApprovalMode),
+                            size: 20,
+                          ),
+                          suffixIcon: Icon(
+                            menu.isOpen
+                                ? Icons.expand_less_rounded
+                                : Icons.expand_more_rounded,
+                          ),
+                        ),
+                        child: Text(
+                          _defaultApprovalMode.label,
+                          style: Theme.of(context).textTheme.bodyLarge,
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
               ),
             ),
           ],

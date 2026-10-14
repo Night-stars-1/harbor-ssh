@@ -6,6 +6,7 @@ import 'package:flutter/foundation.dart';
 
 import '../data/ai_conversation_store.dart';
 import '../data/terminal_ai.dart';
+export '../data/terminal_ai.dart' show AiApprovalMode;
 import '../data/ai_image.dart';
 
 class AiTaskEntry {
@@ -38,7 +39,6 @@ bool aiCommandNeedsApproval(AiToolCall call) =>
       caseSensitive: false,
     ).hasMatch(call.command);
 
-enum AiApprovalMode { manual, auto, readOnly }
 
 class AiTaskController extends ChangeNotifier {
   AiTaskController({
@@ -48,7 +48,9 @@ class AiTaskController extends ChangeNotifier {
     TerminalAiClient Function()? clientFactory,
     this.historyStore,
     this.historyScope,
-  }) : clientFactory = clientFactory ?? TerminalAiClient.new;
+    AiApprovalMode? approvalMode,
+  }) : clientFactory = clientFactory ?? TerminalAiClient.new,
+       approvalMode = approvalMode ?? settings().defaultApprovalMode;
   final AiSettings Function() settings;
   final AiCommandExecutor Function() executorFactory;
   final bool Function() connected;
@@ -74,7 +76,7 @@ class AiTaskController extends ChangeNotifier {
   String? _contextModel;
   String? _modelOverride;
   DateTime? turnStartedAt;
-  AiApprovalMode approvalMode = AiApprovalMode.manual;
+  AiApprovalMode approvalMode;
 
   final _random = Random.secure();
   final _summaries = <AiConversationSummary>[];

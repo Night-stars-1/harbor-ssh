@@ -344,6 +344,43 @@ void main() {
     }
   });
 
+  test('审批模式默认选择：三种模式可持久化并在新建任务时生效', () {
+    const emptySettings = AiSettings();
+    expect(emptySettings.defaultApprovalMode, AiApprovalMode.manual);
+    expect(
+      AiSettings.fromJson(emptySettings.toJson()).defaultApprovalMode,
+      AiApprovalMode.manual,
+    );
+    expect(
+      AiSettings.fromJson({
+        'defaultApprovalMode': 'unknown',
+      }).defaultApprovalMode,
+      AiApprovalMode.manual,
+    );
+
+    for (final mode in AiApprovalMode.values) {
+      final settings = AiSettings(
+        baseUrl: 'https://api.openai.com/v1',
+        model: 'gpt-4o',
+        defaultApprovalMode: mode,
+      );
+      final json = settings.toJson();
+      expect(json['defaultApprovalMode'], mode.name);
+      final restored = AiSettings.fromJson(json);
+      expect(restored.defaultApprovalMode, mode);
+      expect(settings.withModel('another').defaultApprovalMode, mode);
+
+      final task = AiTaskController(
+        settings: () => settings,
+        executorFactory: _Executor.new,
+        connected: () => true,
+        clientFactory: () => _Client(),
+      );
+      expect(task.approvalMode, mode);
+      task.dispose();
+    }
+  });
+
   test('默认模型与审批模型可解析到其他服务商', () {
     const settings = AiSettings(
       baseUrl: 'https://api.openai.com/v1',

@@ -779,6 +779,7 @@ Map<String, Object?> _publicSettings(AiSettings settings) => <String, Object?>{
   'provider': settings.provider ?? 'custom',
   'approvalModel': settings.approvalModel,
   'approvalProvider': settings.approvalProvider,
+  'defaultApprovalMode': settings.defaultApprovalMode.name,
 };
 
 Map<String, Object?> _encodeEntry(AiTaskEntry entry, List<String> refs) =>
