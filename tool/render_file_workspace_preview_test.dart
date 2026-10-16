@@ -43,10 +43,10 @@ void main() {
           isLocal: true,
           files: _PreviewFiles(true),
         );
-        files.add(0, name: '开发服务器', files: _PreviewFiles(false));
+        files.add(0, name: '开发服务器', files: _PreviewSftpFiles());
         files.activate(0, local.id);
-        final remote = files.add(1, name: '生产服务器', files: _PreviewFiles(false));
-        files.add(1, name: '备份服务器', files: _PreviewFiles(false));
+        final remote = files.add(1, name: '生产服务器', files: _PreviewSftpFiles());
+        files.add(1, name: '备份服务器', files: _PreviewSftpFiles());
         files.activate(1, remote.id);
         await Future.wait([local.browse(), remote.browse()]);
         local.toggle(
@@ -100,6 +100,23 @@ void main() {
           await capture('sftp-workspace-mobile-swipe-${brightness.name}');
           await swipe.cancel();
           await tester.pumpAndSettle();
+          files.activate(1, remote.id);
+          await tester.pumpAndSettle();
+          final folderRow = find.byKey(
+            ValueKey('entry-${remote.id}-${remote.path}/backups'),
+          );
+          await tester.longPress(folderRow);
+          await tester.pumpAndSettle();
+          await capture('sftp-workspace-mobile-menu-${brightness.name}');
+          await tester.tap(
+            find.byKey(const ValueKey('set-entry-permissions')),
+          );
+          await tester.pumpAndSettle();
+          await capture('sftp-workspace-mobile-permissions-${brightness.name}');
+          await tester.tap(
+            find.byKey(const ValueKey('cancel-entry-permissions')),
+          );
+          await tester.pumpAndSettle();
         }
         if (!mobile) {
           final row = find.byKey(
@@ -111,6 +128,47 @@ void main() {
           );
           await tester.pumpAndSettle();
           await capture('sftp-workspace-menu-${brightness.name}');
+          await tester.sendKeyEvent(LogicalKeyboardKey.escape);
+          await tester.pumpAndSettle();
+          final folderRow = find.byKey(
+            ValueKey('entry-${remote.id}-${remote.path}/backups'),
+          );
+          await tester.tapAt(
+            tester.getCenter(folderRow),
+            buttons: kSecondaryMouseButton,
+          );
+          await tester.pumpAndSettle();
+          await capture('sftp-workspace-entry-menu-${brightness.name}');
+          await tester.tap(
+            find.byKey(const ValueKey('set-entry-permissions')),
+          );
+          await tester.pumpAndSettle();
+          await capture('sftp-workspace-permissions-${brightness.name}');
+          await tester.tap(
+            find.byKey(const ValueKey('cancel-entry-permissions')),
+          );
+          await tester.pumpAndSettle();
+          await tester.tapAt(
+            tester.getCenter(folderRow),
+            buttons: kSecondaryMouseButton,
+          );
+          await tester.pumpAndSettle();
+          await tester.tap(find.byKey(const ValueKey('set-entry-owner')));
+          await tester.pumpAndSettle();
+          await capture('sftp-workspace-owner-${brightness.name}');
+          await tester.tap(
+            find.byKey(const ValueKey('cancel-entry-permissions')),
+          );
+          await tester.pumpAndSettle();
+          final panel = tester.getRect(
+            find.byKey(const ValueKey('file-panel-1')),
+          );
+          await tester.tapAt(
+            Offset(panel.center.dx, panel.bottom - 120),
+            buttons: kSecondaryMouseButton,
+          );
+          await tester.pumpAndSettle();
+          await capture('sftp-workspace-blank-menu-${brightness.name}');
           await tester.sendKeyEvent(LogicalKeyboardKey.escape);
           await tester.pumpAndSettle();
           files.message = '已删除 1 个文件';
@@ -151,4 +209,22 @@ class _PreviewFiles extends FakeRemoteFiles {
         RemoteFile(name: item.key, path: '$root/${item.key}', size: item.value),
     ]);
   }
+}
+
+/// 只有远端预览带权限能力，本地预览保持没有权限入口。
+class _PreviewSftpFiles extends _PreviewFiles
+    implements RemoteFilePermissions {
+  _PreviewSftpFiles() : super(false);
+
+  @override
+  Future<FilePermissions> readPermissions(String path) async =>
+      const FilePermissions(mode: 420, userId: 1000, groupId: 1000);
+
+  @override
+  Future<void> setPermissions(
+    String path, {
+    int? mode,
+    int? userId,
+    int? groupId,
+  }) async {}
 }

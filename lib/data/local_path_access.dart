@@ -41,6 +41,14 @@ abstract final class LocalPathAccess {
   }
 
   static Future<void> createDirectoryExclusive(String path) async {
+    // A same-named entry must fail here with a clear reason: neither the
+    // platform channel nor `Directory.create` may adopt or replace it. The
+    // check below is only for that message — the exclusive create itself is
+    // still what guarantees nothing existing is ever written through.
+    if (await FileSystemEntity.type(path, followLinks: false) !=
+        FileSystemEntityType.notFound) {
+      throw FileSystemException('目标目录已存在', path);
+    }
     if (Platform.isWindows || Platform.isMacOS) {
       try {
         await _channel.invokeMethod<void>('createDirectoryExclusive', {
@@ -52,10 +60,6 @@ abstract final class LocalPathAccess {
       } on PlatformException catch (error) {
         throw FileSystemException(error.message ?? '无法创建目录', path);
       }
-    }
-    if (await FileSystemEntity.type(path, followLinks: false) !=
-        FileSystemEntityType.notFound) {
-      throw FileSystemException('目标目录已存在', path);
     }
     await Directory(path).create();
   }

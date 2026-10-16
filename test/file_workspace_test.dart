@@ -1833,6 +1833,585 @@ void main() {
     model.close(0, sourceTab);
     expect(model.canDrop(single, targetTab), isFalse);
   });
+
+  testWidgets('目录与空白区右键菜单在当前目录创建文件夹和文件，名称校验与独占生效', (tester) async {
+    final files = MemoryFiles()
+      ..data['/a.txt'] = Uint8List.fromList([7])
+      ..directories.add('/folder');
+    final model = FileWorkspaceModel();
+    addTearDown(model.dispose);
+    final tab = model.add(0, name: 'files', files: files);
+    await pumpFileWorkspace(tester, model);
+
+    Finder menu(String key) => find.byKey(ValueKey(key));
+    Future<void> openRowMenu(String path) async {
+      await tester.tap(
+        find.byKey(ValueKey('entry-${tab.id}-$path')),
+        buttons: kSecondaryMouseButton,
+      );
+      await tester.pumpAndSettle();
+    }
+
+    // 目录右键同样打开菜单，创建项齐全且不带删除项。
+    await openRowMenu('/folder');
+    expect(menu('create-directory-entry'), findsOneWidget);
+    expect(menu('create-file-entry'), findsOneWidget);
+    expect(menu('copy-entry-path'), findsOneWidget);
+    expect(menu('delete-selected-files'), findsNothing);
+
+    // 空名不创建。
+    await tester.tap(menu('create-directory-entry'));
+    await tester.pumpAndSettle();
+    expect(menu('create-directory-dialog'), findsOneWidget);
+    expect(find.text('位置：/'), findsOneWidget);
+    await tester.tap(menu('confirm-create-entry'));
+    await tester.pumpAndSettle();
+    expect(menu('create-directory-dialog'), findsOneWidget);
+    expect(files.directories, unorderedEquals(['/', '/folder']));
+
+    // 斜杠名称被拒绝，回车走同一套校验而不是绕过它。
+    await tester.enterText(menu('create-entry-name'), 'a/b');
+    await tester.testTextInput.receiveAction(TextInputAction.done);
+    await tester.pumpAndSettle();
+    expect(menu('create-directory-dialog'), findsOneWidget);
+    expect(files.directories, unorderedEquals(['/', '/folder']));
+
+    // 合法名称落在标签页当前目录，而不是右键的目录。
+    await tester.enterText(menu('create-entry-name'), 'logs');
+    await tester.tap(menu('confirm-create-entry'));
+    await tester.pumpAndSettle();
+    expect(files.directories, contains('/logs'));
+    expect(tab.entries.map((entry) => entry.name), contains('logs'));
+
+    // 空白区只提供创建，不涉及任何条目。
+    final panel = tester.getRect(find.byKey(const ValueKey('file-panel-0')));
+    await tester.tapAt(
+      Offset(panel.center.dx, panel.bottom - 120),
+      buttons: kSecondaryMouseButton,
+    );
+    await tester.pumpAndSettle();
+    expect(menu('blank-create-directory'), findsOneWidget);
+    expect(menu('blank-create-file'), findsOneWidget);
+    expect(menu('copy-entry-path'), findsNothing);
+    await tester.tap(menu('blank-create-file'));
+    await tester.pumpAndSettle();
+    await tester.enterText(menu('create-entry-name'), 'notes.txt');
+    await tester.tap(menu('confirm-create-entry'));
+    await tester.pumpAndSettle();
+    expect(files.data.containsKey('/notes.txt'), isTrue);
+
+    // 独占创建：同名文件保持原样。
+    await openRowMenu('/a.txt');
+    await tester.tap(menu('create-file-entry'));
+    await tester.pumpAndSettle();
+    await tester.enterText(menu('create-entry-name'), 'a.txt');
+    await tester.tap(menu('confirm-create-entry'));
+    await tester.pumpAndSettle();
+    expect(files.data['/a.txt'], [7]);
+    expect(model.failed, isTrue);
+    expect(tester.takeException(), isNull);
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
+
+  testWidgets('空目录空白区右键菜单在空目录当前路径创建', (tester) async {
+    final files = MemoryFiles()..directories.add('/empty');
+    final model = FileWorkspaceModel();
+    addTearDown(model.dispose);
+    final tab = model.add(0, name: 'files', files: files);
+    await pumpFileWorkspace(tester, model);
+    await tab.browse('/empty');
+    await tester.pumpAndSettle();
+    expect(tab.entries, isEmpty);
+
+    final panel = tester.getRect(find.byKey(const ValueKey('file-panel-0')));
+    await tester.tapAt(panel.center, buttons: kSecondaryMouseButton);
+    await tester.pumpAndSettle();
+    expect(
+      find.byKey(const ValueKey('blank-create-directory')),
+      findsOneWidget,
+    );
+    await tester.tap(find.byKey(const ValueKey('blank-create-directory')));
+    await tester.pumpAndSettle();
+    expect(find.text('位置：/empty'), findsOneWidget);
+    await tester.enterText(
+      find.byKey(const ValueKey('create-entry-name')),
+      'inner',
+    );
+    await tester.tap(find.byKey(const ValueKey('confirm-create-entry')));
+    await tester.pumpAndSettle();
+    expect(files.directories, contains('/empty/inner'));
+    expect(tester.takeException(), isNull);
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
+
+  testWidgets('移动端长按目录打开菜单，不再只对文件生效', (tester) async {
+    final files = MemoryFiles()..directories.add('/folder');
+    final model = FileWorkspaceModel();
+    addTearDown(model.dispose);
+    final tab = model.add(0, name: 'files', files: files);
+    await pumpFileWorkspace(
+      tester,
+      model,
+      platform: TargetPlatform.android,
+      size: const Size(390, 844),
+    );
+    await tester.longPress(find.byKey(ValueKey('entry-${tab.id}-/folder')));
+    await tester.pumpAndSettle();
+    expect(
+      find.byKey(const ValueKey('create-directory-entry')),
+      findsOneWidget,
+    );
+    expect(find.byKey(const ValueKey('copy-entry-path')), findsOneWidget);
+    await tester.sendKeyEvent(LogicalKeyboardKey.escape);
+    await tester.pumpAndSettle();
+
+    // 空目录在移动端用长按空白区打开同一份创建菜单。
+    await tab.browse('/folder');
+    await tester.pumpAndSettle();
+    expect(tab.entries, isEmpty);
+    final panel = tester.getRect(find.byKey(const ValueKey('file-panel-0')));
+    await tester.longPressAt(panel.center);
+    await tester.pumpAndSettle();
+    expect(find.byKey(const ValueKey('blank-create-file')), findsOneWidget);
+    expect(tester.takeException(), isNull);
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
+
+  testWidgets('窄低视口加软键盘时新建对话框可滚动，输入与确认都能到达', (tester) async {
+    final files = MemoryFiles();
+    final model = FileWorkspaceModel();
+    addTearDown(model.dispose);
+    final tab = model.add(0, name: 'files', files: files);
+    tester.view.physicalSize = const Size(360, 400);
+    tester.view.devicePixelRatio = 1;
+    // 横屏手机软键盘占掉一半高度，对话框只剩很窄的一条。
+    tester.view.viewInsets = const FakeViewPadding(bottom: 200);
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    addTearDown(tester.view.resetViewInsets);
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: harborTheme().copyWith(platform: TargetPlatform.android),
+        home: Scaffold(
+          body: FileWorkspace(
+            model: model,
+            hosts: const [],
+            sessions: const [],
+            onConnect: (_) async => null,
+            initializeLocal: false,
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    // 空目录的空白区就在列表面板中间，短视口下也只有它能可靠命中。
+    final empty = find.text('没有可显示的文件');
+    expect(empty, findsOneWidget);
+    await tester.tapAt(tester.getCenter(empty), buttons: kSecondaryMouseButton);
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const ValueKey('blank-create-directory')));
+    await tester.pumpAndSettle();
+
+    final dialog = find.byKey(const ValueKey('create-directory-dialog'));
+    expect(dialog, findsOneWidget);
+    // 对话框本体（标题与按钮）留在软键盘之上，内容改为可滚动而不是溢出。
+    expect(
+      tester.getRect(find.text('创建文件夹')).bottom,
+      lessThanOrEqualTo(200.0),
+    );
+    expect(
+      find.descendant(of: dialog, matching: find.byType(SingleChildScrollView)),
+      findsOneWidget,
+    );
+    expect(tester.takeException(), isNull);
+
+    // 名称输入在滚动区域内可达，滚动到可见后可以正常输入。
+    final name = find.byKey(const ValueKey('create-entry-name'));
+    await tester.ensureVisible(name);
+    await tester.pumpAndSettle();
+    await tester.enterText(name, 'short-view');
+    await tester.pumpAndSettle();
+    expect(tester.widget<TextField>(name).controller!.text, 'short-view');
+    expect(tester.takeException(), isNull);
+
+    // 确认按钮始终可达，并且真的创建了目录。
+    final confirm = find.byKey(const ValueKey('confirm-create-entry'));
+    expect(tester.getRect(confirm).bottom, lessThanOrEqualTo(200.0));
+    await tester.tap(confirm);
+    await tester.pumpAndSettle();
+    expect(files.directories, contains('/short-view'));
+    expect(tab.entries.map((entry) => entry.name), contains('short-view'));
+    // 创建成功后状态栏出现，面板更矮：工具条和列表仍然留在视口内。
+    expect(
+      tester
+          .getRect(find.byKey(ValueKey('file-toolbar-${tab.id}')))
+          .bottom,
+      lessThanOrEqualTo(200.0),
+    );
+    expect(
+      find.byKey(ValueKey('entry-${tab.id}-/short-view')),
+      findsOneWidget,
+    );
+    expect(tester.takeException(), isNull);
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
+
+  testWidgets('复制路径使用真实完整路径，多选换行且不改动原多选', (tester) async {
+    final copies = <String>[];
+    final messenger =
+        TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
+    messenger.setMockMethodCallHandler(SystemChannels.platform, (call) async {
+      if (call.method == 'Clipboard.setData') {
+        copies.add((call.arguments as Map)['text'] as String);
+      }
+      return null;
+    });
+    addTearDown(
+      () => messenger.setMockMethodCallHandler(SystemChannels.platform, null),
+    );
+    final files = MemoryFiles()
+      ..data['/a.txt'] = Uint8List(1)
+      ..data['/b.txt'] = Uint8List(1)
+      ..data['/c.txt'] = Uint8List(1)
+      ..directories.add('/folder');
+    final model = FileWorkspaceModel();
+    addTearDown(model.dispose);
+    final tab = model.add(0, name: 'files', files: files);
+    await pumpFileWorkspace(tester, model);
+
+    Future<void> copyFrom(String path) async {
+      await tester.tap(
+        find.byKey(ValueKey('entry-${tab.id}-$path')),
+        buttons: kSecondaryMouseButton,
+      );
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const ValueKey('copy-entry-path')));
+      await tester.pumpAndSettle();
+    }
+
+    tab.select(tab.entries.firstWhere((entry) => entry.name == 'a.txt'));
+    tab.select(
+      tab.entries.firstWhere((entry) => entry.name == 'b.txt'),
+      toggleSelection: true,
+    );
+    await tester.pumpAndSettle();
+    await copyFrom('/b.txt');
+    expect(copies, ['/a.txt\n/b.txt']);
+    expect(tab.selected, {'/a.txt', '/b.txt'});
+
+    // 目录没有可写能力也照样复制路径，并且不改动已有选择。
+    await copyFrom('/folder');
+    expect(copies.last, '/folder');
+    expect(tab.selected, {'/a.txt', '/b.txt'});
+    expect(tester.takeException(), isNull);
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
+
+  testWidgets('设置权限读取远端权限，勾选与八进制同步并保留特殊位', (tester) async {
+    final files = MemoryPermissionsFiles()
+      ..data['/a.txt'] = Uint8List(1)
+      ..permissions = const FilePermissions(
+        mode: 420,
+        userId: 1000,
+        groupId: 1000,
+      );
+    final model = FileWorkspaceModel();
+    addTearDown(model.dispose);
+    final tab = model.add(0, name: 'SFTP', files: files);
+    await pumpFileWorkspace(tester, model);
+
+    await tester.tap(
+      find.byKey(ValueKey('entry-${tab.id}-/a.txt')),
+      buttons: kSecondaryMouseButton,
+    );
+    await tester.pumpAndSettle();
+    expect(find.byKey(const ValueKey('set-entry-permissions')), findsOneWidget);
+    expect(find.byKey(const ValueKey('set-entry-owner')), findsOneWidget);
+    await tester.tap(find.byKey(const ValueKey('set-entry-permissions')));
+    await tester.pumpAndSettle();
+    expect(files.readCalls, 1);
+
+    Checkbox box(String id) =>
+        tester.widget<Checkbox>(find.byKey(ValueKey('permission-$id')));
+    final octal = find.byKey(const ValueKey('permission-octal'));
+    expect(tester.widget<TextField>(octal).controller!.text, '644');
+    expect(box('user-read').value, isTrue);
+    expect(box('user-write').value, isTrue);
+    expect(box('user-exec').value, isFalse);
+    expect(box('group-exec').value, isFalse);
+    expect(box('setuid').value, isFalse);
+
+    // 勾选回写八进制。
+    await tester.tap(find.byKey(const ValueKey('permission-user-exec')));
+    await tester.pumpAndSettle();
+    expect(tester.widget<TextField>(octal).controller!.text, '744');
+
+    // 八进制回写勾选，4 位含特殊位（5 = setuid + 粘滞位）。
+    await tester.enterText(octal, '5755');
+    await tester.pumpAndSettle();
+    expect(box('setuid').value, isTrue);
+    expect(box('setgid').value, isFalse);
+    expect(box('sticky').value, isTrue);
+    expect(box('user-read').value, isTrue);
+    expect(box('other-exec').value, isTrue);
+
+    // 特殊位勾选同样回写八进制。
+    await tester.tap(find.byKey(const ValueKey('permission-sticky')));
+    await tester.pumpAndSettle();
+    expect(tester.widget<TextField>(octal).controller!.text, '4755');
+    await tester.tap(find.byKey(const ValueKey('permission-sticky')));
+    await tester.pumpAndSettle();
+    expect(tester.widget<TextField>(octal).controller!.text, '5755');
+
+    await tester.tap(find.byKey(const ValueKey('confirm-entry-permissions')));
+    await tester.pumpAndSettle();
+    final write = files.writes.single;
+    expect(write.$1, 3053);
+    expect(write.$2, isNull);
+    expect(write.$3, isNull);
+    expect(tester.takeException(), isNull);
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
+
+  testWidgets('权限组同时提交 UID 和 GID，未知身份保持空白不回填 0', (tester) async {
+    final files = MemoryPermissionsFiles()
+      ..data['/a.txt'] = Uint8List(1)
+      ..permissions = const FilePermissions(
+        mode: 420,
+        userId: 1000,
+        groupId: 1000,
+      );
+    final model = FileWorkspaceModel();
+    addTearDown(model.dispose);
+    final tab = model.add(0, name: 'SFTP', files: files);
+    await pumpFileWorkspace(tester, model);
+
+    final uid = find.byKey(const ValueKey('permission-uid'));
+    final gid = find.byKey(const ValueKey('permission-gid'));
+    Future<void> openOwner() async {
+      await tester.tap(
+        find.byKey(ValueKey('entry-${tab.id}-/a.txt')),
+        buttons: kSecondaryMouseButton,
+      );
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const ValueKey('set-entry-owner')));
+      await tester.pumpAndSettle();
+    }
+
+    await openOwner();
+    expect(tester.widget<TextField>(uid).controller!.text, '1000');
+    expect(tester.widget<TextField>(gid).controller!.text, '1000');
+    await tester.enterText(gid, '2000');
+    await tester.tap(find.byKey(const ValueKey('confirm-entry-permissions')));
+    await tester.pumpAndSettle();
+    final owner = files.writes.single;
+    expect(owner.$1, isNull);
+    expect(owner.$2, 1000);
+    expect(owner.$3, 2000);
+
+    // 服务器没有报告身份：两个字段都是空白，既不是 0 也不能只提交一个。
+    files.permissions = const FilePermissions(mode: 420);
+    await openOwner();
+    expect(tester.widget<TextField>(uid).controller!.text, isEmpty);
+    expect(tester.widget<TextField>(gid).controller!.text, isEmpty);
+    await tester.tap(find.byKey(const ValueKey('confirm-entry-permissions')));
+    await tester.pumpAndSettle();
+    expect(
+      find.byKey(const ValueKey('permission-owner-error')),
+      findsOneWidget,
+    );
+    expect(files.writes, hasLength(1));
+    await tester.enterText(uid, '0');
+    await tester.tap(find.byKey(const ValueKey('confirm-entry-permissions')));
+    await tester.pumpAndSettle();
+    expect(
+      find.byKey(const ValueKey('permission-owner-error')),
+      findsOneWidget,
+    );
+    expect(files.writes, hasLength(1));
+    await tester.enterText(gid, '4294967295');
+    await tester.tap(find.byKey(const ValueKey('confirm-entry-permissions')));
+    await tester.pumpAndSettle();
+    final last = files.writes.last;
+    expect(last.$1, isNull);
+    expect(last.$2, 0);
+    expect(last.$3, 4294967295);
+    expect(tester.takeException(), isNull);
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
+
+  testWidgets('符号链接条目不提供权限入口', (tester) async {
+    final files = MemoryPermissionsFiles()
+      ..data['/a.txt'] = Uint8List(1)
+      ..links.add('/shortcut');
+    final model = FileWorkspaceModel();
+    addTearDown(model.dispose);
+    final tab = model.add(0, name: 'SFTP', files: files);
+    await pumpFileWorkspace(tester, model);
+
+    await tester.tap(
+      find.byKey(ValueKey('entry-${tab.id}-/shortcut')),
+      buttons: kSecondaryMouseButton,
+    );
+    await tester.pumpAndSettle();
+    expect(find.byKey(const ValueKey('set-entry-permissions')), findsNothing);
+    expect(find.byKey(const ValueKey('set-entry-owner')), findsNothing);
+    expect(find.byKey(const ValueKey('copy-entry-path')), findsOneWidget);
+    expect(files.readCalls, 0);
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
+
+  testWidgets('权限读取防重入、失败提示、取消与提交失败都有实际效果', (tester) async {
+    final files = MemoryPermissionsFiles()
+      ..data['/a.txt'] = Uint8List(1)
+      ..readGate = Completer<void>();
+    final model = FileWorkspaceModel();
+    addTearDown(model.dispose);
+    final tab = model.add(0, name: 'SFTP', files: files);
+    await pumpFileWorkspace(tester, model);
+
+    Finder row() => find.byKey(ValueKey('entry-${tab.id}-/a.txt'));
+    Future<void> openRowMenu() async {
+      await tester.tap(row(), buttons: kSecondaryMouseButton);
+      await tester.pumpAndSettle();
+    }
+
+    // 读取挂起时再次右键不会重入。
+    await openRowMenu();
+    await tester.tap(find.byKey(const ValueKey('set-entry-permissions')));
+    await tester.pumpAndSettle();
+    expect(files.readCalls, 1);
+    await tester.tap(row(), buttons: kSecondaryMouseButton);
+    await tester.pumpAndSettle();
+    expect(find.byKey(const ValueKey('set-entry-permissions')), findsNothing);
+    expect(find.byKey(const ValueKey('blank-create-directory')), findsNothing);
+    expect(files.readCalls, 1);
+    files.readGate!.complete();
+    await tester.pumpAndSettle();
+    expect(
+      find.byKey(const ValueKey('entry-permissions-dialog')),
+      findsOneWidget,
+    );
+
+    // 取消不提交。
+    await tester.tap(find.byKey(const ValueKey('cancel-entry-permissions')));
+    await tester.pumpAndSettle();
+    expect(files.writes, isEmpty);
+
+    // 读取异常沿用既有错误反馈，且不打开对话框。
+    files.readGate = null;
+    files.readError = StateError('permission denied');
+    await openRowMenu();
+    await tester.tap(find.byKey(const ValueKey('set-entry-permissions')));
+    await tester.pumpAndSettle();
+    expect(find.byKey(const ValueKey('entry-permissions-dialog')), findsNothing);
+    expect(find.textContaining('permission denied'), findsOneWidget);
+    await tester.pump(const Duration(seconds: 5));
+    await tester.pumpAndSettle();
+    files.readError = null;
+
+    // 提交失败只反映在状态栏，界面不报成功。
+    files.writeError = StateError('operation not permitted');
+    await openRowMenu();
+    await tester.tap(find.byKey(const ValueKey('set-entry-permissions')));
+    await tester.pumpAndSettle();
+    await tester.enterText(
+      find.byKey(const ValueKey('permission-octal')),
+      '700',
+    );
+    await tester.tap(find.byKey(const ValueKey('confirm-entry-permissions')));
+    await tester.pumpAndSettle();
+    expect(files.writes, isEmpty);
+    expect(model.failed, isTrue);
+    expect(tester.takeException(), isNull);
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
+
+  testWidgets('读取期间标签页被关闭后不再提交到错误目标', (tester) async {
+    final files = MemoryPermissionsFiles()
+      ..data['/a.txt'] = Uint8List(1)
+      ..readGate = Completer<void>();
+    final model = FileWorkspaceModel();
+    addTearDown(model.dispose);
+    final tab = model.add(0, name: 'SFTP', files: files);
+    await pumpFileWorkspace(tester, model);
+
+    await tester.tap(
+      find.byKey(ValueKey('entry-${tab.id}-/a.txt')),
+      buttons: kSecondaryMouseButton,
+    );
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const ValueKey('set-entry-permissions')));
+    await tester.pumpAndSettle();
+    expect(files.readCalls, 1);
+    model.close(0, tab);
+    await tester.pumpAndSettle();
+    files.readGate!.complete();
+    await tester.pumpAndSettle();
+    expect(find.byKey(const ValueKey('entry-permissions-dialog')), findsNothing);
+    expect(files.writes, isEmpty);
+    expect(tester.takeException(), isNull);
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
+
+  testWidgets('删除进行中右键不打开菜单，权限与创建项都不出现', (tester) async {
+    final files = MemoryPermissionsFiles()
+      ..data['/a.txt'] = Uint8List(1)
+      ..data['/b.txt'] = Uint8List(1)
+      ..deleteGate = Completer<void>();
+    final model = FileWorkspaceModel();
+    addTearDown(model.dispose);
+    final tab = model.add(0, name: 'SFTP', files: files);
+    await pumpFileWorkspace(tester, model);
+
+    final first = tab.entries.firstWhere((entry) => entry.name == 'a.txt');
+    tab.select(first);
+    final deleting = model.deleteFiles(model.dragData(tab, first));
+    await tester.pump();
+    expect(model.busy, isTrue);
+    await tester.tap(
+      find.byKey(ValueKey('entry-${tab.id}-/b.txt')),
+      buttons: kSecondaryMouseButton,
+    );
+    // 删除进行中状态栏是不定进度条，pumpAndSettle 永远不会静止。
+    await tester.pump();
+    expect(find.byKey(const ValueKey('set-entry-permissions')), findsNothing);
+    expect(find.byKey(const ValueKey('blank-create-directory')), findsNothing);
+    files.deleteGate!.complete();
+    await deleting;
+    await tester.pumpAndSettle();
+    expect(tester.takeException(), isNull);
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
+}
+
+/// 以固定窗口尺寸渲染文件工作区，供菜单、剪贴板与权限对话框测试复用。
+Future<void> pumpFileWorkspace(
+  WidgetTester tester,
+  FileWorkspaceModel model, {
+  TargetPlatform platform = TargetPlatform.windows,
+  Size size = const Size(1100, 740),
+}) async {
+  tester.view.physicalSize = size;
+  tester.view.devicePixelRatio = 1;
+  addTearDown(tester.view.resetPhysicalSize);
+  addTearDown(tester.view.resetDevicePixelRatio);
+  await tester.pumpWidget(
+    MaterialApp(
+      theme: harborTheme().copyWith(platform: platform),
+      home: Scaffold(
+        body: FileWorkspace(
+          model: model,
+          hosts: const [],
+          sessions: const [],
+          onConnect: (_) async => null,
+          initializeLocal: false,
+        ),
+      ),
+    ),
+  );
+  await tester.pumpAndSettle();
 }
 
 /// 打开远端文件菜单里的代码编辑器，并等待内容读取完成。
@@ -1901,6 +2480,15 @@ class MemoryFiles implements RemoteFileSystem {
       throw StateError('already exists');
     }
     directories.add(path);
+  }
+
+  /// 独占创建：已有同名文件、目录或链接时抛出，绝不覆盖。
+  @override
+  Future<void> createFileExclusive(String path) async {
+    if (data.containsKey(path) || directories.contains(path)) {
+      throw StateError('already exists');
+    }
+    data[path] = Uint8List(0);
   }
 
   @override
@@ -2021,6 +2609,56 @@ class MemoryFiles implements RemoteFileSystem {
     }
     cancellation.check();
     data[path] = bytes.takeBytes();
+  }
+}
+
+/// 只有明确实现权限能力的替身才带权限语义，本地 fake 不会自动获得。
+class MemoryPermissionsFiles extends MemoryFiles
+    implements RemoteFilePermissions {
+  FilePermissions permissions = const FilePermissions();
+  final links = <String>{};
+  int readCalls = 0;
+  Completer<void>? readGate;
+  Object? readError;
+  Completer<void>? setPermissionsGate;
+  Object? writeError;
+  final writes = <(int?, int?, int?)>[];
+
+  @override
+  Future<RemoteDirectory> browse(String path) async {
+    final directory = await super.browse(path);
+    if (links.isEmpty) return directory;
+    return RemoteDirectory(directory.path, [
+      ...directory.entries,
+      for (final link in links)
+        if (remoteParent(link) == directory.path)
+          RemoteFile(name: link.split('/').last, path: link, isLink: true),
+    ]);
+  }
+
+  @override
+  Future<FilePermissions> readPermissions(String path) async {
+    readCalls++;
+    if (readGate != null) await readGate!.future;
+    if (readError != null) throw readError!;
+    return permissions;
+  }
+
+  @override
+  Future<void> setPermissions(
+    String path, {
+    int? mode,
+    int? userId,
+    int? groupId,
+  }) async {
+    if (setPermissionsGate != null) await setPermissionsGate!.future;
+    if (writeError != null) throw writeError!;
+    writes.add((mode, userId, groupId));
+    permissions = FilePermissions(
+      mode: mode ?? permissions.mode,
+      userId: userId ?? permissions.userId,
+      groupId: groupId ?? permissions.groupId,
+    );
   }
 }
 

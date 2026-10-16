@@ -849,6 +849,12 @@ class _PreviewFileSystem implements RemoteFileSystem {
   Future<void> createDirectory(String path) async {}
 
   @override
+  Future<void> createFileExclusive(String path) async {
+    if (_entries.containsKey(path)) throw StateError('目标已存在：$path');
+    _entries[path] = '';
+  }
+
+  @override
   Future<void> deleteDirectory(String path, {bool recursive = false}) async {}
 }
 

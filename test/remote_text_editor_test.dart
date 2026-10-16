@@ -339,6 +339,16 @@ class _FakeFiles implements RemoteFileSystem {
   }
 
   @override
+  Future<void> createFileExclusive(String path) async {
+    if (data.containsKey(path) ||
+        directories.contains(path) ||
+        links.contains(path)) {
+      throw StateError('目标已存在');
+    }
+    data[path] = Uint8List(0);
+  }
+
+  @override
   Future<void> deleteDirectory(String path, {bool recursive = false}) async {
     if (!directories.remove(path)) throw StateError('目录不存在');
     final prefix = '$path/';

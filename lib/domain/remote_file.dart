@@ -31,11 +31,34 @@ class TransferCancellation {
   }
 }
 
+/// Permissions a filesystem reports for one entry.
+///
+/// Each field holds exactly what the filesystem reported: a value it does not
+/// report stays null, so "unknown" is never confused with 0 (or with a group
+/// the caller merely assumed).
+class FilePermissions {
+  const FilePermissions({this.mode, this.userId, this.groupId});
+
+  /// Permission and special bits (0..07777), without the file type bits.
+  final int? mode;
+
+  /// Numeric owner id. Never resolved to a name.
+  final int? userId;
+
+  /// Numeric group id. Never resolved to a name.
+  final int? groupId;
+}
+
 abstract interface class RemoteFileSystem {
   Future<RemoteDirectory> browse(String path);
   String childPath(String directory, String name);
   Future<void> deleteFile(String path);
   Future<void> createDirectory(String path);
+
+  /// Creates [path] only when nothing exists there yet. An entry that already
+  /// has that name — file, directory or symlink — is never replaced, adopted
+  /// or written through.
+  Future<void> createFileExclusive(String path);
   Future<void> deleteDirectory(String path, {bool recursive = false});
   Future<void> renameExclusive(String oldPath, String newPath);
   Future<void> upload(
@@ -66,8 +89,6 @@ abstract interface class ResumableSource {
 
 abstract interface class ResumableFileSystem
     implements RemoteFileSystem, ResumableSource {
-  Future<void> createFileExclusive(String path);
-
   /// Discards an unacknowledged tail before writing at [offset]. Progress is
   /// the absolute acknowledged offset, never the number of queued bytes.
   Future<void> writeRange(
@@ -76,6 +97,31 @@ abstract interface class ResumableFileSystem
     required int offset,
     required TransferCancellation cancellation,
     required void Function(int bytes) onProgress,
+  });
+}
+
+/// A filesystem that can report and change the permissions of an entry.
+///
+/// Only a filesystem that can read permissions back implements this: callers
+/// must offer permission editing only for tabs whose [RemoteFileSystem] does,
+/// so a filesystem without the capability is never given a write it cannot
+/// confirm.
+abstract interface class RemoteFilePermissions implements RemoteFileSystem {
+  /// What the filesystem reports for [path] right now. A symlink is never
+  /// followed, so a link reports the link itself.
+  Future<FilePermissions> readPermissions(String path);
+
+  /// Applies [mode] (0..07777, special bits preserved), [userId] and [groupId]
+  /// (numeric, always together) or both, then reads the result back. A change
+  /// the filesystem does not confirm — including one it does not report at
+  /// all — is a failure, never a reported success. Symlinks are refused, and
+  /// so is a path whose type is not reported, since neither can be written
+  /// safely.
+  Future<void> setPermissions(
+    String path, {
+    int? mode,
+    int? userId,
+    int? groupId,
   });
 }
 

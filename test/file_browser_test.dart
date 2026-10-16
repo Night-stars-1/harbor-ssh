@@ -218,6 +218,9 @@ class FakeRemoteFiles implements RemoteFileSystem {
   @override
   Future<void> createDirectory(String path) async => throw UnimplementedError();
   @override
+  Future<void> createFileExclusive(String path) async =>
+      throw UnimplementedError();
+  @override
   Future<void> deleteDirectory(String path, {bool recursive = false}) async =>
       throw UnimplementedError();
   @override

@@ -280,14 +280,20 @@ class FileWorkspaceModel extends ChangeNotifier {
   int? total;
   DateTime? _lastProgress;
   String? _deletingTabId;
+
+  /// Tab that owns the create or permission write in flight. Such a write only
+  /// ever touches the directory it was started from, so it locks that one tab
+  /// instead of the whole workspace.
+  String? _writeTabId;
   _DropTransfer? _pendingTransfer;
   bool get canResume => !busy && _pendingTransfer != null;
   bool get canContinue => canResume && !_pendingTransfer!.discarding;
   bool get resumable => _pendingTransfer != null;
   bool get deleting => _deletingTabId != null;
-  bool get busy => transfer != null || deleting;
+  bool get busy => transfer != null || deleting || _writeTabId != null;
   bool locked(FileLocationTab tab) =>
       tab.id == _deletingTabId ||
+      tab.id == _writeTabId ||
       (busy && (tab.id == transferSourceId || tab.id == transferDestinationId));
   bool canClose(FileLocationTab tab) =>
       !locked(tab) &&
@@ -341,6 +347,115 @@ class FileWorkspaceModel extends ChangeNotifier {
     } finally {
       if (!_disposed) await source.browse();
       _deletingTabId = null;
+      _notify();
+    }
+  }
+
+  /// Whether [tab] can take a new entry in its current directory right now.
+  /// A local folder is included: creating is not a permission operation.
+  bool canCreate(FileLocationTab tab) =>
+      !_disposed &&
+      !busy &&
+      tabs.contains(tab) &&
+      tab.connected &&
+      !tab.loading &&
+      tab.error == null;
+
+  /// Creates [name] in [tab]'s current directory — never in a directory the
+  /// caller merely right-clicked somewhere else. [directory] picks a folder
+  /// over an empty file, and a file is created exclusively, so an existing
+  /// name is refused instead of being overwritten or written through.
+  Future<void> createEntry(
+    FileLocationTab tab,
+    String name, {
+    required bool directory,
+  }) async {
+    if (!canCreate(tab)) return;
+    final String path;
+    try {
+      // The same validation every other operation uses; the resolved path is
+      // kept for the whole call so a later navigation cannot redirect it.
+      path = tab.files.childPath(tab.path, name);
+    } catch (error) {
+      failed = true;
+      message = fileError(error);
+      _notify();
+      return;
+    }
+    // The listing is only consulted for a clear reason; what actually keeps a
+    // same-named entry intact is the exclusive create on the server side.
+    if (tab.entries.any((entry) => _sameName(entry.name, name, tab.isLocal))) {
+      failed = true;
+      message = '当前目录已存在同名项目';
+      _notify();
+      return;
+    }
+    _writeTabId = tab.id;
+    failed = false;
+    message = directory ? '正在创建文件夹 $name' : '正在创建文件 $name';
+    _notify();
+    try {
+      if (directory) {
+        await tab.files.createDirectory(path);
+      } else {
+        await tab.files.createFileExclusive(path);
+      }
+      message = directory ? '已创建文件夹 $name' : '已创建文件 $name';
+    } catch (error) {
+      failed = true;
+      message = '${directory ? '创建文件夹' : '创建文件'}失败：${fileError(error)}';
+    } finally {
+      if (!_disposed) await tab.browse();
+      _writeTabId = null;
+      _notify();
+    }
+  }
+
+  /// Whether permission editing is offered for [file] in [tab]. Only a
+  /// filesystem that can report permissions back has this capability, which is
+  /// what keeps a local folder out of it, and a symlink is never given
+  /// permissions of its own.
+  bool canSetPermissions(FileLocationTab tab, RemoteFile file) =>
+      !_disposed &&
+      !busy &&
+      tabs.contains(tab) &&
+      tab.files is RemoteFilePermissions &&
+      tab.connected &&
+      !tab.loading &&
+      tab.error == null &&
+      !file.isLink;
+
+  /// Changes the permissions of [file] in [tab]. The values the filesystem
+  /// reports back are the only result: an unconfirmed change fails, and the
+  /// caller reads the effective permissions again afterwards.
+  Future<void> updatePermissions(
+    FileLocationTab tab,
+    RemoteFile file, {
+    int? mode,
+    int? userId,
+    int? groupId,
+  }) async {
+    if (!canSetPermissions(tab, file)) return;
+    final files = tab.files as RemoteFilePermissions;
+    final path = file.path;
+    _writeTabId = tab.id;
+    failed = false;
+    message = '正在修改 ${file.name} 的权限';
+    _notify();
+    try {
+      await files.setPermissions(
+        path,
+        mode: mode,
+        userId: userId,
+        groupId: groupId,
+      );
+      message = '已修改 ${file.name} 的权限';
+    } catch (error) {
+      failed = true;
+      message = '权限修改失败：${fileError(error)}';
+    } finally {
+      if (!_disposed) await tab.browse();
+      _writeTabId = null;
       _notify();
     }
   }
@@ -1017,7 +1132,9 @@ String fileError(Object error) {
   if (error is TransferCancelled) return '传输已取消';
   if (error is TimeoutException) return '服务器响应超时，请重试';
   return error.toString().replaceFirst(
-    RegExp(r'^(Exception|Bad state|FileSystemException):\s*'),
+    RegExp(
+      r'^(Exception|Bad state|FileSystemException|Invalid argument\(s\)):\s*',
+    ),
     '',
   );
 }

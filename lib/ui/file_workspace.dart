@@ -44,6 +44,8 @@ class FileWorkspace extends StatefulWidget {
 class _FileWorkspaceState extends State<FileWorkspace> {
   bool _adding = false;
   bool _editing = false;
+  bool _creating = false;
+  bool _permissionsBusy = false;
   final _reconnecting = <String>{};
   final _searching = <String>{};
   final _tabKeys = <String, GlobalKey>{};
@@ -604,13 +606,23 @@ class _FileWorkspaceState extends State<FileWorkspace> {
     ),
   );
 
+  bool get _touchPlatform => switch (Theme.of(context).platform) {
+    TargetPlatform.android || TargetPlatform.iOS => true,
+    _ => false,
+  };
+
+  /// 工具条高度（触屏更高）；浏览器布局按它算固定高度还剩多少。
+  double get _toolbarExtent => _touchPlatform ? 48 : 40;
+
+  /// 计数行的固定高度：内边距（6 + 8）加一行 labelSmall。
+  static const _countRowExtent = 30.0;
+
+  /// 列表至少要留出的高度（略小于一行条目），否则让出计数行。
+  static const _minimumListExtent = 44.0;
+
   Widget _browserToolbar(FileLocationTab tab, bool enabled) {
     final searching = _searching.contains(tab.id) || tab.query.isNotEmpty;
-    final touch = switch (Theme.of(context).platform) {
-      TargetPlatform.android || TargetPlatform.iOS => true,
-      _ => false,
-    };
-    final extent = touch ? 48.0 : 40.0;
+    final extent = _toolbarExtent;
     Widget button(
       IconData icon,
       String label,
@@ -713,69 +725,84 @@ class _FileWorkspaceState extends State<FileWorkspace> {
         tab.session?.status == ConnectionStatus.connecting;
     final enabled = !loading && tab.connected && !model.locked(tab);
     final entries = tab.visibleEntries;
+    final touch = _touchPlatform;
     final copying = tab.selected.isNotEmpty;
     final showAction = clipboardMode && (copying || model.clipboard != null);
-    final content = Column(
-      children: [
-        _browserToolbar(tab, enabled),
-        Expanded(
-          child: loading
-              ? const Center(child: CircularProgressIndicator())
-              : tab.error != null
-              ? Center(
-                  child: SingleChildScrollView(
-                    child: Padding(
-                      padding: const EdgeInsets.all(16),
-                      child: Column(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          Text(tab.error!, textAlign: TextAlign.center),
-                          TextButton(
-                            key: ValueKey('retry-file-tab-${tab.id}'),
-                            onPressed: !model.locked(tab)
-                                ? () => _retry(tab)
-                                : null,
-                            child: const Text('重试'),
-                          ),
-                        ],
-                      ),
+    final listArea = loading
+        ? const Center(child: CircularProgressIndicator())
+        : tab.error != null
+        ? Center(
+            child: SingleChildScrollView(
+              child: Padding(
+                padding: const EdgeInsets.all(16),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Text(tab.error!, textAlign: TextAlign.center),
+                    TextButton(
+                      key: ValueKey('retry-file-tab-${tab.id}'),
+                      onPressed: !model.locked(tab) ? () => _retry(tab) : null,
+                      child: const Text('重试'),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          )
+        : GestureDetector(
+            behavior: HitTestBehavior.opaque,
+            onSecondaryTapUp: (details) =>
+                _blankMenu(tab, details.globalPosition),
+            // 移动端没有右键，空目录和空白区用长按打开同一份创建菜单；
+            // 桌面保持右键，避免按住条目时误开菜单。
+            onLongPressStart: touch
+                ? (details) => _blankMenu(tab, details.globalPosition)
+                : null,
+            child: entries.isEmpty
+                ? const Center(child: Text('没有可显示的文件'))
+                : ListView.builder(
+                    key: PageStorageKey('directory-${tab.id}-${tab.path}'),
+                    padding: EdgeInsets.fromLTRB(8, 0, 8, showAction ? 72 : 0),
+                    itemCount: entries.length,
+                    itemBuilder: (_, index) => _entry(
+                      tab,
+                      entries[index],
+                      enabled,
+                      index,
+                      entries.length,
+                      clipboardMode: clipboardMode,
                     ),
                   ),
-                )
-              : entries.isEmpty
-              ? const Center(child: Text('没有可显示的文件'))
-              : ListView.builder(
-                  key: PageStorageKey('directory-${tab.id}-${tab.path}'),
-                  padding: EdgeInsets.fromLTRB(8, 0, 8, showAction ? 72 : 0),
-                  itemCount: entries.length,
-                  itemBuilder: (_, index) => _entry(
-                    tab,
-                    entries[index],
-                    enabled,
-                    index,
-                    entries.length,
-                    clipboardMode: clipboardMode,
-                  ),
-                ),
-        ),
-        Padding(
-          padding: const EdgeInsets.fromLTRB(12, 6, 12, 8),
-          child: Row(
-            children: [
-              Text(
-                '${entries.length} 项',
-                style: Theme.of(context).textTheme.labelSmall,
-              ),
-              const Spacer(),
-              if (!clipboardMode && tab.selected.isNotEmpty)
-                Text(
-                  '已选 ${tab.selected.length} 个文件',
-                  style: Theme.of(context).textTheme.labelSmall,
-                ),
-            ],
+          );
+    final countRow = Padding(
+      padding: const EdgeInsets.fromLTRB(12, 6, 12, 8),
+      child: Row(
+        children: [
+          Text(
+            '${entries.length} 项',
+            style: Theme.of(context).textTheme.labelSmall,
           ),
-        ),
-      ],
+          const Spacer(),
+          if (!clipboardMode && tab.selected.isNotEmpty)
+            Text(
+              '已选 ${tab.selected.length} 个文件',
+              style: Theme.of(context).textTheme.labelSmall,
+            ),
+        ],
+      ),
+    );
+    final content = LayoutBuilder(
+      builder: (context, constraints) => Column(
+        children: [
+          _browserToolbar(tab, enabled),
+          Expanded(child: listArea),
+          // 工具条和计数行都是固定高度：视口被状态栏或软键盘压到连一行条目都
+          // 放不下时让出计数行，列表最多被压成 0，不会再溢出。
+          if (constraints.maxHeight >=
+              _toolbarExtent + 4 + _countRowExtent + _minimumListExtent)
+            countRow,
+        ],
+      ),
     );
     if (!clipboardMode) return content;
     return Stack(
@@ -960,18 +987,19 @@ class _FileWorkspaceState extends State<FileWorkspace> {
     }
   }
 
-  Future<void> _fileMenu(
+  Future<void> _entryMenu(
     FileLocationTab tab,
     RemoteFile file,
     Offset position,
   ) async {
-    if (_editing) return;
+    if (_editing || _creating || _permissionsBusy) return;
     if (!tab.selected.contains(file.path)) tab.select(file);
     final data = model.dragData(tab, file);
     final deletable = model.canDelete(data);
     final editable =
         deletable && data.files.length == 1 && _canEditRemoteText(tab, file);
-    if (!deletable && !editable) return;
+    final creatable = model.canCreate(tab);
+    final permissions = model.canSetPermissions(tab, file);
     final overlay =
         Overlay.of(context).context.findRenderObject()! as RenderBox;
     final point = overlay.globalToLocal(position);
@@ -984,6 +1012,36 @@ class _FileWorkspaceState extends State<FileWorkspace> {
       // 空间不足时 Flutter 仍会将自适应宽度的菜单限制在屏幕内。
       position: RelativeRect.fromLTRB(anchorX, point.dy, anchorX, 0),
       items: [
+        if (creatable) ...[
+          HarborPopupMenuItem<Object>(
+            key: const ValueKey('create-directory-entry'),
+            value: 'create-directory',
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Icon(
+                  Icons.create_new_folder_outlined,
+                  size: 20,
+                  color: colors.primary,
+                ),
+                const SizedBox(width: 10),
+                const Text('创建文件夹'),
+              ],
+            ),
+          ),
+          HarborPopupMenuItem<Object>(
+            key: const ValueKey('create-file-entry'),
+            value: 'create-file',
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Icon(Icons.note_add_outlined, size: 20, color: colors.primary),
+                const SizedBox(width: 10),
+                const Text('创建文件'),
+              ],
+            ),
+          ),
+        ],
         if (editable)
           HarborPopupMenuItem<Object>(
             key: const ValueKey('edit-remote-file'),
@@ -997,6 +1055,52 @@ class _FileWorkspaceState extends State<FileWorkspace> {
               ],
             ),
           ),
+        HarborPopupMenuItem<Object>(
+          key: const ValueKey('copy-entry-path'),
+          value: 'copy-path',
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(
+                Icons.content_copy_rounded,
+                size: 20,
+                color: colors.primary,
+              ),
+              const SizedBox(width: 10),
+              const Text('复制路径'),
+            ],
+          ),
+        ),
+        if (permissions) ...[
+          HarborPopupMenuItem<Object>(
+            key: const ValueKey('set-entry-permissions'),
+            value: 'permissions',
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Icon(
+                  Icons.lock_outline_rounded,
+                  size: 20,
+                  color: colors.primary,
+                ),
+                const SizedBox(width: 10),
+                const Text('设置权限'),
+              ],
+            ),
+          ),
+          HarborPopupMenuItem<Object>(
+            key: const ValueKey('set-entry-owner'),
+            value: 'owner',
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Icon(Icons.badge_outlined, size: 20, color: colors.primary),
+                const SizedBox(width: 10),
+                const Text('权限组'),
+              ],
+            ),
+          ),
+        ],
         if (deletable)
           HarborPopupMenuItem<Object>(
             key: const ValueKey('delete-selected-files'),
@@ -1019,9 +1123,25 @@ class _FileWorkspaceState extends State<FileWorkspace> {
           ),
       ],
     );
-    if (action == 'edit') {
-      await _editFile(tab, file);
-      return;
+    switch (action) {
+      case 'create-directory':
+        await _createEntry(tab, directory: true);
+        return;
+      case 'create-file':
+        await _createEntry(tab, directory: false);
+        return;
+      case 'copy-path':
+        await _copyPath(tab, file);
+        return;
+      case 'permissions':
+        await _openPermissions(tab, file, _PermissionSection.mode);
+        return;
+      case 'owner':
+        await _openPermissions(tab, file, _PermissionSection.owner);
+        return;
+      case 'edit':
+        await _editFile(tab, file);
+        return;
     }
     if (action != 'delete' || !mounted || !model.canDelete(data)) return;
     final confirmed = await showExpressiveDialog<bool>(
@@ -1066,6 +1186,160 @@ class _FileWorkspaceState extends State<FileWorkspace> {
     if (confirmed == true && mounted) await model.deleteFiles(data);
   }
 
+  List<String> _copyPaths(FileLocationTab tab, RemoteFile file) =>
+      tab.selected.contains(file.path)
+      ? [
+          for (final entry in tab.entries)
+            if (tab.selected.contains(entry.path)) entry.path,
+        ]
+      : [file.path];
+
+  /// 复制使用真实完整路径，多选按列表顺序换行分隔；只读取选区，不做任何改动。
+  Future<void> _copyPath(FileLocationTab tab, RemoteFile file) async {
+    final paths = _copyPaths(tab, file);
+    if (paths.isEmpty) return;
+    await Clipboard.setData(ClipboardData(text: paths.join('\n')));
+  }
+
+  Future<void> _createEntry(
+    FileLocationTab tab, {
+    required bool directory,
+  }) async {
+    if (_creating || _editing || _permissionsBusy || model.busy) return;
+    if (!model.canCreate(tab)) return;
+    final tabId = tab.id;
+    final files = tab.files;
+    final directoryPath = tab.path;
+    final name = await showExpressiveDialog<String>(
+      context: context,
+      builder: (context) => _CreateEntryDialog(
+        directory: directory,
+        directoryPath: directoryPath,
+        childPath: files.childPath,
+      ),
+    );
+    if (name == null || !mounted) return;
+    if (!model.tabs.contains(tab) ||
+        tab.id != tabId ||
+        !identical(tab.files, files)) {
+      return;
+    }
+    setState(() => _creating = true);
+    try {
+      await model.createEntry(tab, name, directory: directory);
+    } finally {
+      if (mounted) setState(() => _creating = false);
+    }
+  }
+
+  /// 空白区域（含空目录）只在当前目录创建，不指向任何条目。
+  Future<void> _blankMenu(FileLocationTab tab, Offset position) async {
+    if (_editing || _creating || _permissionsBusy || model.busy) return;
+    if (!model.canCreate(tab)) return;
+    final overlay =
+        Overlay.of(context).context.findRenderObject()! as RenderBox;
+    final point = overlay.globalToLocal(position);
+    final anchorX = point.dx + 4;
+    final colors = Theme.of(context).colorScheme;
+    final action = await showMenu<Object>(
+      context: context,
+      popUpAnimationStyle: HarborMotion.popup(context),
+      position: RelativeRect.fromLTRB(anchorX, point.dy, anchorX, 0),
+      items: [
+        HarborPopupMenuItem<Object>(
+          key: const ValueKey('blank-create-directory'),
+          value: 'create-directory',
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(
+                Icons.create_new_folder_outlined,
+                size: 20,
+                color: colors.primary,
+              ),
+              const SizedBox(width: 10),
+              const Text('创建文件夹'),
+            ],
+          ),
+        ),
+        HarborPopupMenuItem<Object>(
+          key: const ValueKey('blank-create-file'),
+          value: 'create-file',
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(Icons.note_add_outlined, size: 20, color: colors.primary),
+              const SizedBox(width: 10),
+              const Text('创建文件'),
+            ],
+          ),
+        ),
+      ],
+    );
+    if (action == 'create-directory') await _createEntry(tab, directory: true);
+    if (action == 'create-file') await _createEntry(tab, directory: false);
+  }
+
+  /// 读取期间禁止重入；读取或对话框期间标签页或连接变化时不再提交到错误目标。
+  Future<void> _openPermissions(
+    FileLocationTab tab,
+    RemoteFile file,
+    _PermissionSection section,
+  ) async {
+    if (_permissionsBusy || _editing || _creating || !mounted) return;
+    if (!model.canSetPermissions(tab, file)) return;
+    final files = tab.files;
+    if (files is! RemoteFilePermissions) return;
+    final tabId = tab.id;
+    final path = file.path;
+    setState(() => _permissionsBusy = true);
+    try {
+      final FilePermissions current;
+      try {
+        current = await files.readPermissions(path);
+      } catch (error) {
+        if (mounted) {
+          ScaffoldMessenger.of(
+            context,
+          ).showSnackBar(SnackBar(content: Text(fileError(error))));
+        }
+        return;
+      }
+      if (!mounted || !_permissionsTarget(tab, tabId, files, path)) return;
+      final edit = await showExpressiveDialog<_PermissionEdit>(
+        context: context,
+        builder: (context) => _PermissionsDialog(
+          file: file,
+          current: current,
+          section: section,
+        ),
+      );
+      if (edit == null || !mounted) return;
+      if (!_permissionsTarget(tab, tabId, files, path)) return;
+      await model.updatePermissions(
+        tab,
+        file,
+        mode: edit.mode,
+        userId: edit.userId,
+        groupId: edit.groupId,
+      );
+    } finally {
+      if (mounted) setState(() => _permissionsBusy = false);
+    }
+  }
+
+  bool _permissionsTarget(
+    FileLocationTab tab,
+    String tabId,
+    RemoteFileSystem files,
+    String path,
+  ) =>
+      model.tabs.contains(tab) &&
+      tab.id == tabId &&
+      identical(tab.files, files) &&
+      tab.connected &&
+      tab.entries.any((entry) => entry.path == path);
+
   Widget _entry(
     FileLocationTab tab,
     RemoteFile file,
@@ -1083,7 +1357,8 @@ class _FileWorkspaceState extends State<FileWorkspace> {
     final shape = HarborShapes.superellipse(
       HarborShapes.listItem(HarborShapes.listSlot(index, count)),
     );
-    final canOpenMenu = enabled && !model.busy && !_editing;
+    final canOpenMenu =
+        enabled && !model.busy && !_editing && !_creating && !_permissionsBusy;
     void action() {
       if (file.isDirectory) {
         tab.browse(file.path);
@@ -1113,8 +1388,8 @@ class _FileWorkspaceState extends State<FileWorkspace> {
           child: InkWell(
             key: ValueKey('entry-${tab.id}-${file.path}'),
             onTap: enabled ? action : null,
-            onSecondaryTapUp: canOpenMenu && !file.isDirectory
-                ? (details) => _fileMenu(tab, file, details.globalPosition)
+            onSecondaryTapUp: canOpenMenu
+                ? (details) => _entryMenu(tab, file, details.globalPosition)
                 : null,
             child: ConstrainedBox(
               constraints: const BoxConstraints(minHeight: 52),
@@ -1164,11 +1439,10 @@ class _FileWorkspaceState extends State<FileWorkspace> {
     );
     if (!enabled || model.busy) return row;
     if (clipboardMode || mobile) {
-      if (file.isDirectory) return row;
       return GestureDetector(
-        onLongPressStart: _editing
-            ? null
-            : (details) => _fileMenu(tab, file, details.globalPosition),
+        onLongPressStart: canOpenMenu
+            ? (details) => _entryMenu(tab, file, details.globalPosition)
+            : null,
         child: _SwipeSelect(
           key: ValueKey('swipe-${tab.id}-${file.path}'),
           shape: shape,
@@ -1505,4 +1779,414 @@ class _SwipeSelectState extends State<_SwipeSelect> {
       ),
     ),
   );
+}
+
+enum _PermissionSection { mode, owner }
+
+/// 权限对话框的提交结果：设置权限只带 mode，权限组同时带 uid 和 gid。
+class _PermissionEdit {
+  const _PermissionEdit({this.mode, this.userId, this.groupId});
+  final int? mode, userId, groupId;
+}
+
+/// 八进制展示：3 位是普通权限，4 位含 setuid/setgid/粘滞位；未知保持空白。
+String _octalLabel(int? mode) =>
+    mode == null ? '' : mode.toRadixString(8).padLeft(3, '0');
+
+class _CreateEntryDialog extends StatefulWidget {
+  const _CreateEntryDialog({
+    required this.directory,
+    required this.directoryPath,
+    required this.childPath,
+  });
+  final bool directory;
+  final String directoryPath;
+  final String Function(String directory, String name) childPath;
+
+  @override
+  State<_CreateEntryDialog> createState() => _CreateEntryDialogState();
+}
+
+class _CreateEntryDialogState extends State<_CreateEntryDialog> {
+  final _controller = TextEditingController();
+  String? _error;
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  /// 与数据层同一套校验：名称先经 childPath 解析，空名、./..、斜杠和 NUL
+  /// 都在这里被拒绝，回车与按钮走同一条路径。
+  void _submit() {
+    final name = _controller.text.trim();
+    String? error;
+    if (name.isEmpty) {
+      error = '请输入名称';
+    } else {
+      try {
+        widget.childPath(widget.directoryPath, name);
+      } on FormatException catch (e) {
+        error = e.message;
+      } catch (_) {
+        error = '无效的名称';
+      }
+    }
+    if (error != null) {
+      setState(() => _error = error);
+      return;
+    }
+    Navigator.pop(context, name);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return AlertDialog(
+      key: ValueKey(
+        widget.directory ? 'create-directory-dialog' : 'create-file-dialog',
+      ),
+      title: Text(widget.directory ? '创建文件夹' : '创建文件'),
+      content: SizedBox(
+        width: 360,
+        child: SingleChildScrollView(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                '位置：${widget.directoryPath}',
+                maxLines: 2,
+                overflow: TextOverflow.ellipsis,
+                style: theme.textTheme.bodySmall?.copyWith(
+                  color: theme.colorScheme.onSurfaceVariant,
+                ),
+              ),
+              const SizedBox(height: 12),
+              TextField(
+                key: const ValueKey('create-entry-name'),
+                controller: _controller,
+                autofocus: true,
+                textInputAction: TextInputAction.done,
+                decoration: InputDecoration(
+                  labelText: widget.directory ? '文件夹名称' : '文件名称',
+                  errorText: _error,
+                ),
+                onChanged: (_) {
+                  if (_error != null) setState(() => _error = null);
+                },
+                onSubmitted: (_) => _submit(),
+              ),
+            ],
+          ),
+        ),
+      ),
+      actions: [
+        TextButton(
+          key: const ValueKey('cancel-create-entry'),
+          onPressed: () => Navigator.pop(context),
+          child: const Text('取消'),
+        ),
+        FilledButton(
+          key: const ValueKey('confirm-create-entry'),
+          onPressed: _submit,
+          child: const Text('创建'),
+        ),
+      ],
+    );
+  }
+}
+
+/// 权限与权限组的编辑面；两个入口共用同一套八进制、勾选与数字身份控件。
+class _PermissionsDialog extends StatefulWidget {
+  const _PermissionsDialog({
+    required this.file,
+    required this.current,
+    required this.section,
+  });
+  final RemoteFile file;
+  final FilePermissions current;
+  final _PermissionSection section;
+
+  @override
+  State<_PermissionsDialog> createState() => _PermissionsDialogState();
+}
+
+class _PermissionsDialogState extends State<_PermissionsDialog> {
+  static const _setUserId = 0x800; // 4000
+  static const _setGroupId = 0x400; // 2000
+  static const _sticky = 0x200; // 1000
+  static const _maxMode = 0xFFF; // 07777
+  static const _maxId = 4294967295;
+
+  late final TextEditingController _octal;
+  late final TextEditingController _uid;
+  late final TextEditingController _gid;
+  var _bits = 0;
+  String? _octalError, _ownerError;
+
+  @override
+  void initState() {
+    super.initState();
+    _bits = widget.current.mode ?? 0;
+    _octal = TextEditingController(text: _octalLabel(widget.current.mode));
+    // 服务器没有报告的身份保持空白，绝不回填 0。
+    _uid = TextEditingController(
+      text: widget.current.userId?.toString() ?? '',
+    );
+    _gid = TextEditingController(
+      text: widget.current.groupId?.toString() ?? '',
+    );
+  }
+
+  @override
+  void dispose() {
+    _octal.dispose();
+    _uid.dispose();
+    _gid.dispose();
+    super.dispose();
+  }
+
+  int? _parseOctal(String text) {
+    final value = text.trim();
+    if (!RegExp(r'^[0-7]{3,4}$').hasMatch(value)) return null;
+    final parsed = int.parse(value, radix: 8);
+    return parsed > _maxMode ? null : parsed;
+  }
+
+  int? _parseId(String text) {
+    final value = text.trim();
+    if (!RegExp(r'^\d{1,10}$').hasMatch(value)) return null;
+    final parsed = int.tryParse(value);
+    return parsed == null || parsed > _maxId ? null : parsed;
+  }
+
+  void _onOctalChanged(String text) {
+    final value = _parseOctal(text);
+    setState(() {
+      if (value == null) {
+        _octalError = text.trim().isEmpty ? null : '请输入 3 到 4 位八进制数（0-7）';
+      } else {
+        _bits = value;
+        _octalError = null;
+      }
+    });
+  }
+
+  void _toggle(int bit, bool on) {
+    setState(() {
+      _bits = on ? (_bits | bit) : (_bits & ~bit);
+      _octal.text = _octalLabel(_bits);
+      _octalError = null;
+    });
+  }
+
+  void _submitMode() {
+    final value = _parseOctal(_octal.text);
+    if (value == null) {
+      setState(() => _octalError = '请输入 3 到 4 位八进制数（0-7）');
+      return;
+    }
+    Navigator.pop(context, _PermissionEdit(mode: value));
+  }
+
+  void _submitOwner() {
+    final uid = _parseId(_uid.text);
+    final gid = _parseId(_gid.text);
+    if (uid == null || gid == null) {
+      setState(() => _ownerError = '请填写 0 到 4294967295 之间的 UID 和 GID');
+      return;
+    }
+    // UID 与 GID 必须同时提交，单个值会被服务器静默忽略。
+    Navigator.pop(context, _PermissionEdit(userId: uid, groupId: gid));
+  }
+
+  Widget _check(String id, String label, int bit) {
+    final checked = _bits & bit != 0;
+    return InkWell(
+      onTap: () => _toggle(bit, !checked),
+      borderRadius: const BorderRadius.all(HarborShapes.xs),
+      child: Padding(
+        padding: const EdgeInsets.only(right: 8),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Checkbox(
+              key: ValueKey('permission-$id'),
+              value: checked,
+              onChanged: (value) => _toggle(bit, value ?? false),
+              visualDensity: VisualDensity.compact,
+              materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+            ),
+            const SizedBox(width: 2),
+            Text(label, style: Theme.of(context).textTheme.bodySmall),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _group(String label, List<(String, String, int)> options) => Padding(
+    padding: const EdgeInsets.only(bottom: 4),
+    child: Row(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        SizedBox(
+          width: 40,
+          child: Padding(
+            padding: const EdgeInsets.only(top: 10),
+            child: Text(
+              label,
+              style: Theme.of(context).textTheme.labelMedium,
+            ),
+          ),
+        ),
+        Expanded(
+          child: Wrap(
+            children: [for (final option in options) _check(option.$1, option.$2, option.$3)],
+          ),
+        ),
+      ],
+    ),
+  );
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final colors = theme.colorScheme;
+    final mode = widget.section == _PermissionSection.mode;
+    return AlertDialog(
+      key: ValueKey(
+        mode ? 'entry-permissions-dialog' : 'entry-owner-dialog',
+      ),
+      title: Text(mode ? '设置权限' : '权限组'),
+      content: SizedBox(
+        width: 380,
+        child: SingleChildScrollView(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(
+                children: [
+                  Icon(
+                    mode ? Icons.lock_outline_rounded : Icons.badge_outlined,
+                    size: 18,
+                    color: colors.primary,
+                  ),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: Text(
+                      widget.file.name,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: theme.textTheme.titleSmall,
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 12),
+              if (mode) ...[
+                TextField(
+                  key: const ValueKey('permission-octal'),
+                  controller: _octal,
+                  autofocus: true,
+                  textInputAction: TextInputAction.done,
+                  decoration: InputDecoration(
+                    labelText: '八进制权限',
+                    errorText: _octalError,
+                  ),
+                  onChanged: _onOctalChanged,
+                  onSubmitted: (_) => _submitMode(),
+                ),
+                const SizedBox(height: 12),
+                _group('用户', [
+                  ('user-read', '读', 0x100),
+                  ('user-write', '写', 0x80),
+                  ('user-exec', '执行', 0x40),
+                ]),
+                _group('组', [
+                  ('group-read', '读', 0x20),
+                  ('group-write', '写', 0x10),
+                  ('group-exec', '执行', 0x8),
+                ]),
+                _group('其他', [
+                  ('other-read', '读', 0x4),
+                  ('other-write', '写', 0x2),
+                  ('other-exec', '执行', 0x1),
+                ]),
+                const SizedBox(height: 4),
+                Text('特殊位', style: theme.textTheme.labelMedium),
+                const SizedBox(height: 4),
+                Wrap(
+                  children: [
+                    _check('setuid', '设置用户 ID', _setUserId),
+                    _check('setgid', '设置组 ID', _setGroupId),
+                    _check('sticky', '粘滞位', _sticky),
+                  ],
+                ),
+              ] else ...[
+                TextField(
+                  key: const ValueKey('permission-uid'),
+                  controller: _uid,
+                  autofocus: true,
+                  keyboardType: TextInputType.number,
+                  textInputAction: TextInputAction.next,
+                  decoration: const InputDecoration(
+                    labelText: '用户 ID (UID)',
+                    hintText: '未知',
+                  ),
+                  onChanged: (_) {
+                    if (_ownerError != null) {
+                      setState(() => _ownerError = null);
+                    }
+                  },
+                ),
+                const SizedBox(height: 8),
+                TextField(
+                  key: const ValueKey('permission-gid'),
+                  controller: _gid,
+                  keyboardType: TextInputType.number,
+                  textInputAction: TextInputAction.done,
+                  decoration: const InputDecoration(
+                    labelText: '组 ID (GID)',
+                    hintText: '未知',
+                  ),
+                  onChanged: (_) {
+                    if (_ownerError != null) {
+                      setState(() => _ownerError = null);
+                    }
+                  },
+                  onSubmitted: (_) => _submitOwner(),
+                ),
+                if (_ownerError != null) ...[
+                  const SizedBox(height: 8),
+                  Text(
+                    _ownerError!,
+                    key: const ValueKey('permission-owner-error'),
+                    style: theme.textTheme.bodySmall?.copyWith(
+                      color: colors.error,
+                    ),
+                  ),
+                ],
+              ],
+            ],
+          ),
+        ),
+      ),
+      actions: [
+        TextButton(
+          key: const ValueKey('cancel-entry-permissions'),
+          onPressed: () => Navigator.pop(context),
+          child: const Text('取消'),
+        ),
+        FilledButton(
+          key: const ValueKey('confirm-entry-permissions'),
+          onPressed: mode ? _submitMode : _submitOwner,
+          child: const Text('应用'),
+        ),
+      ],
+    );
+  }
 }

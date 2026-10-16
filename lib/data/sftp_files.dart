@@ -9,10 +9,18 @@ import 'download_stream.dart';
 import 'public_key_install.dart';
 
 /// Each operation owns its channel, independently of the terminal/completion.
-class SftpFiles implements ResumableFileSystem {
+class SftpFiles implements ResumableFileSystem, RemoteFilePermissions {
   SftpFiles(this.openChannel);
   final Future<SftpClient> Function() openChannel;
   static const _timeout = Duration(seconds: 20);
+
+  /// Permission and special bits of a mode; the file type bits are not part
+  /// of a permission change.
+  static const _permissionMask = 0xfff;
+
+  /// Largest owner/group id the SFTP attribute packet can carry: a bigger
+  /// value is truncated on the wire into a different owner.
+  static const _ownerIdLimit = 0xffffffff;
 
   /// Permission bits for `~/.ssh` (octal 0700, as Dart has no octal literal).
   static const _sshDirectoryMode = 0x1c0;
@@ -260,6 +268,100 @@ class SftpFiles implements ResumableFileSystem {
         .timeout(_timeout);
     await file.close().timeout(_timeout);
   });
+
+  @override
+  Future<FilePermissions> readPermissions(String path) => _run((client) async {
+    // `followLink: false` keeps a link's own permissions out of the answer
+    // for whatever it points at; `stat` is the only permission source SFTP
+    // offers, so a server that reports none leaves the fields null.
+    final attrs = await client.stat(path, followLink: false).timeout(_timeout);
+    return FilePermissions(
+      mode: attrs.mode == null ? null : attrs.mode!.value & _permissionMask,
+      userId: attrs.userID,
+      groupId: attrs.groupID,
+    );
+  });
+
+  @override
+  Future<void> setPermissions(
+    String path, {
+    int? mode,
+    int? userId,
+    int? groupId,
+  }) async {
+    // A request the attribute packet cannot carry is refused before a channel
+    // is even opened: a lone uid or gid is dropped silently by the wire
+    // format, and an id above 32 bits would be truncated into a different
+    // owner, so neither may ever be sent.
+    _checkPermissionChange(mode: mode, userId: userId, groupId: groupId);
+    await _run((client) async {
+      final current = await client
+          .stat(path, followLink: false)
+          .timeout(_timeout);
+      // A server that reports no type cannot prove the path is not a symlink,
+      // so the write is refused instead of guessing what it would touch.
+      if (current.mode == null || current.type == SftpFileType.unknown) {
+        throw StateError('服务器未报告项目类型，已拒绝修改权限');
+      }
+      if (current.isSymbolicLink) {
+        throw StateError('不支持修改符号链接的权限');
+      }
+      // Ownership is sent first and on its own: a chown clears the
+      // setuid/setgid bits, so a mode carried by the same request — or sent
+      // before it — would lose them.
+      if (userId != null) {
+        await client
+            .setStat(path, SftpFileAttrs(userID: userId, groupID: groupId))
+            .timeout(_timeout);
+      }
+      if (mode != null) {
+        await client
+            .setStat(path, SftpFileAttrs(mode: SftpFileMode.value(mode)))
+            .timeout(_timeout);
+      }
+      // The write is only reported as done once the server itself reports the
+      // requested values back on the same path.
+      final updated = await client
+          .stat(path, followLink: false)
+          .timeout(_timeout);
+      if (updated.mode == null || updated.type == SftpFileType.unknown) {
+        throw StateError('服务器未报告项目类型，无法确认权限修改');
+      }
+      if (updated.isSymbolicLink) {
+        throw StateError('权限修改后目标已不是普通项目');
+      }
+      if (mode != null && !_hasPermissions(updated, mode)) {
+        throw StateError('服务器未确认权限已改为 ${_octal(mode)}');
+      }
+      if (userId != null &&
+          (updated.userID != userId || updated.groupID != groupId)) {
+        throw StateError('服务器未确认所有者已改为 $userId:$groupId');
+      }
+    });
+  }
+
+  /// Rejects a permission change SFTP cannot express, before anything is sent.
+  static void _checkPermissionChange({
+    required int? mode,
+    required int? userId,
+    required int? groupId,
+  }) {
+    if (mode == null && userId == null && groupId == null) {
+      throw ArgumentError('没有要修改的权限');
+    }
+    if (mode != null && (mode < 0 || mode > _permissionMask)) {
+      throw ArgumentError('权限位必须在 0..07777 之间');
+    }
+    if ((userId == null) != (groupId == null)) {
+      throw ArgumentError('所有者与用户组必须同时提供');
+    }
+    if (userId != null && (userId < 0 || groupId! < 0)) {
+      throw ArgumentError('所有者与用户组不能是负数');
+    }
+    if (userId != null && (userId > _ownerIdLimit || groupId! > _ownerIdLimit)) {
+      throw ArgumentError('所有者与用户组不能超过 $_ownerIdLimit');
+    }
+  }
 
   @override
   Future<void> writeRange(
@@ -525,7 +627,7 @@ class SftpFiles implements ResumableFileSystem {
   /// does not report counts as unknown, never as confirmed.
   bool _hasPermissions(SftpFileAttrs? attrs, int mode) {
     final current = attrs?.mode?.value;
-    return current != null && (current & 0xfff) == mode;
+    return current != null && (current & _permissionMask) == mode;
   }
 
   /// Requires [path] to carry exactly [mode] as reported by the server.

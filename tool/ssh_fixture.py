@@ -84,26 +84,36 @@ class DirectoryFixture(paramiko.SFTPServerInterface):
     symlinks = {
         "/home/tester/linkdir": "/home/tester/docs",
     }
+    # Only paths that were chowned are listed; everything else belongs to the
+    # default owner, the way a fresh tree on one account would look.
+    owners = {}
+    default_owner = (1000, 1000)
 
     def __init__(self, server, *args, **kwargs):
         super().__init__(server, *args, **kwargs)
         global resume_storage
         if getattr(server, 'resume_mode', False):
             if resume_storage is None:
-                resume_storage = (dict(type(self).entries), dict(type(self).files), dict(type(self).symlinks))
-            server.file_entries, server.file_data, server.file_links = resume_storage
+                resume_storage = (dict(type(self).entries), dict(type(self).files), dict(type(self).symlinks), dict(type(self).owners))
+            server.file_entries, server.file_data, server.file_links, server.file_owners = resume_storage
         if not hasattr(server, 'file_entries'):
             server.file_entries = dict(type(self).entries)
             server.file_data = dict(type(self).files)
             server.file_links = dict(type(self).symlinks)
+            server.file_owners = dict(type(self).owners)
         self.entries, self.files = server.file_entries, server.file_data
         self.symlinks = server.file_links
+        self.owners = server.file_owners
 
     def mode_of(self, path):
         """Current mode of a path; regular files keep the 0600 default."""
         if path in self.entries:
             return self.entries[path]
         return stat.S_IFREG | 0o600
+
+    def owner_of(self, path):
+        """Owner of a path; paths never chowned report the default owner."""
+        return self.owners.get(path, self.default_owner)
 
     def apply_attributes(self, path, attr):
         """Apply SETSTAT/FSETSTAT to the virtual tree, never to the host."""
@@ -112,6 +122,12 @@ class DirectoryFixture(paramiko.SFTPServerInterface):
         mode = self.mode_of(path)
         if getattr(attr, "st_mode", None) is not None:
             mode = stat.S_IFMT(mode) | (attr.st_mode & 0o7777)
+        if attr._flags & attr.FLAG_UIDGID:
+            # UID and GID share one flag on the wire, so both always arrive.
+            self.owners[path] = (attr.st_uid, attr.st_gid)
+            # A chown drops setuid/setgid the way the kernel does, so a mode
+            # carried by the same request cannot keep them.
+            mode &= ~0o6000
         self.entries[path] = mode
         if path in self.files and attr._flags & attr.FLAG_SIZE:
             size = attr.st_size or 0
@@ -153,6 +169,7 @@ class DirectoryFixture(paramiko.SFTPServerInterface):
         if any(posixpath.dirname(name) == path for name in self.entries if name != path):
             return paramiko.SFTP_FAILURE
         del self.entries[path]
+        self.owners.pop(path, None)
         return paramiko.SFTP_OK
 
     def remove(self, path):
@@ -162,6 +179,7 @@ class DirectoryFixture(paramiko.SFTPServerInterface):
         self.files.pop(path, None)
         self.symlinks.pop(path, None)
         self.entries.pop(path, None)
+        self.owners.pop(path, None)
         return paramiko.SFTP_OK
 
     def rename(self, oldpath, newpath):
@@ -173,7 +191,7 @@ class DirectoryFixture(paramiko.SFTPServerInterface):
             return paramiko.SFTP_FAILURE
         if stat.S_ISDIR(self.entries[oldpath]):
             # Match a real SFTP directory rename, including all descendants.
-            for mapping in (self.entries, self.files, self.symlinks):
+            for mapping in (self.entries, self.files, self.symlinks, self.owners):
                 moved = {newpath + name[len(oldpath):]: value
                          for name, value in list(mapping.items())
                          if name == oldpath or name.startswith(oldpath + '/')}
@@ -189,6 +207,9 @@ class DirectoryFixture(paramiko.SFTPServerInterface):
         target = self.symlinks.pop(oldpath, None)
         if target is not None:
             self.symlinks[newpath] = target
+        owner = self.owners.pop(oldpath, None)
+        if owner is not None:
+            self.owners[newpath] = owner
         return paramiko.SFTP_OK
 
     def symlink(self, target_path, path):
@@ -223,6 +244,7 @@ class DirectoryFixture(paramiko.SFTPServerInterface):
                 entry.st_mode = mode
                 entry.st_size = len(self.files.get(name, b''))
                 entry.st_mtime = 1700000002
+                entry.st_uid, entry.st_gid = self.owner_of(name)
                 result.append(entry)
         return result
 
@@ -235,6 +257,7 @@ class DirectoryFixture(paramiko.SFTPServerInterface):
         entry.st_mode = self.mode_of(path)
         entry.st_size = len(self.files.get(path, b''))
         entry.st_mtime = 1700000002
+        entry.st_uid, entry.st_gid = self.owner_of(path)
         return entry
 
     def lstat(self, path):
@@ -245,6 +268,7 @@ class DirectoryFixture(paramiko.SFTPServerInterface):
         entry.st_mode = self.mode_of(path)
         entry.st_size = len(self.files.get(path, b''))
         entry.st_mtime = 1700000002
+        entry.st_uid, entry.st_gid = self.owner_of(path)
         return entry
 
 class Server(paramiko.ServerInterface):
