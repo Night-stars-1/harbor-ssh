@@ -46,8 +46,8 @@ fallback implementations; the CPU improvement above does not apply to AES.
 ```text
 flutter test test/openssh_chacha20_poly1305_test.dart test/ssh_channel_window_test.dart
 flutter test test/download_stream_test.dart test/ssh_algorithms_test.dart
-dart compile exe tool/ssh_crypto_benchmark.dart -o build/ssh_crypto_benchmark.exe
-build/ssh_crypto_benchmark.exe
+dart build cli -t tool/ssh_crypto_benchmark.dart -o build/ssh_crypto_benchmark
+build/ssh_crypto_benchmark/bundle/bin/ssh_crypto_benchmark.exe
 ```
 
 The crypto tests cover the upstream fixed packet vector, exact ciphertext
@@ -55,3 +55,19 @@ agreement with the original engine, boundary sequence numbers, unaligned
 input views, tampered bytes, wrong sequence numbers and key/length validation.
 The window tests cover grant timing, bounded grant frequency, pause/resume,
 late subscription, small-window liveness and rejection of invalid packets.
+
+## Native ChaCha20-Poly1305 — 2026-10-16
+
+On a 2 ms LAN to an Ubuntu OpenSSH 10.2 server (chacha20-poly1305 in both
+directions), the pure-Dart transport was CPU-bound: a raw SSH channel with no
+SFTP reached 34.2 MiB/s and Harbor's SFTP path to a local file 29.4 MiB/s.
+Replacing the packet cipher with libsodium's SIMD primitives through FFI (see
+`third_party/dartssh2/HARBOR_PATCHES.md`) gave:
+
+| Path, 1 GiB of the same OTA ZIP, Windows x64 AOT | Before | After |
+| --- | --- | --- |
+| Raw SSH channel (`head -c 1G /dev/zero`) | 34.2 MiB/s | 93.5 MiB/s |
+| `SftpFiles.readRange` into a local file | 29.4 MiB/s | 92.2 MiB/s |
+
+The packet open routine alone measured about 916 MiB/s (AVX2) on the same
+machine, so the cipher is no longer the bottleneck at this link speed.

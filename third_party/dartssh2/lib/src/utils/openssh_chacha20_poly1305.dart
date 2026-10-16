@@ -5,6 +5,8 @@ import 'package:cryptography/dart.dart' as crypto;
 
 import 'package:dartssh2/src/utils/cipher_ext.dart';
 import 'package:dartssh2/src/utils/int.dart';
+import 'package:dartssh2/src/utils/native_chachapoly_stub.dart'
+    if (dart.library.ffi) 'package:dartssh2/src/utils/native_chachapoly.dart';
 import 'package:pointycastle/export.dart';
 
 /// The packet cipher defined by `chacha20-poly1305@openssh.com`.
@@ -12,6 +14,10 @@ import 'package:pointycastle/export.dart';
 /// This is not the RFC 8439 AEAD construction. OpenSSH uses two independent
 /// ChaCha20 keys, encrypts the packet length separately, and authenticates the
 /// raw encrypted length and body with Poly1305.
+///
+/// Packets go through libsodium's SIMD ChaCha20 and Poly1305 when the native
+/// asset is bundled (see `hook/build.dart`); the Dart implementation below
+/// is the fallback and the reference the native path is tested against.
 class OpenSSHChaCha20Poly1305 {
   static const keySize = 64;
   static const ivSize = 0;
@@ -19,7 +25,12 @@ class OpenSSHChaCha20Poly1305 {
   static const tagSize = 16;
   static const encryptedLengthSize = 4;
 
-  OpenSSHChaCha20Poly1305(Uint8List keyMaterial) {
+  /// Whether a bundled native implementation is available on this platform.
+  static bool get nativeAvailable => nativeChaChaPolyImplementations != null;
+
+  /// [preferNative] selects the native implementation when it is available.
+  OpenSSHChaCha20Poly1305(Uint8List keyMaterial, {bool preferNative = true})
+      : _native = preferNative && nativeAvailable {
     if (keyMaterial.length != keySize) {
       throw ArgumentError.value(
         keyMaterial.length,
@@ -28,11 +39,14 @@ class OpenSSHChaCha20Poly1305 {
       );
     }
 
+    _key = Uint8List.fromList(keyMaterial);
     // PROTOCOL.chacha20poly1305 names these K_2 and K_1 respectively.
-    _payloadKey = Uint8List.fromList(keyMaterial.sublist(0, 32));
-    _lengthKey = Uint8List.fromList(keyMaterial.sublist(32, 64));
+    _payloadKey = Uint8List.sublistView(_key, 0, 32);
+    _lengthKey = Uint8List.sublistView(_key, 32, 64);
   }
 
+  final bool _native;
+  late final Uint8List _key;
   late final Uint8List _payloadKey;
   late final Uint8List _lengthKey;
 
@@ -44,6 +58,13 @@ class OpenSSHChaCha20Poly1305 {
         'packet',
         'Packet must include a four-byte length field',
       );
+    }
+
+    if (_native) {
+      _checkSequence(sequenceNumber);
+      final output = Uint8List(packet.length + tagSize);
+      nativeChaChaPolySeal(_key, sequenceNumber, packet, output);
+      return output;
     }
 
     final nonce = _nonce(sequenceNumber);
@@ -92,6 +113,11 @@ class OpenSSHChaCha20Poly1305 {
       );
     }
 
+    if (_native) {
+      _checkSequence(sequenceNumber);
+      return nativeChaChaPolyLength(_key, sequenceNumber, encryptedLength);
+    }
+
     final plaintext = _cryptLength(
       Uint8List.sublistView(encryptedLength, 0, encryptedLengthSize),
       _nonce(sequenceNumber),
@@ -114,6 +140,23 @@ class OpenSSHChaCha20Poly1305 {
     }
 
     final ciphertextLength = packet.length - tagSize;
+    if (_native) {
+      _checkSequence(sequenceNumber);
+      final output = Uint8List(ciphertextLength);
+      if (!nativeChaChaPolyOpen(
+        _key,
+        sequenceNumber,
+        packet,
+        ciphertextLength,
+        output,
+      )) {
+        throw InvalidCipherTextException(
+          'OpenSSH ChaCha20-Poly1305 authentication failed',
+        );
+      }
+      return output;
+    }
+
     final encryptedLength = Uint8List.sublistView(
       packet,
       0,
@@ -186,7 +229,9 @@ class OpenSSHChaCha20Poly1305 {
     return mac.finish();
   }
 
-  Uint8List _nonce(int sequenceNumber) {
+  /// The native routines take the sequence number as a uint32, so it has to be
+  /// rejected before the FFI boundary would silently truncate it.
+  void _checkSequence(int sequenceNumber) {
     if (sequenceNumber < 0 || sequenceNumber > 0xffffffff) {
       throw RangeError.range(
         sequenceNumber,
@@ -195,6 +240,10 @@ class OpenSSHChaCha20Poly1305 {
         'sequenceNumber',
       );
     }
+  }
+
+  Uint8List _nonce(int sequenceNumber) {
+    _checkSequence(sequenceNumber);
 
     final nonce = Uint8List(8);
     // Two 32-bit writes rather than setUint64, which throws when compiled

@@ -17,163 +17,174 @@ import 'package:pointycastle/export.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 void main() {
-  group('OpenSSHChaCha20Poly1305', () {
-    final key = Uint8List.fromList(List<int>.generate(64, (i) => i));
-    // Fixed packet vector derived from OpenSSH 10.5's cipher-chachapoly.c:
-    // K_2 is bytes 0..31, K_1 is bytes 32..63, and seqnr is 0x01020304.
-    final plaintext = _bytes(
-      '00000010'
-      '04'
-      '68656c6c6f20776f726c64'
-      '00010203',
-    );
-    final ciphertext = _bytes(
-      'bc79806b'
-      '92aa79deb77e06debb1f4898a8415877'
-      '75aca6b6c01a2037e45c6712ba973d9b',
-    );
-    const sequenceNumber = 0x01020304;
+  test('bundles the native implementation on this platform', () {
+    // The VM test runner builds code assets, so a missing native library here
+    // means the build hook failed to produce it.
+    expect(OpenSSHChaCha20Poly1305.nativeAvailable, isTrue);
+  });
 
-    test('matches the OpenSSH packet construction', () {
-      final cipher = OpenSSHChaCha20Poly1305(key);
+  for (final native in [true, false]) {
+    OpenSSHChaCha20Poly1305 cipherFor(Uint8List key) =>
+        OpenSSHChaCha20Poly1305(key, preferNative: native);
 
-      expect(cipher.encryptPacket(plaintext, sequenceNumber), ciphertext);
-      expect(cipher.decryptPacketLength(ciphertext, sequenceNumber), 16);
-      expect(cipher.decryptPacket(ciphertext, sequenceNumber), plaintext);
-    });
+    group('OpenSSHChaCha20Poly1305 (${native ? 'native' : 'Dart'})', () {
+      final key = Uint8List.fromList(List<int>.generate(64, (i) => i));
+      // Fixed packet vector derived from OpenSSH 10.5's cipher-chachapoly.c:
+      // K_2 is bytes 0..31, K_1 is bytes 32..63, and seqnr is 0x01020304.
+      final plaintext = _bytes(
+        '00000010'
+        '04'
+        '68656c6c6f20776f726c64'
+        '00010203',
+      );
+      final ciphertext = _bytes(
+        'bc79806b'
+        '92aa79deb77e06debb1f4898a8415877'
+        '75aca6b6c01a2037e45c6712ba973d9b',
+      );
+      const sequenceNumber = 0x01020304;
 
-    test('copies key material on construction', () {
-      final mutableKey = Uint8List.fromList(key);
-      final cipher = OpenSSHChaCha20Poly1305(mutableKey);
-      mutableKey.fillRange(0, mutableKey.length, 0xff);
+      test('matches the OpenSSH packet construction', () {
+        final cipher = cipherFor(key);
 
-      expect(cipher.encryptPacket(plaintext, sequenceNumber), ciphertext);
-    });
+        expect(cipher.encryptPacket(plaintext, sequenceNumber), ciphertext);
+        expect(cipher.decryptPacketLength(ciphertext, sequenceNumber), 16);
+        expect(cipher.decryptPacket(ciphertext, sequenceNumber), plaintext);
+      });
 
-    test('rejects changes to encrypted length, body, or tag', () {
-      final cipher = OpenSSHChaCha20Poly1305(key);
+      test('copies key material on construction', () {
+        final mutableKey = Uint8List.fromList(key);
+        final cipher = cipherFor(mutableKey);
+        mutableKey.fillRange(0, mutableKey.length, 0xff);
 
-      for (final index in [0, 4, ciphertext.length - 1]) {
-        final tampered = Uint8List.fromList(ciphertext);
-        tampered[index] ^= 1;
+        expect(cipher.encryptPacket(plaintext, sequenceNumber), ciphertext);
+      });
 
-        expect(
-          () => cipher.decryptPacket(tampered, sequenceNumber),
-          throwsA(isA<InvalidCipherTextException>()),
-        );
-      }
-    });
+      test('rejects changes to encrypted length, body, or tag', () {
+        final cipher = cipherFor(key);
 
-    test('uses the packet sequence number as part of the nonce', () {
-      final cipher = OpenSSHChaCha20Poly1305(key);
+        for (final index in [0, 4, ciphertext.length - 1]) {
+          final tampered = Uint8List.fromList(ciphertext);
+          tampered[index] ^= 1;
 
-      final first = cipher.encryptPacket(plaintext, 0);
-      final second = cipher.encryptPacket(plaintext, 1);
+          expect(
+            () => cipher.decryptPacket(tampered, sequenceNumber),
+            throwsA(isA<InvalidCipherTextException>()),
+          );
+        }
+      });
 
-      expect(second, isNot(first));
-      expect(cipher.decryptPacket(first, 0), plaintext);
-      expect(cipher.decryptPacket(second, 1), plaintext);
-    });
+      test('uses the packet sequence number as part of the nonce', () {
+        final cipher = cipherFor(key);
 
-    test(
-      'matches the original engine across packet and sequence boundaries',
-      () {
-        final random = Random(20260928);
-        for (final length in [
-          0,
-          1,
-          7,
-          8,
-          15,
-          16,
-          31,
-          32,
-          63,
-          64,
-          65,
-          32768,
-          34996,
-        ]) {
-          for (final sequence in [
+        final first = cipher.encryptPacket(plaintext, 0);
+        final second = cipher.encryptPacket(plaintext, 1);
+
+        expect(second, isNot(first));
+        expect(cipher.decryptPacket(first, 0), plaintext);
+        expect(cipher.decryptPacket(second, 1), plaintext);
+      });
+
+      test(
+        'matches the original engine across packet and sequence boundaries',
+        () {
+          final random = Random(20260928);
+          for (final length in [
             0,
             1,
-            255,
-            256,
-            65535,
-            65536,
-            0x7fffffff,
-            0xffffffff,
+            7,
+            8,
+            15,
+            16,
+            31,
+            32,
+            63,
+            64,
+            65,
+            32768,
+            34996,
           ]) {
-            final key = Uint8List.fromList(
-              List.generate(64, (_) => random.nextInt(256)),
-            );
-            final packet = Uint8List.fromList(
-              List.generate(length + 4, (_) => random.nextInt(256)),
-            );
-            ByteData.sublistView(packet).setUint32(0, length);
-            final cipher = OpenSSHChaCha20Poly1305(key);
-            final reference = _referenceEncrypt(key, packet, sequence);
-            expect(cipher.encryptPacket(packet, sequence), reference);
-            expect(cipher.decryptPacketLength(reference, sequence), length);
-            expect(cipher.decryptPacket(reference, sequence), packet);
-            expect(
-              () => cipher.decryptPacket(reference, sequence ^ 1),
-              throwsA(isA<InvalidCipherTextException>()),
-            );
+            for (final sequence in [
+              0,
+              1,
+              255,
+              256,
+              65535,
+              65536,
+              0x7fffffff,
+              0xffffffff,
+            ]) {
+              final key = Uint8List.fromList(
+                List.generate(64, (_) => random.nextInt(256)),
+              );
+              final packet = Uint8List.fromList(
+                List.generate(length + 4, (_) => random.nextInt(256)),
+              );
+              ByteData.sublistView(packet).setUint32(0, length);
+              final cipher = cipherFor(key);
+              final reference = _referenceEncrypt(key, packet, sequence);
+              expect(cipher.encryptPacket(packet, sequence), reference);
+              expect(cipher.decryptPacketLength(reference, sequence), length);
+              expect(cipher.decryptPacket(reference, sequence), packet);
+              expect(
+                () => cipher.decryptPacket(reference, sequence ^ 1),
+                throwsA(isA<InvalidCipherTextException>()),
+              );
+            }
           }
-        }
-      },
-    );
+        },
+      );
 
-    test('accepts unaligned views and rejects every changed packet byte', () {
-      final storage = Uint8List(69)..setRange(3, 67, key);
-      final cipher = OpenSSHChaCha20Poly1305(
-        Uint8List.sublistView(storage, 3, 67),
-      );
-      final packetStorage = Uint8List(plaintext.length + 7)
-        ..setRange(3, 3 + plaintext.length, plaintext);
-      expect(
-        cipher.encryptPacket(
-          Uint8List.sublistView(packetStorage, 3, 3 + plaintext.length),
-          sequenceNumber,
-        ),
-        ciphertext,
-      );
-      final encryptedStorage = Uint8List(ciphertext.length + 5)
-        ..setRange(1, 1 + ciphertext.length, ciphertext);
-      expect(
-        cipher.decryptPacket(
-          Uint8List.sublistView(encryptedStorage, 1, 1 + ciphertext.length),
-          sequenceNumber,
-        ),
-        plaintext,
-      );
-      for (var i = 0; i < ciphertext.length; i++) {
-        final changed = Uint8List.fromList(ciphertext)..[i] ^= 0x80;
-        expect(
-          () => cipher.decryptPacket(changed, sequenceNumber),
-          throwsA(isA<InvalidCipherTextException>()),
+      test('accepts unaligned views and rejects every changed packet byte', () {
+        final storage = Uint8List(69)..setRange(3, 67, key);
+        final cipher = cipherFor(
+          Uint8List.sublistView(storage, 3, 67),
         );
-      }
-    });
+        final packetStorage = Uint8List(plaintext.length + 7)
+          ..setRange(3, 3 + plaintext.length, plaintext);
+        expect(
+          cipher.encryptPacket(
+            Uint8List.sublistView(packetStorage, 3, 3 + plaintext.length),
+            sequenceNumber,
+          ),
+          ciphertext,
+        );
+        final encryptedStorage = Uint8List(ciphertext.length + 5)
+          ..setRange(1, 1 + ciphertext.length, ciphertext);
+        expect(
+          cipher.decryptPacket(
+            Uint8List.sublistView(encryptedStorage, 1, 1 + ciphertext.length),
+            sequenceNumber,
+          ),
+          plaintext,
+        );
+        for (var i = 0; i < ciphertext.length; i++) {
+          final changed = Uint8List.fromList(ciphertext)..[i] ^= 0x80;
+          expect(
+            () => cipher.decryptPacket(changed, sequenceNumber),
+            throwsA(isA<InvalidCipherTextException>()),
+          );
+        }
+      });
 
-    test('validates key, packet, and sequence number lengths', () {
-      expect(() => OpenSSHChaCha20Poly1305(Uint8List(63)), throwsArgumentError);
+      test('validates key, packet, and sequence number lengths', () {
+        expect(() => cipherFor(Uint8List(63)), throwsArgumentError);
 
-      final cipher = OpenSSHChaCha20Poly1305(key);
-      expect(() => cipher.encryptPacket(Uint8List(3), 0), throwsArgumentError);
-      expect(
-        () => cipher.decryptPacketLength(Uint8List(3), 0),
-        throwsArgumentError,
-      );
-      expect(() => cipher.decryptPacket(Uint8List(19), 0), throwsArgumentError);
-      expect(() => cipher.encryptPacket(plaintext, -1), throwsRangeError);
-      expect(
-        () => cipher.encryptPacket(plaintext, 0x100000000),
-        throwsRangeError,
-      );
+        final cipher = cipherFor(key);
+        expect(() => cipher.encryptPacket(Uint8List(3), 0), throwsArgumentError);
+        expect(
+          () => cipher.decryptPacketLength(Uint8List(3), 0),
+          throwsArgumentError,
+        );
+        expect(() => cipher.decryptPacket(Uint8List(19), 0), throwsArgumentError);
+        expect(() => cipher.encryptPacket(plaintext, -1), throwsRangeError);
+        expect(
+          () => cipher.encryptPacket(plaintext, 0x100000000),
+          throwsRangeError,
+        );
+      });
     });
-  });
+  }
 }
 
 Uint8List _bytes(String value) => Uint8List.fromList([

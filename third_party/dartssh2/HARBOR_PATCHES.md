@@ -26,6 +26,29 @@ Regression tests live in the application test suite:
 vector, tampering rejection, nonce and key validation plus differential tests
 against the original PointyCastle construction.
 
+## Native ChaCha20-Poly1305 (2026-10-16)
+
+`hook/build.dart` compiles `native/harbor_chachapoly.c` together with a
+subset of libsodium 1.0.22-stable (ChaCha20 reference/SSSE3/AVX2/AVX-512,
+Poly1305 donna/SSE2, `crypto_verify_16`, CPU detection) into the
+`package:dartssh2/harbor_chachapoly` code asset. The release tarball was
+verified with libsodium's published minisign key before vendoring; its
+SHA-256 was
+`8622a647cac0ef7343e1e476a70c9298f49e37f5deca21c4bbf7565dd1916017`.
+Only the files under `native/libsodium` are used; they are unmodified.
+
+`harbor_chachapoly.c` performs the same OpenSSH construction as the Dart
+code above (separate length key, counter-zero Poly1305 key, counter-one
+body). The tag is verified with libsodium's constant-time comparison before
+any plaintext is written. `utils.c` is not linked; the file supplies the
+`sodium_memzero` the primitives use to wipe stack state.
+
+`OpenSSHChaCha20Poly1305` uses the native routines when the asset is
+present and keeps the Dart implementation as the fallback (web, or a build
+without the asset). `test/openssh_chacha20_poly1305_test.dart` runs every
+existing vector, boundary and tampering case against both implementations
+and checks that the VM test build bundles the native library.
+
 ## Timely receive-window replenishment (2026-09-28)
 
 `lib/src/ssh_channel.dart` now replenishes the receive window at the earlier
