@@ -6,6 +6,7 @@ import 'package:dartssh2/dartssh2.dart';
 
 import '../domain/remote_file.dart';
 import 'download_stream.dart';
+import 'upload_stream.dart';
 import 'public_key_install.dart';
 
 /// Each operation owns its channel, independently of the terminal/completion.
@@ -213,13 +214,13 @@ class SftpFiles implements ResumableFileSystem, RemoteFilePermissions {
                 SftpFileOpenMode.exclusive,
           )
           .timeout(_timeout);
-      var offset = 0;
-      await for (final chunk in source.timeout(_timeout)) {
-        cancellation.check();
-        await file.writeBytes(chunk, offset: offset).timeout(_timeout);
-        offset += chunk.length;
-        onProgress(offset);
-      }
+      await _writeStream(
+        file,
+        source,
+        offset: 0,
+        cancellation: cancellation,
+        onProgress: onProgress,
+      );
       cancellation.check();
       await file.close().timeout(_timeout);
       complete = true;
@@ -358,7 +359,8 @@ class SftpFiles implements ResumableFileSystem, RemoteFilePermissions {
     if (userId != null && (userId < 0 || groupId! < 0)) {
       throw ArgumentError('所有者与用户组不能是负数');
     }
-    if (userId != null && (userId > _ownerIdLimit || groupId! > _ownerIdLimit)) {
+    if (userId != null &&
+        (userId > _ownerIdLimit || groupId! > _ownerIdLimit)) {
       throw ArgumentError('所有者与用户组不能超过 $_ownerIdLimit');
     }
   }
@@ -382,13 +384,13 @@ class SftpFiles implements ResumableFileSystem, RemoteFilePermissions {
         throw StateError('传输缓存已变化，无法续传');
       }
       await file.setStat(SftpFileAttrs(size: offset)).timeout(_timeout);
-      var written = offset;
-      await for (final chunk in source.timeout(_timeout)) {
-        cancellation.check();
-        await file.writeBytes(chunk, offset: written).timeout(_timeout);
-        written += chunk.length;
-        onProgress(written);
-      }
+      await _writeStream(
+        file,
+        source,
+        offset: offset,
+        cancellation: cancellation,
+        onProgress: onProgress,
+      );
       cancellation.check();
     } finally {
       await file.close().timeout(const Duration(seconds: 2));
@@ -401,6 +403,27 @@ class SftpFiles implements ResumableFileSystem, RemoteFilePermissions {
       throw StateError('只能续传普通文件');
     }
   }
+
+  /// One WRITE request per piece; [writeUploadStream] keeps many in flight.
+  Future<void> _writeStream(
+    SftpFile file,
+    Stream<Uint8List> source, {
+    required int offset,
+    required TransferCancellation cancellation,
+    required void Function(int bytes) onProgress,
+  }) => writeUploadStream(
+    source.timeout(_timeout),
+    (data, offset) => file.writeBytes(
+      data,
+      offset: offset,
+      chunkSize: data.length,
+      maxPendingRequests: 1,
+    ),
+    offset: offset,
+    cancellation: cancellation,
+    onProgress: onProgress,
+    timeout: _timeout,
+  );
 
   @override
   Future<void> readRange(

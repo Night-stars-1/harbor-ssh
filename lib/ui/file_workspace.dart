@@ -1,5 +1,6 @@
 import 'dart:async';
 
+import 'package:desktop_drop/desktop_drop.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/gestures.dart';
 import 'package:flutter/services.dart';
@@ -22,6 +23,10 @@ class FileWorkspace extends StatefulWidget {
     this.showTitle = false,
     this.initializeLocal = true,
     this.onSetBookmark,
+    this.localBookmarks = const [],
+    this.onSetLocalBookmark,
+    this.sameLocalPath = _samePath,
+    this.acceptExternalDrops = true,
   });
   final FileWorkspaceModel model;
   final List<Host> hosts;
@@ -30,6 +35,9 @@ class FileWorkspace extends StatefulWidget {
   final bool showTitle;
   final bool initializeLocal;
 
+  /// Disabled while the files page is kept mounted behind another page.
+  final bool acceptExternalDrops;
+
   /// 设置单个 SFTP 目录的书签状态；为空时不显示书签按钮。
   final Future<void> Function(
     String hostId,
@@ -37,6 +45,17 @@ class FileWorkspace extends StatefulWidget {
     required bool saved,
   })?
   onSetBookmark;
+
+  /// 本机文件夹书签；只保存在本机，与主机的 SFTP 书签分开。
+  final List<String> localBookmarks;
+
+  /// 设置单个本地目录的书签状态；为空时本地标签页不显示书签按钮。
+  final Future<void> Function(String path, {required bool saved})?
+  onSetLocalBookmark;
+
+  /// 本地路径比较；Windows 上应忽略大小写。
+  final bool Function(String a, String b) sameLocalPath;
+  static bool _samePath(String a, String b) => a == b;
   @override
   State<FileWorkspace> createState() => _FileWorkspaceState();
 }
@@ -44,8 +63,10 @@ class FileWorkspace extends StatefulWidget {
 class _FileWorkspaceState extends State<FileWorkspace> {
   bool _adding = false;
   bool _editing = false;
-  bool _creating = false;
+  bool _naming = false;
   bool _permissionsBusy = false;
+  bool _externalDropBusy = false;
+  String? _externalDragTabId;
   final _reconnecting = <String>{};
   final _searching = <String>{};
   final _tabKeys = <String, GlobalKey>{};
@@ -417,6 +438,8 @@ class _FileWorkspaceState extends State<FileWorkspace> {
     final pane = model.panes[side];
     final tab = unified ? model.activeTab : pane.active;
     final colors = Theme.of(context).colorScheme;
+    final externalEnabled = _canAcceptExternalDrop(tab);
+    final externalHover = externalEnabled && _externalDragTabId == tab?.id;
     return Padding(
       padding: EdgeInsets.fromLTRB(
         side == 0 ? 8 : 0,
@@ -424,61 +447,175 @@ class _FileWorkspaceState extends State<FileWorkspace> {
         side == 1 || unified ? 8 : 0,
         8,
       ),
-      child: DragTarget<FileDragData>(
-        key: ValueKey('file-drop-panel-$side'),
-        onWillAcceptWithDetails: (details) => model.canDrop(details.data, tab),
-        onAcceptWithDetails: (details) {
-          if (tab != null) {
-            unawaited(_dropWithConfirmation(details.data, tab));
-          }
+      child: DropTarget(
+        key: ValueKey('file-external-drop-panel-$side'),
+        enable: externalEnabled,
+        onDragEntered: (_) => setState(() => _externalDragTabId = tab!.id),
+        onDragExited: (_) {
+          final hovered = _externalDragTabId;
+          // desktop_drop also calls this while didUpdateWidget disables a
+          // hovered target. Its ancestor cannot rebuild in the same frame.
+          WidgetsBinding.instance.addPostFrameCallback((_) {
+            if (mounted && _externalDragTabId == hovered) {
+              setState(() => _externalDragTabId = null);
+            }
+          });
+          WidgetsBinding.instance.ensureVisualUpdate();
         },
-        builder: (context, candidates, rejected) => Material(
-          key: ValueKey('file-panel-$side'),
-          color: candidates.isNotEmpty
-              ? colors.secondaryContainer.withValues(alpha: .4)
-              : colors.surfaceContainerLow,
-          shape: HarborShapes.superellipse().copyWith(
-            side: BorderSide(
-              color: candidates.isNotEmpty
-                  ? colors.primary
-                  : Colors.transparent,
-              width: 2,
+        onDragDone: (details) {
+          setState(() => _externalDragTabId = null);
+          if (tab != null) unawaited(_dropExternalFiles(details.files, tab));
+        },
+        child: DragTarget<FileDragData>(
+          key: ValueKey('file-drop-panel-$side'),
+          onWillAcceptWithDetails: (details) =>
+              model.canDrop(details.data, tab),
+          onAcceptWithDetails: (details) {
+            if (tab != null) {
+              unawaited(_dropWithConfirmation(details.data, tab));
+            }
+          },
+          builder: (context, candidates, rejected) => Material(
+            key: ValueKey('file-panel-$side'),
+            color: candidates.isNotEmpty || externalHover
+                ? colors.secondaryContainer.withValues(alpha: .4)
+                : colors.surfaceContainerLow,
+            shape: HarborShapes.superellipse().copyWith(
+              side: BorderSide(
+                color: candidates.isNotEmpty || externalHover
+                    ? colors.primary
+                    : Colors.transparent,
+                width: 2,
+              ),
             ),
-          ),
-          clipBehavior: Clip.antiAlias,
-          child: Column(
-            children: [
-              SizedBox(
-                key: ValueKey('file-tab-header-$side'),
-                height: 48,
-                child: Row(
-                  children: [
-                    Expanded(
-                      child: (unified ? model.tabs : pane.tabs).isEmpty
-                          ? Padding(
-                              padding: const EdgeInsets.only(left: 16),
-                              child: Text(
-                                '添加标签',
-                                style: Theme.of(context).textTheme.labelLarge,
-                              ),
-                            )
-                          : _tabs(side, unified: unified),
-                    ),
-                    _addMenu(side),
-                    const SizedBox(width: 4),
-                  ],
+            clipBehavior: Clip.antiAlias,
+            child: Column(
+              children: [
+                SizedBox(
+                  key: ValueKey('file-tab-header-$side'),
+                  height: 48,
+                  child: Row(
+                    children: [
+                      Expanded(
+                        child: (unified ? model.tabs : pane.tabs).isEmpty
+                            ? Padding(
+                                padding: const EdgeInsets.only(left: 16),
+                                child: Text(
+                                  '添加标签',
+                                  style: Theme.of(context).textTheme.labelLarge,
+                                ),
+                              )
+                            : _tabs(side, unified: unified),
+                      ),
+                      _addMenu(side),
+                      const SizedBox(width: 4),
+                    ],
+                  ),
                 ),
-              ),
-              Expanded(
-                child: tab == null
-                    ? _emptyPanel(side)
-                    : _browser(side, tab, clipboardMode: unified),
-              ),
-            ],
+                Expanded(
+                  child: tab == null
+                      ? _emptyPanel(side)
+                      : _browser(side, tab, clipboardMode: unified),
+                ),
+              ],
+            ),
           ),
         ),
       ),
     );
+  }
+
+  bool _canAcceptExternalDrop(FileLocationTab? tab) =>
+      widget.acceptExternalDrops &&
+      (ModalRoute.of(context)?.isCurrent ?? true) &&
+      !_externalDropBusy &&
+      !_editing &&
+      !_naming &&
+      !_permissionsBusy &&
+      tab != null &&
+      !tab.isLocal &&
+      model.canAcceptExternalDrop(tab);
+
+  Future<void> _dropExternalFiles(
+    List<DropItem> items,
+    FileLocationTab target,
+  ) async {
+    if (!_canAcceptExternalDrop(target) || items.isEmpty) return;
+    final owner = model;
+    final directory = target.path;
+    final scopes = <Uint8List>[];
+    FileDragData? data;
+    // The transfer owns these permissions while paused; only a terminal
+    // success/discard releases them. Preparation failures release immediately.
+    Future<void> releaseScopes() async {
+      final held = List<Uint8List>.of(scopes);
+      scopes.clear();
+      await Future.wait([
+        for (final bookmark in held.reversed)
+          DesktopDrop.instance.stopAccessingSecurityScopedResource(
+            bookmark: bookmark,
+          ),
+      ]);
+    }
+
+    setState(() => _externalDropBusy = true);
+    try {
+      for (final item in items) {
+        final bookmark = item.extraAppleBookmark;
+        if (bookmark != null && bookmark.isNotEmpty) {
+          final granted = await DesktopDrop.instance
+              .startAccessingSecurityScopedResource(bookmark: bookmark);
+          if (!granted) throw StateError('无法读取拖入的本地项目：${item.name}');
+          scopes.add(bookmark);
+        }
+      }
+      final prepared = await owner.prepareExternalDrop([
+        for (final item in items) item.path,
+      ], release: releaseScopes);
+      data = prepared;
+      // Do not redirect a drop if navigation/connection changed while local
+      // metadata or macOS permissions were being read.
+      if (!mounted ||
+          !identical(model, owner) ||
+          !widget.acceptExternalDrops ||
+          target.path != directory ||
+          !owner.canDrop(prepared, target)) {
+        return;
+      }
+      final overwriteConflicts = await _confirmOverwrite(prepared, target);
+      if (overwriteConflicts == null ||
+          !mounted ||
+          !identical(model, owner) ||
+          !widget.acceptExternalDrops ||
+          target.path != directory) {
+        return;
+      }
+      await owner.drop(
+        prepared,
+        target,
+        overwriteConflicts: overwriteConflicts,
+      );
+    } catch (error) {
+      if (mounted) {
+        ScaffoldMessenger.of(context)
+            .showSnackBar(SnackBar(content: Text(fileError(error))));
+      }
+    } finally {
+      try {
+        if (data == null) {
+          await releaseScopes();
+        } else {
+          owner.releaseExternalDrop(data);
+        }
+      } catch (error) {
+        if (mounted) {
+          ScaffoldMessenger.of(context)
+              .showSnackBar(SnackBar(content: Text(fileError(error))));
+        }
+      } finally {
+        if (mounted) setState(() => _externalDropBusy = false);
+      }
+    }
   }
 
   Future<List<RemoteFile>?> _confirmOverwrite(
@@ -695,9 +832,9 @@ class _FileWorkspaceState extends State<FileWorkspace> {
                 });
               },
             ),
-            if (!tab.isLocal &&
-                tab.session != null &&
-                widget.onSetBookmark != null)
+            if (tab.isLocal
+                ? widget.onSetLocalBookmark != null
+                : tab.session != null && widget.onSetBookmark != null)
               _bookmarkMenu(tab, enabled, extent),
             button(
               Icons.refresh_rounded,
@@ -843,11 +980,15 @@ class _FileWorkspaceState extends State<FileWorkspace> {
   }
 
   List<String> _bookmarks(FileLocationTab tab) {
+    if (tab.isLocal) return widget.localBookmarks;
     final id = tab.session!.host.id;
     return (widget.hosts.where((host) => host.id == id).firstOrNull ??
             tab.session!.host)
         .sftpBookmarks;
   }
+
+  bool _samePath(FileLocationTab tab, String a, String b) =>
+      tab.isLocal ? widget.sameLocalPath(a, b) : a == b;
 
   Future<void> _setBookmark(
     FileLocationTab tab,
@@ -855,7 +996,11 @@ class _FileWorkspaceState extends State<FileWorkspace> {
     required bool saved,
   }) async {
     try {
-      await widget.onSetBookmark!(tab.session!.host.id, path, saved: saved);
+      if (tab.isLocal) {
+        await widget.onSetLocalBookmark!(path, saved: saved);
+      } else {
+        await widget.onSetBookmark!(tab.session!.host.id, path, saved: saved);
+      }
     } catch (e) {
       if (mounted) {
         ScaffoldMessenger.of(context)
@@ -866,7 +1011,7 @@ class _FileWorkspaceState extends State<FileWorkspace> {
 
   Widget _bookmarkMenu(FileLocationTab tab, bool enabled, double extent) {
     final bookmarks = _bookmarks(tab);
-    final marked = bookmarks.contains(tab.path);
+    final marked = bookmarks.any((path) => _samePath(tab, path, tab.path));
     final colors = Theme.of(context).colorScheme;
     return PopupMenuButton<(String, String)>(
       key: ValueKey('file-bookmarks-${tab.id}'),
@@ -924,11 +1069,11 @@ class _FileWorkspaceState extends State<FileWorkspace> {
             child: Row(
               children: [
                 Icon(
-                  path == tab.path
+                  _samePath(tab, path, tab.path)
                       ? Icons.folder_rounded
                       : Icons.folder_outlined,
                   size: 20,
-                  color: path == tab.path ? colors.primary : null,
+                  color: _samePath(tab, path, tab.path) ? colors.primary : null,
                 ),
                 const SizedBox(width: 12),
                 Expanded(
@@ -992,13 +1137,14 @@ class _FileWorkspaceState extends State<FileWorkspace> {
     RemoteFile file,
     Offset position,
   ) async {
-    if (_editing || _creating || _permissionsBusy) return;
+    if (_editing || _naming || _permissionsBusy) return;
     if (!tab.selected.contains(file.path)) tab.select(file);
     final data = model.dragData(tab, file);
     final deletable = model.canDelete(data);
     final editable =
         deletable && data.files.length == 1 && _canEditRemoteText(tab, file);
     final creatable = model.canCreate(tab);
+    final renamable = model.canRename(tab, file);
     final permissions = model.canSetPermissions(tab, file);
     final overlay =
         Overlay.of(context).context.findRenderObject()! as RenderBox;
@@ -1061,16 +1207,29 @@ class _FileWorkspaceState extends State<FileWorkspace> {
           child: Row(
             mainAxisSize: MainAxisSize.min,
             children: [
-              Icon(
-                Icons.content_copy_rounded,
-                size: 20,
-                color: colors.primary,
-              ),
+              Icon(Icons.content_copy_rounded, size: 20, color: colors.primary),
               const SizedBox(width: 10),
               const Text('复制路径'),
             ],
           ),
         ),
+        if (renamable)
+          HarborPopupMenuItem<Object>(
+            key: const ValueKey('rename-entry'),
+            value: 'rename',
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Icon(
+                  Icons.drive_file_rename_outline_rounded,
+                  size: 20,
+                  color: colors.primary,
+                ),
+                const SizedBox(width: 10),
+                const Text('重命名'),
+              ],
+            ),
+          ),
         if (permissions) ...[
           HarborPopupMenuItem<Object>(
             key: const ValueKey('set-entry-permissions'),
@@ -1132,6 +1291,9 @@ class _FileWorkspaceState extends State<FileWorkspace> {
         return;
       case 'copy-path':
         await _copyPath(tab, file);
+        return;
+      case 'rename':
+        await _renameEntry(tab, file);
         return;
       case 'permissions':
         await _openPermissions(tab, file, _PermissionSection.mode);
@@ -1205,14 +1367,14 @@ class _FileWorkspaceState extends State<FileWorkspace> {
     FileLocationTab tab, {
     required bool directory,
   }) async {
-    if (_creating || _editing || _permissionsBusy || model.busy) return;
+    if (_naming || _editing || _permissionsBusy || model.busy) return;
     if (!model.canCreate(tab)) return;
     final tabId = tab.id;
     final files = tab.files;
     final directoryPath = tab.path;
     final name = await showExpressiveDialog<String>(
       context: context,
-      builder: (context) => _CreateEntryDialog(
+      builder: (context) => _EntryNameDialog(
         directory: directory,
         directoryPath: directoryPath,
         childPath: files.childPath,
@@ -1224,17 +1386,46 @@ class _FileWorkspaceState extends State<FileWorkspace> {
         !identical(tab.files, files)) {
       return;
     }
-    setState(() => _creating = true);
+    setState(() => _naming = true);
     try {
       await model.createEntry(tab, name, directory: directory);
     } finally {
-      if (mounted) setState(() => _creating = false);
+      if (mounted) setState(() => _naming = false);
+    }
+  }
+
+  /// 只在条目所在的当前目录内改名；对话框期间标签页、连接或条目变化时放弃提交。
+  Future<void> _renameEntry(FileLocationTab tab, RemoteFile file) async {
+    if (_naming || _editing || _permissionsBusy || model.busy) return;
+    if (!model.canRename(tab, file)) return;
+    final tabId = tab.id;
+    final files = tab.files;
+    final directoryPath = tab.path;
+    final name = await showExpressiveDialog<String>(
+      context: context,
+      builder: (context) => _EntryNameDialog(
+        directory: file.isDirectory,
+        directoryPath: directoryPath,
+        childPath: files.childPath,
+        renaming: file,
+      ),
+    );
+    if (name == null || !mounted) return;
+    if (!_sameTarget(tab, tabId, files, file.path) ||
+        tab.path != directoryPath) {
+      return;
+    }
+    setState(() => _naming = true);
+    try {
+      await model.renameEntry(tab, file, name);
+    } finally {
+      if (mounted) setState(() => _naming = false);
     }
   }
 
   /// 空白区域（含空目录）只在当前目录创建，不指向任何条目。
   Future<void> _blankMenu(FileLocationTab tab, Offset position) async {
-    if (_editing || _creating || _permissionsBusy || model.busy) return;
+    if (_editing || _naming || _permissionsBusy || model.busy) return;
     if (!model.canCreate(tab)) return;
     final overlay =
         Overlay.of(context).context.findRenderObject()! as RenderBox;
@@ -1286,7 +1477,7 @@ class _FileWorkspaceState extends State<FileWorkspace> {
     RemoteFile file,
     _PermissionSection section,
   ) async {
-    if (_permissionsBusy || _editing || _creating || !mounted) return;
+    if (_permissionsBusy || _editing || _naming || !mounted) return;
     if (!model.canSetPermissions(tab, file)) return;
     final files = tab.files;
     if (files is! RemoteFilePermissions) return;
@@ -1299,23 +1490,19 @@ class _FileWorkspaceState extends State<FileWorkspace> {
         current = await files.readPermissions(path);
       } catch (error) {
         if (mounted) {
-          ScaffoldMessenger.of(
-            context,
-          ).showSnackBar(SnackBar(content: Text(fileError(error))));
+          ScaffoldMessenger.of(context)
+              .showSnackBar(SnackBar(content: Text(fileError(error))));
         }
         return;
       }
-      if (!mounted || !_permissionsTarget(tab, tabId, files, path)) return;
+      if (!mounted || !_sameTarget(tab, tabId, files, path)) return;
       final edit = await showExpressiveDialog<_PermissionEdit>(
         context: context,
-        builder: (context) => _PermissionsDialog(
-          file: file,
-          current: current,
-          section: section,
-        ),
+        builder: (context) =>
+            _PermissionsDialog(file: file, current: current, section: section),
       );
       if (edit == null || !mounted) return;
-      if (!_permissionsTarget(tab, tabId, files, path)) return;
+      if (!_sameTarget(tab, tabId, files, path)) return;
       await model.updatePermissions(
         tab,
         file,
@@ -1328,7 +1515,7 @@ class _FileWorkspaceState extends State<FileWorkspace> {
     }
   }
 
-  bool _permissionsTarget(
+  bool _sameTarget(
     FileLocationTab tab,
     String tabId,
     RemoteFileSystem files,
@@ -1358,7 +1545,7 @@ class _FileWorkspaceState extends State<FileWorkspace> {
       HarborShapes.listItem(HarborShapes.listSlot(index, count)),
     );
     final canOpenMenu =
-        enabled && !model.busy && !_editing && !_creating && !_permissionsBusy;
+        enabled && !model.busy && !_editing && !_naming && !_permissionsBusy;
     void action() {
       if (file.isDirectory) {
         tab.browse(file.path);
@@ -1793,23 +1980,39 @@ class _PermissionEdit {
 String _octalLabel(int? mode) =>
     mode == null ? '' : mode.toRadixString(8).padLeft(3, '0');
 
-class _CreateEntryDialog extends StatefulWidget {
-  const _CreateEntryDialog({
+/// 创建与重命名共用的名称输入；[renaming] 非空时预填原名并选中主名部分。
+class _EntryNameDialog extends StatefulWidget {
+  const _EntryNameDialog({
     required this.directory,
     required this.directoryPath,
     required this.childPath,
+    this.renaming,
   });
   final bool directory;
   final String directoryPath;
   final String Function(String directory, String name) childPath;
+  final RemoteFile? renaming;
 
   @override
-  State<_CreateEntryDialog> createState() => _CreateEntryDialogState();
+  State<_EntryNameDialog> createState() => _EntryNameDialogState();
 }
 
-class _CreateEntryDialogState extends State<_CreateEntryDialog> {
-  final _controller = TextEditingController();
+class _EntryNameDialogState extends State<_EntryNameDialog> {
+  late final TextEditingController _controller;
   String? _error;
+
+  @override
+  void initState() {
+    super.initState();
+    final name = widget.renaming?.name ?? '';
+    // 文件只选中扩展名前的部分，隐藏文件（.bashrc）和目录选中全名。
+    final dot = widget.directory ? -1 : name.lastIndexOf('.');
+    _controller = TextEditingController(text: name)
+      ..selection = TextSelection(
+        baseOffset: 0,
+        extentOffset: dot > 0 ? dot : name.length,
+      );
+  }
 
   @override
   void dispose() {
@@ -1837,17 +2040,29 @@ class _CreateEntryDialogState extends State<_CreateEntryDialog> {
       setState(() => _error = error);
       return;
     }
-    Navigator.pop(context, name);
+    // 名称未变等同于取消，不发起任何写入。
+    Navigator.pop(context, name == widget.renaming?.name ? null : name);
   }
 
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
+    final renaming = widget.renaming != null;
     return AlertDialog(
       key: ValueKey(
-        widget.directory ? 'create-directory-dialog' : 'create-file-dialog',
+        renaming
+            ? 'rename-entry-dialog'
+            : widget.directory
+            ? 'create-directory-dialog'
+            : 'create-file-dialog',
       ),
-      title: Text(widget.directory ? '创建文件夹' : '创建文件'),
+      title: Text(
+        renaming
+            ? '重命名'
+            : widget.directory
+            ? '创建文件夹'
+            : '创建文件',
+      ),
       content: SizedBox(
         width: 360,
         child: SingleChildScrollView(
@@ -1891,7 +2106,7 @@ class _CreateEntryDialogState extends State<_CreateEntryDialog> {
         FilledButton(
           key: const ValueKey('confirm-create-entry'),
           onPressed: _submit,
-          child: const Text('创建'),
+          child: Text(renaming ? '重命名' : '创建'),
         ),
       ],
     );
@@ -1932,9 +2147,7 @@ class _PermissionsDialogState extends State<_PermissionsDialog> {
     _bits = widget.current.mode ?? 0;
     _octal = TextEditingController(text: _octalLabel(widget.current.mode));
     // 服务器没有报告的身份保持空白，绝不回填 0。
-    _uid = TextEditingController(
-      text: widget.current.userId?.toString() ?? '',
-    );
+    _uid = TextEditingController(text: widget.current.userId?.toString() ?? '');
     _gid = TextEditingController(
       text: widget.current.groupId?.toString() ?? '',
     );
@@ -2036,15 +2249,15 @@ class _PermissionsDialogState extends State<_PermissionsDialog> {
           width: 40,
           child: Padding(
             padding: const EdgeInsets.only(top: 10),
-            child: Text(
-              label,
-              style: Theme.of(context).textTheme.labelMedium,
-            ),
+            child: Text(label, style: Theme.of(context).textTheme.labelMedium),
           ),
         ),
         Expanded(
           child: Wrap(
-            children: [for (final option in options) _check(option.$1, option.$2, option.$3)],
+            children: [
+              for (final option in options)
+                _check(option.$1, option.$2, option.$3),
+            ],
           ),
         ),
       ],
@@ -2057,9 +2270,7 @@ class _PermissionsDialogState extends State<_PermissionsDialog> {
     final colors = theme.colorScheme;
     final mode = widget.section == _PermissionSection.mode;
     return AlertDialog(
-      key: ValueKey(
-        mode ? 'entry-permissions-dialog' : 'entry-owner-dialog',
-      ),
+      key: ValueKey(mode ? 'entry-permissions-dialog' : 'entry-owner-dialog'),
       title: Text(mode ? '设置权限' : '权限组'),
       content: SizedBox(
         width: 380,

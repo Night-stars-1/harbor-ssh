@@ -2,9 +2,9 @@ import 'dart:typed_data';
 
 import '../domain/remote_file.dart';
 
-/// Coalesce small network replies into bounded sequential writes. The writer
-/// must finish consuming each buffer before its future completes, as required
-/// by [RemoteFileSystem.download]. No whole-file buffering is involved.
+/// Coalesce small network replies into bounded sequential writes. Each buffer
+/// is handed over and never reused, so a writer may keep it after its future
+/// completes (a pipelined upload does). No whole-file buffering is involved.
 Future<void> writeDownloadStream(
   Stream<Uint8List> source,
   Future<void> Function(Uint8List) write, {
@@ -16,7 +16,7 @@ Future<void> writeDownloadStream(
     throw ArgumentError.value(bufferSize, 'bufferSize', 'must be positive');
   }
   cancellation.check();
-  final buffer = Uint8List(bufferSize);
+  var buffer = Uint8List(bufferSize);
   var buffered = 0;
   var written = 0;
 
@@ -26,6 +26,7 @@ Future<void> writeDownloadStream(
     await write(Uint8List.sublistView(buffer, 0, buffered));
     written += buffered;
     buffered = 0;
+    buffer = Uint8List(bufferSize);
     onProgress(written);
     cancellation.check();
   }

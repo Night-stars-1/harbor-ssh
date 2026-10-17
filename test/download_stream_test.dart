@@ -57,6 +57,24 @@ void main() {
     expect(output, [0, 0, 1, 1, 2, 2]);
   });
 
+  test('交出的缓冲区之后不再被复用，写入方保留引用也不会被改写', () async {
+    final kept = <Uint8List>[];
+    await writeDownloadStream(
+      Stream.fromIterable([
+        for (var value = 0; value < 6; value++) Uint8List.fromList([value]),
+      ]),
+      (bytes) async => kept.add(bytes),
+      cancellation: TransferCancellation(),
+      onProgress: (_) {},
+      bufferSize: 2,
+    );
+    expect(kept.map((bytes) => bytes.toList()), [
+      [0, 1],
+      [2, 3],
+      [4, 5],
+    ]);
+  });
+
   test('慢目标施加背压，等待写入时不读取后续数据或修改当前缓冲区', () async {
     final writing = Completer<void>();
     final release = Completer<void>();

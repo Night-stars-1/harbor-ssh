@@ -817,6 +817,82 @@ void main() {
     await tester.pumpWidget(const SizedBox.shrink());
   });
 
+  testWidgets('本地文件夹书签只存本机：收藏、跳回、移除，不写入主机也不参与同步', (tester) async {
+    tester.view.physicalSize = const Size(1100, 640);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    final files = MemoryFiles()..directories.addAll(['/docs', '/Docs']);
+    final model = FileWorkspaceModel();
+    addTearDown(model.dispose);
+    final repository = memoryRepository();
+    await repository.saveHosts([testHost]);
+    final workspace = WorkspaceModel(repository);
+    addTearDown(workspace.dispose);
+    await workspace.initialize();
+    final hostsBefore = await repository.preferences.read('harbor.hosts.v1');
+    // 与 Windows 一样忽略大小写，确认匹配规则由调用方注入而不是写死。
+    bool caseless(String a, String b) => a.toLowerCase() == b.toLowerCase();
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: harborTheme(),
+        home: Scaffold(
+          body: ListenableBuilder(
+            listenable: workspace,
+            builder: (context, _) => FileWorkspace(
+              model: model,
+              initializeLocal: false,
+              hosts: workspace.hosts,
+              sessions: const [],
+              onConnect: (_) async => null,
+              onSetBookmark: workspace.setSftpBookmark,
+              localBookmarks: workspace.localBookmarks,
+              onSetLocalBookmark: workspace.setLocalBookmark,
+              sameLocalPath: caseless,
+            ),
+          ),
+        ),
+      ),
+    );
+    final tab = model.add(0, name: '本机', files: files, isLocal: true);
+    await tab.browse('/docs');
+    await tester.pumpAndSettle();
+    final menu = find.byKey(ValueKey('file-bookmarks-${tab.id}'));
+    final toggle = find.byKey(ValueKey('file-bookmark-toggle-${tab.id}'));
+    expect(menu, findsOneWidget);
+
+    await tester.tap(menu);
+    await tester.pumpAndSettle();
+    await tester.tap(toggle);
+    await tester.pumpAndSettle();
+    expect(workspace.localBookmarks, ['/docs']);
+
+    // 大小写不同的同一目录视为已收藏，不会重复添加。
+    await tab.browse('/Docs');
+    await tester.pumpAndSettle();
+    await tester.tap(menu);
+    await tester.pumpAndSettle();
+    expect(find.text('移除当前目录书签'), findsOneWidget);
+    await tester.tap(find.byKey(const ValueKey('file-bookmark-/docs')));
+    await tester.pumpAndSettle();
+    expect(tab.path, '/docs');
+
+    // 只写本机偏好：主机数据（同步来源）保持原样。
+    expect(await repository.preferences.read('harbor.hosts.v1'), hostsBefore);
+    final reloaded = WorkspaceModel(repository);
+    addTearDown(reloaded.dispose);
+    await reloaded.initialize();
+    expect(reloaded.localBookmarks, ['/docs']);
+
+    await tester.tap(menu);
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const ValueKey('file-bookmark-remove-/docs')));
+    await tester.pumpAndSettle();
+    expect(workspace.localBookmarks, isEmpty);
+    expect(tester.takeException(), isNull);
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
+
   test('书签随主机 JSON 往返，编辑主机其他字段不丢失书签', () {
     final host = Host.fromJson({
       ...testHost.toJson(),
@@ -1913,6 +1989,74 @@ void main() {
     await tester.pumpWidget(const SizedBox.shrink());
   });
 
+  testWidgets('右键重命名文件和目录，原名预选主名，同名项目不被覆盖', (tester) async {
+    final files = MemoryFiles()
+      ..data['/a.txt'] = Uint8List.fromList([1])
+      ..data['/b.txt'] = Uint8List.fromList([2])
+      ..data['/dir/inner.txt'] = Uint8List.fromList([3])
+      ..directories.add('/dir');
+    final model = FileWorkspaceModel();
+    addTearDown(model.dispose);
+    final tab = model.add(0, name: 'files', files: files);
+    await pumpFileWorkspace(tester, model);
+
+    Finder menu(String key) => find.byKey(ValueKey(key));
+    Future<void> rename(String path) async {
+      await tester.tap(
+        find.byKey(ValueKey('entry-${tab.id}-$path')),
+        buttons: kSecondaryMouseButton,
+      );
+      await tester.pumpAndSettle();
+      await tester.tap(menu('rename-entry'));
+      await tester.pumpAndSettle();
+      expect(menu('rename-entry-dialog'), findsOneWidget);
+    }
+
+    // 文件预填原名并只选中扩展名前的部分。
+    await rename('/a.txt');
+    final field = tester.widget<TextField>(menu('create-entry-name'));
+    expect(field.controller!.text, 'a.txt');
+    expect(
+      field.controller!.selection,
+      const TextSelection(baseOffset: 0, extentOffset: 1),
+    );
+
+    // 已存在的名称被拒绝，两个文件都保持原样。
+    await tester.enterText(menu('create-entry-name'), 'b.txt');
+    await tester.tap(menu('confirm-create-entry'));
+    await tester.pumpAndSettle();
+    expect(files.data['/a.txt'], [1]);
+    expect(files.data['/b.txt'], [2]);
+    expect(model.failed, isTrue);
+
+    await rename('/a.txt');
+    await tester.enterText(menu('create-entry-name'), 'c.txt');
+    await tester.tap(menu('confirm-create-entry'));
+    await tester.pumpAndSettle();
+    expect(files.data.containsKey('/a.txt'), isFalse);
+    expect(files.data['/c.txt'], [1]);
+    expect(model.failed, isFalse);
+    expect(tab.entries.map((entry) => entry.name), contains('c.txt'));
+
+    // 目录连同内容一起改名；剪贴板里该目录下的文件随之失效。
+    await tab.browse('/dir');
+    await tester.pumpAndSettle();
+    tab.select(tab.entries.single);
+    model.copySelection(tab);
+    expect(model.clipboard, isNotNull);
+    await tab.browse('/');
+    await tester.pumpAndSettle();
+    await rename('/dir');
+    await tester.enterText(menu('create-entry-name'), 'renamed');
+    await tester.testTextInput.receiveAction(TextInputAction.done);
+    await tester.pumpAndSettle();
+    expect(files.directories, contains('/renamed'));
+    expect(files.data['/renamed/inner.txt'], [3]);
+    expect(model.clipboard, isNull);
+    expect(tester.takeException(), isNull);
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
+
   testWidgets('空目录空白区右键菜单在空目录当前路径创建', (tester) async {
     final files = MemoryFiles()..directories.add('/empty');
     final model = FileWorkspaceModel();
@@ -2016,10 +2160,7 @@ void main() {
     final dialog = find.byKey(const ValueKey('create-directory-dialog'));
     expect(dialog, findsOneWidget);
     // 对话框本体（标题与按钮）留在软键盘之上，内容改为可滚动而不是溢出。
-    expect(
-      tester.getRect(find.text('创建文件夹')).bottom,
-      lessThanOrEqualTo(200.0),
-    );
+    expect(tester.getRect(find.text('创建文件夹')).bottom, lessThanOrEqualTo(200.0));
     expect(
       find.descendant(of: dialog, matching: find.byType(SingleChildScrollView)),
       findsOneWidget,
@@ -2044,15 +2185,10 @@ void main() {
     expect(tab.entries.map((entry) => entry.name), contains('short-view'));
     // 创建成功后状态栏出现，面板更矮：工具条和列表仍然留在视口内。
     expect(
-      tester
-          .getRect(find.byKey(ValueKey('file-toolbar-${tab.id}')))
-          .bottom,
+      tester.getRect(find.byKey(ValueKey('file-toolbar-${tab.id}'))).bottom,
       lessThanOrEqualTo(200.0),
     );
-    expect(
-      find.byKey(ValueKey('entry-${tab.id}-/short-view')),
-      findsOneWidget,
-    );
+    expect(find.byKey(ValueKey('entry-${tab.id}-/short-view')), findsOneWidget);
     expect(tester.takeException(), isNull);
     await tester.pumpWidget(const SizedBox.shrink());
   });
@@ -2305,7 +2441,10 @@ void main() {
     await openRowMenu();
     await tester.tap(find.byKey(const ValueKey('set-entry-permissions')));
     await tester.pumpAndSettle();
-    expect(find.byKey(const ValueKey('entry-permissions-dialog')), findsNothing);
+    expect(
+      find.byKey(const ValueKey('entry-permissions-dialog')),
+      findsNothing,
+    );
     expect(find.textContaining('permission denied'), findsOneWidget);
     await tester.pump(const Duration(seconds: 5));
     await tester.pumpAndSettle();
@@ -2349,7 +2488,10 @@ void main() {
     await tester.pumpAndSettle();
     files.readGate!.complete();
     await tester.pumpAndSettle();
-    expect(find.byKey(const ValueKey('entry-permissions-dialog')), findsNothing);
+    expect(
+      find.byKey(const ValueKey('entry-permissions-dialog')),
+      findsNothing,
+    );
     expect(files.writes, isEmpty);
     expect(tester.takeException(), isNull);
     await tester.pumpWidget(const SizedBox.shrink());

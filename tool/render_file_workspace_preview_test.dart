@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:io';
 import 'dart:ui' as ui;
 
@@ -108,9 +109,7 @@ void main() {
           await tester.longPress(folderRow);
           await tester.pumpAndSettle();
           await capture('sftp-workspace-mobile-menu-${brightness.name}');
-          await tester.tap(
-            find.byKey(const ValueKey('set-entry-permissions')),
-          );
+          await tester.tap(find.byKey(const ValueKey('set-entry-permissions')));
           await tester.pumpAndSettle();
           await capture('sftp-workspace-mobile-permissions-${brightness.name}');
           await tester.tap(
@@ -119,6 +118,26 @@ void main() {
           await tester.pumpAndSettle();
         }
         if (!mobile) {
+          // Exercise the desktop_drop channel used by Explorer/Finder instead
+          // of an in-app Draggable, and capture the same target highlight.
+          final dropPoint = tester.getCenter(
+            find.byKey(const ValueKey('file-panel-1')),
+          );
+          Future<void> nativeDrag(MethodCall call) async {
+            final reply = Completer<void>();
+            tester.binding.defaultBinaryMessenger.handlePlatformMessage(
+              'desktop_drop',
+              const StandardMethodCodec().encodeMethodCall(call),
+              (_) => reply.complete(),
+            );
+            await reply.future;
+          }
+
+          await nativeDrag(MethodCall('entered', [dropPoint.dx, dropPoint.dy]));
+          await tester.pumpAndSettle();
+          await capture('sftp-workspace-external-drop-${brightness.name}');
+          await nativeDrag(const MethodCall('exited'));
+          await tester.pumpAndSettle();
           final row = find.byKey(
             ValueKey('entry-${remote.id}-${remote.path}/README.md'),
           );
@@ -139,9 +158,7 @@ void main() {
           );
           await tester.pumpAndSettle();
           await capture('sftp-workspace-entry-menu-${brightness.name}');
-          await tester.tap(
-            find.byKey(const ValueKey('set-entry-permissions')),
-          );
+          await tester.tap(find.byKey(const ValueKey('set-entry-permissions')));
           await tester.pumpAndSettle();
           await capture('sftp-workspace-permissions-${brightness.name}');
           await tester.tap(
@@ -212,8 +229,7 @@ class _PreviewFiles extends FakeRemoteFiles {
 }
 
 /// 只有远端预览带权限能力，本地预览保持没有权限入口。
-class _PreviewSftpFiles extends _PreviewFiles
-    implements RemoteFilePermissions {
+class _PreviewSftpFiles extends _PreviewFiles implements RemoteFilePermissions {
   _PreviewSftpFiles() : super(false);
 
   @override

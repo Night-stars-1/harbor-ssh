@@ -225,6 +225,52 @@ class WorkspaceModel extends ChangeNotifier {
     }
   }
 
+  /// 本地文件夹书签只存在本机偏好里：不进入主机数据，也就不参与云同步，
+  /// 本机路径不会被带到其他设备。
+  List<String> localBookmarks = const [];
+  static const _localBookmarksKey = 'harbor.files.local-bookmarks.v1';
+  Future<void> _localBookmarkWrite = Future.value();
+
+  /// Windows 路径不区分大小写；其他平台按原样比较。
+  static bool sameLocalPath(String a, String b) =>
+      Platform.isWindows ? a.toLowerCase() == b.toLowerCase() : a == b;
+
+  /// 每次只提交一个路径的意图并排队执行，连续收藏、移除按操作顺序落盘。
+  Future<void> setLocalBookmark(String path, {required bool saved}) {
+    final operation = _localBookmarkWrite.then((_) async {
+      final current = localBookmarks;
+      final exists = current.any((value) => sameLocalPath(value, path));
+      if (saved == exists) return;
+      final next = saved
+          ? [...current, path]
+          : [
+              for (final value in current)
+                if (!sameLocalPath(value, path)) value,
+            ];
+      await repository.preferences.write(_localBookmarksKey, jsonEncode(next));
+      if (_disposed) return;
+      localBookmarks = List.unmodifiable(next);
+      _notify();
+    });
+    _localBookmarkWrite = operation.catchError((Object _) {});
+    return operation;
+  }
+
+  Future<void> _loadLocalBookmarks() async {
+    try {
+      final saved = await repository.preferences.read(_localBookmarksKey);
+      if (saved == null || _disposed) return;
+      final decoded = jsonDecode(saved);
+      if (decoded is! List) return;
+      localBookmarks = List.unmodifiable([
+        for (final path in decoded)
+          if (path is String && path.isNotEmpty) path,
+      ]);
+    } catch (_) {
+      // Unreadable local bookmarks must not prevent loading connections.
+    }
+  }
+
   bool loading = true;
 
   /// 本地写入占用：书签、主机、用户等本地变更。
@@ -279,6 +325,7 @@ class WorkspaceModel extends ChangeNotifier {
     await _loadUpdatePreferences();
     await _loadAiSettings();
     await _loadHostOrder();
+    await _loadLocalBookmarks();
     var stage = StartupStage.localDirectory;
     try {
       await LocalFiles.prepareDefaultHome(

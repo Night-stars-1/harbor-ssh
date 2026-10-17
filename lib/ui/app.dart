@@ -1183,7 +1183,16 @@ class _WorkspaceState extends State<Workspace> {
                                       sessions: model.sessions,
                                       onConnect: _connectFiles,
                                       onSetBookmark: model.setSftpBookmark,
+                                      localBookmarks: model.localBookmarks,
+                                      onSetLocalBookmark:
+                                          model.setLocalBookmark,
+                                      sameLocalPath:
+                                          WorkspaceModel.sameLocalPath,
                                       showTitle: false,
+                                      acceptExternalDrops:
+                                          !model.loading &&
+                                          model.showingFiles &&
+                                          !model.showingSettings,
                                       initializeLocal:
                                           !model.loading &&
                                           model.showingFiles &&

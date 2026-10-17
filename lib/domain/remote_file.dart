@@ -76,6 +76,10 @@ abstract interface class RemoteFileSystem {
 }
 
 /// Range reads and metadata used to validate a transfer before resuming it.
+///
+/// [readRange], like [RemoteFileSystem.download], hands over every buffer it
+/// passes to `write` and never reuses it: a pipelined upload keeps buffers
+/// until the server acknowledges them.
 abstract interface class ResumableSource {
   Future<RemoteFile> statFile(String path);
   Future<void> readRange(

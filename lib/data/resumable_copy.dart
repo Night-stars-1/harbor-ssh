@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:collection';
 import 'dart:math';
 import 'dart:typed_data';
 
@@ -167,7 +168,12 @@ class ResumableFileCopy implements ResumableCopy {
       }
     }
     onProgress(transferred);
-    Uint8List? pending;
+    // Writes are pipelined, so the acknowledged offset trails what was read.
+    // Chunks stay queued until they can no longer hold part of the final
+    // [_tailSize] bytes before that offset; the tail is built once afterwards.
+    final sent = Queue<(int, Uint8List)>();
+    final startOffset = transferred;
+    var readOffset = transferred;
     Stream<Uint8List> relay() async* {
       final chunks = StreamController<Uint8List>();
       Completer<void>? consumed;
@@ -199,7 +205,9 @@ class ResumableFileCopy implements ResumableCopy {
           });
       try {
         await for (final bytes in chunks.stream) {
-          pending = bytes;
+          // The source reuses nothing it hands over, so keeping the view is safe.
+          sent.add((readOffset, bytes));
+          readOffset += bytes.length;
           yield bytes;
           if (consumed?.isCompleted == false) consumed!.complete();
         }
@@ -210,18 +218,24 @@ class ResumableFileCopy implements ResumableCopy {
       }
     }
 
-    await destination.writeRange(
-      stagingPath,
-      relay(),
-      offset: transferred,
-      cancellation: cancellation,
-      onProgress: (bytes) {
-        transferred = bytes;
-        final chunk = pending!;
-        _tail = Uint8List.fromList(chunk.sublist(max(0, chunk.length - 32768)));
-        onProgress(bytes);
-      },
-    );
+    try {
+      await destination.writeRange(
+        stagingPath,
+        relay(),
+        offset: transferred,
+        cancellation: cancellation,
+        onProgress: (bytes) {
+          transferred = bytes;
+          while (sent.length > 1 && sent.elementAt(1).$1 <= bytes - _tailSize) {
+            sent.removeFirst();
+          }
+          onProgress(bytes);
+        },
+      );
+    } finally {
+      if (transferred > startOffset) _tail = _tailOf(sent, transferred);
+    }
+
     cancellation.check();
     await _checkSource();
     if (transferred != total ||
@@ -244,6 +258,22 @@ class ResumableFileCopy implements ResumableCopy {
     transferred = 0;
     _snapshot = null;
     _head = _tail = null;
+  }
+
+  static const _tailSize = 32768;
+
+  /// Copies the last [_tailSize] bytes before [end] out of [sent], which holds
+  /// contiguous `(offset, bytes)` chunks covering them.
+  static Uint8List _tailOf(Queue<(int, Uint8List)> sent, int end) {
+    final start = max(sent.first.$1, end - _tailSize);
+    final tail = Uint8List(end - start);
+    for (final (offset, bytes) in sent) {
+      final from = max(start, offset), to = min(end, offset + bytes.length);
+      if (from < to) {
+        tail.setRange(from - start, to - start, bytes, from - offset);
+      }
+    }
+    return tail;
   }
 }
 

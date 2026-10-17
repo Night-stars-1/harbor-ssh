@@ -175,6 +175,7 @@ class FileLocationTab extends ChangeNotifier {
   }
 
   void clearSelection() {
+    if (_disposed) return;
     selected.clear();
     _selectionAnchor = null;
     notifyListeners();
@@ -273,6 +274,11 @@ class FileWorkspaceModel extends ChangeNotifier {
   double split = .5;
   TransferCancellation? transfer;
   String? transferSourceId, transferDestinationId;
+
+  /// 正在传输（而不是暂停或闲置）的外部源 id。工作区关闭时它要留到
+  /// [_runDrop] 的 finally 展开之后再释放：本地的读取还在用它，提前停掉
+  /// 系统作用域会让这些读取失败。
+  String? _activeSourceId;
   String? message;
   bool failed = false;
   String transferName = '';
@@ -286,6 +292,10 @@ class FileWorkspaceModel extends ChangeNotifier {
   /// instead of the whole workspace.
   String? _writeTabId;
   _DropTransfer? _pendingTransfer;
+
+  /// 外部拖入用到的隐藏本地源。它们不进入任何面板，因此只能按 id 找回，
+  /// 并且要在传输结束或工作区关闭时显式释放。
+  final List<_ExternalSource> _externalSources = [];
   bool get canResume => !busy && _pendingTransfer != null;
   bool get canContinue => canResume && !_pendingTransfer!.discarding;
   bool get resumable => _pendingTransfer != null;
@@ -325,17 +335,7 @@ class FileWorkspaceModel extends ChangeNotifier {
         await source.files.deleteFile(file.path);
         completed++;
         source.selected.remove(file.path);
-        final cached = clipboard;
-        if (cached != null &&
-            cached.files.any((item) => item.path == file.path) &&
-            (cached.source == source ||
-                identical(cached.source.files, source.files) ||
-                (cached.source.isLocal && source.isLocal) ||
-                (source.session != null &&
-                    cached.source.session?.host.id ==
-                        source.session!.host.id))) {
-          clipboard = null;
-        }
+        _forgetClipboard(source, file.path);
         message = '正在删除 $completed/${data.files.length} 个文件';
         _notify();
       }
@@ -408,6 +408,74 @@ class FileWorkspaceModel extends ChangeNotifier {
       if (!_disposed) await tab.browse();
       _writeTabId = null;
       _notify();
+    }
+  }
+
+  /// Whether [file], listed in [tab]'s current directory, can be renamed now.
+  bool canRename(FileLocationTab tab, RemoteFile file) =>
+      canCreate(tab) && tab.entries.any((entry) => entry.path == file.path);
+
+  /// Renames [file] to [name] inside [tab]'s current directory. The rename is
+  /// exclusive: an entry that already has [name] is refused, never replaced.
+  Future<void> renameEntry(
+    FileLocationTab tab,
+    RemoteFile file,
+    String name,
+  ) async {
+    if (!canRename(tab, file) || name == file.name) return;
+    final String path;
+    try {
+      path = tab.files.childPath(tab.path, name);
+    } catch (error) {
+      failed = true;
+      message = fileError(error);
+      _notify();
+      return;
+    }
+    // As with creating, the listing only gives a clear reason; the exclusive
+    // rename on the filesystem is what keeps a same-named entry intact.
+    if (tab.entries.any(
+      (entry) =>
+          entry.path != file.path && _sameName(entry.name, name, tab.isLocal),
+    )) {
+      failed = true;
+      message = '当前目录已存在同名项目';
+      _notify();
+      return;
+    }
+    _writeTabId = tab.id;
+    failed = false;
+    message = '正在重命名 ${file.name}';
+    _notify();
+    try {
+      await tab.files.renameExclusive(file.path, path);
+      _forgetClipboard(tab, file.path);
+      message = '已将 ${file.name} 重命名为 $name';
+    } catch (error) {
+      failed = true;
+      message = '重命名失败：${fileError(error)}';
+    } finally {
+      if (!_disposed) await tab.browse();
+      _writeTabId = null;
+      _notify();
+    }
+  }
+
+  /// Drops the clipboard when it holds [path], or anything under it, from the
+  /// filesystem [source] browses, so a paste never reads a moved or deleted
+  /// entry.
+  void _forgetClipboard(FileLocationTab source, String path) {
+    final cached = clipboard;
+    if (cached != null &&
+        cached.files.any(
+          (item) => item.path == path || item.path.startsWith('$path/'),
+        ) &&
+        (cached.source == source ||
+            identical(cached.source.files, source.files) ||
+            (cached.source.isLocal && source.isLocal) ||
+            (source.session != null &&
+                cached.source.session?.host.id == source.session!.host.id))) {
+      clipboard = null;
     }
   }
 
@@ -609,10 +677,29 @@ class FileWorkspaceModel extends ChangeNotifier {
         existing,
   ];
 
+  /// 目标的命名规则：本地 Windows 目录不区分大小写，其余按原样比较。
+  String _nameKey(String name, bool local) =>
+      local && Platform.isWindows ? name.toLowerCase() : name;
+
   bool _sameName(String left, String right, bool local) =>
-      local && Platform.isWindows
-      ? left.toLowerCase() == right.toLowerCase()
-      : left == right;
+      _nameKey(left, local) == _nameKey(right, local);
+
+  /// 批次内会落到同一个目标名的项目。外部拖入的批次可能来自不同目录，所以
+  /// 内部拖动不会出现的情况要在写入之前按目标的命名规则挡下来。
+  List<String> _duplicateNames(Iterable<RemoteFile> files, bool local) {
+    final seen = <String, String>{};
+    final duplicates = <String>[];
+    for (final file in files) {
+      final key = _nameKey(file.name, local);
+      final previous = seen[key];
+      if (previous == null) {
+        seen[key] = file.name;
+      } else if (!duplicates.contains(previous)) {
+        duplicates.add(previous);
+      }
+    }
+    return duplicates;
+  }
 
   bool conflictsMatch(
     FileDragData data,
@@ -643,24 +730,33 @@ class FileWorkspaceModel extends ChangeNotifier {
     return '.harbor-$kind-$token';
   }
 
+  /// 外部拖入的公共前提：目标面板可用，工作区空闲，且没有待续传的断点。
+  /// 界面在申请系统资源（例如 macOS 的安全作用域）之前先用它判断值不值得
+  /// 准备一次拖入。
+  bool canAcceptExternalDrop(FileLocationTab? target) =>
+      !_disposed &&
+      !busy &&
+      !resumable &&
+      target != null &&
+      panes.any((pane) => pane.tabs.contains(target)) &&
+      target.connected &&
+      !target.loading &&
+      target.error == null;
+
   bool canDrop(FileDragData data, FileLocationTab? target) {
+    if (target == null || !canAcceptExternalDrop(target)) return false;
+    // 外部拖入的隐藏源不在任何面板里，但它注册过，因此和内部标签一样有效。
     bool contains(FileLocationTab tab) =>
-        panes.any((pane) => pane.tabs.contains(tab));
-    return !_disposed &&
-        !busy &&
-        !resumable &&
-        target != null &&
-        !_sameDirectory(data.source, data.sourceDirectory, target) &&
+        panes.any((pane) => pane.tabs.contains(tab)) ||
+        _externalSources.any((source) => identical(source.tab, tab));
+    return !_sameDirectory(data.source, data.sourceDirectory, target) &&
         contains(data.source) &&
-        contains(target) &&
         data.source.connected &&
-        target.connected &&
         !data.source.loading &&
-        !target.loading &&
         data.source.error == null &&
-        target.error == null &&
         data.files.isNotEmpty &&
         data.files.every((file) => !file.isLink) &&
+        _duplicateNames(data.files, target.isLocal).isEmpty &&
         !_copiesIntoItself(data, target);
   }
 
@@ -775,6 +871,182 @@ class FileWorkspaceModel extends ChangeNotifier {
     return _runDrop(pending);
   }
 
+  /// 把操作系统拖入的顶层项目整理成一次拖放批次。
+  ///
+  /// 只读取元数据，不复制任何字节：批次用一个不进入任何面板的隐藏本地标签
+  /// 作为源，所以同名确认、断点续传和缓存清理对内部拖动与外部拖入完全一致。
+  /// 路径统一成绝对的正斜杠写法，指向链接、不支持的类型、不存在或重名的项目
+  /// 都在这里被拒绝，此时目标目录一个字节都还没写。
+  ///
+  /// 任何准备失败都会先调用 [release]（例如 macOS 的安全作用域），再抛出
+  /// [FileSystemException]；成功之后由调用方在 finally 里调用
+  /// [releaseExternalDrop]，因此失败路径不会漏掉释放。
+  Future<FileDragData> prepareExternalDrop(
+    List<String> paths, {
+    Future<void> Function()? release,
+  }) async {
+    try {
+      if (_disposed) throw StateError('工作区已关闭');
+      if (paths.isEmpty) throw const FileSystemException('没有可拖入的项目');
+      final files = <RemoteFile>[];
+      final names = <String>{};
+      for (final raw in paths) {
+        final path = _normalizeExternalPath(raw);
+        if (path.isEmpty) {
+          throw const FileSystemException('拖入的项目路径无效');
+        }
+        if (RegExp(r'^(?:[A-Za-z]:)?/$').hasMatch(path)) {
+          throw FileSystemException('不支持拖入磁盘根目录', path);
+        }
+        final type = await FileSystemEntity.type(path, followLinks: false);
+        if (type == FileSystemEntityType.notFound) {
+          throw FileSystemException('拖入的项目不存在或无法访问', path);
+        }
+        if (type == FileSystemEntityType.link) {
+          throw FileSystemException('不支持拖入符号链接', path);
+        }
+        if (type != FileSystemEntityType.file &&
+            type != FileSystemEntityType.directory) {
+          throw FileSystemException('不支持拖入这个项目类型', path);
+        }
+        final name = _externalName(path);
+        if (name.isEmpty) {
+          throw FileSystemException('不支持拖入这个项目', path);
+        }
+        // 同一批次里出现完全同名的项目时，任何一个目标目录都装不下两个；
+        // 大小写规则取决于目标，交给 canDrop 按目标的命名规则再挡一次。
+        if (!names.add(name)) {
+          throw FileSystemException('拖入的项目存在同名目标：$name', path);
+        }
+        final attrs = await FileStat.stat(path);
+        if (attrs.type != type) {
+          throw FileSystemException('拖入的项目已变化，请重新拖动', path);
+        }
+        files.add(
+          RemoteFile(
+            name: name,
+            path: path,
+            isDirectory: type == FileSystemEntityType.directory,
+            size: attrs.size,
+            modified: attrs.modified,
+          ),
+        );
+      }
+      if (_disposed) throw StateError('工作区已关闭');
+      final directory = _externalDirectory(files);
+      final tab = FileLocationTab(
+        id: 'files-external-${_sequence++}',
+        name: '外部拖入',
+        files: LocalFiles(directory.isEmpty ? files.first.path : directory),
+        isLocal: true,
+        initialPath: directory,
+      )..path = directory;
+      _externalSources.add(_ExternalSource(tab, release));
+      return FileDragData(tab, files);
+    } catch (_) {
+      await _runRelease(release);
+      rethrow;
+    }
+  }
+
+  /// 释放一次外部拖入占用的隐藏源。
+  ///
+  /// 界面在确认或放弃之后调用它；只要还有断点续传依赖这个源，或者本地的
+  /// 读取还在传输中，就保留下来，交给传输结束路径（成功、放弃或 [dispose]）
+  /// 释放，保证每个源只释放一次。
+  void releaseExternalDrop(FileDragData data) {
+    final entry = _externalSources
+        .where((source) => identical(source.tab, data.source))
+        .firstOrNull;
+    if (entry == null ||
+        _pendingTransfer?.sourceId == entry.tab.id ||
+        _activeSourceId == entry.tab.id) {
+      return;
+    }
+    _releaseExternal(entry);
+  }
+
+  /// 传输结束（成功或放弃）后释放这个源。
+  void _releaseExternalSource(String sourceId) {
+    final entry = _externalSources
+        .where((source) => source.tab.id == sourceId)
+        .firstOrNull;
+    if (entry != null) _releaseExternal(entry);
+  }
+
+  /// 隐藏标签不属于任何面板，所以销毁它要显式做；它占用的系统资源（macOS
+  /// 的安全作用域）由异步回调释放，失败不影响拖入本身的结果。
+  void _releaseExternal(_ExternalSource source) {
+    if (!_externalSources.remove(source)) return;
+    source.tab.dispose();
+    unawaited(_runRelease(source.release));
+  }
+
+  static Future<void> _runRelease(Future<void> Function()? release) async {
+    if (release == null) return;
+    try {
+      await release();
+    } catch (_) {
+      // 释放失败不能掩盖已经发生的传输结果。
+    }
+  }
+
+  /// 外部拖入的路径统一成绝对、正斜杠、无结尾分隔符的写法，后续比较、找回
+  /// 父目录和传输都只看这一种形式。
+  String _normalizeExternalPath(String path) {
+    if (path.isEmpty) return '';
+    var normalized = File(path).absolute.path.replaceAll('\\', '/');
+    while (normalized.length > 1 && normalized.endsWith('/')) {
+      normalized = normalized.substring(0, normalized.length - 1);
+    }
+    return RegExp(r'^[A-Za-z]:$').hasMatch(normalized)
+        ? '$normalized/'
+        : normalized;
+  }
+
+  String _externalName(String path) {
+    final index = path.lastIndexOf('/');
+    return index < 0 ? path : path.substring(index + 1);
+  }
+
+  String _externalParent(String path) {
+    final index = path.lastIndexOf('/');
+    if (index < 0) return '';
+    if (index == 0) return '/';
+    final parent = path.substring(0, index);
+    return RegExp(r'^[A-Za-z]:$').hasMatch(parent) ? '$parent/' : parent;
+  }
+
+  /// 批次里各项目的最近公共父目录：拖进这个目录本身要按“同目录”拒绝，
+  /// 不同盘符时退回第一个项目的父目录。
+  String _externalDirectory(List<RemoteFile> files) {
+    var parts = _externalParent(files.first.path).split('/');
+    for (final file in files.skip(1)) {
+      final other = _externalParent(file.path).split('/');
+      var shared = 0;
+      while (shared < parts.length &&
+          shared < other.length &&
+          _nameKey(parts[shared], true) == _nameKey(other[shared], true)) {
+        shared++;
+      }
+      parts = parts.sublist(0, shared);
+    }
+    final directory = parts.join('/');
+    if (directory.isEmpty) return _externalParent(files.first.path);
+    return RegExp(r'^[A-Za-z]:$').hasMatch(directory)
+        ? '$directory/'
+        : directory;
+  }
+
+  /// 按 id 找回当前的标签实例。续传和放弃都要用当前的实例：目标主机重新
+  /// 连接后标签会被替换，而外部拖入的隐藏源根本不在面板里。
+  FileLocationTab? _tabById(String id) =>
+      tabs.where((tab) => tab.id == id).firstOrNull ??
+      _externalSources
+          .map((source) => source.tab)
+          .where((tab) => tab.id == id)
+          .firstOrNull;
+
   Future<void> resume() async {
     if (!canContinue) return;
     await _runDrop(_pendingTransfer!);
@@ -783,9 +1055,7 @@ class FileWorkspaceModel extends ChangeNotifier {
   Future<void> discardTransfer() async {
     if (!canResume) return;
     final pending = _pendingTransfer!;
-    final destination = tabs
-        .where((tab) => tab.id == pending.destinationId)
-        .firstOrNull;
+    final destination = _tabById(pending.destinationId);
     if (destination == null ||
         !destination.connected ||
         _sftpIdentity(destination) != pending.destinationIdentity) {
@@ -799,9 +1069,7 @@ class FileWorkspaceModel extends ChangeNotifier {
     _notify();
     try {
       for (final job in pending.jobs.values) {
-        final source = tabs
-            .where((tab) => tab.id == pending.sourceId)
-            .firstOrNull;
+        final source = _tabById(pending.sourceId);
         if (source?.files is ResumableSource) {
           job.rebind(
             source!.files as ResumableSource,
@@ -829,6 +1097,7 @@ class FileWorkspaceModel extends ChangeNotifier {
         }
       }
       _pendingTransfer = null;
+      _releaseExternalSource(pending.sourceId);
       message = '已放弃传输并清理缓存';
       failed = false;
     } catch (error) {
@@ -842,10 +1111,8 @@ class FileWorkspaceModel extends ChangeNotifier {
   }
 
   Future<bool> _runDrop(_DropTransfer pending) async {
-    final source = tabs.where((tab) => tab.id == pending.sourceId).firstOrNull;
-    final target = tabs
-        .where((tab) => tab.id == pending.destinationId)
-        .firstOrNull;
+    final source = _tabById(pending.sourceId);
+    final target = _tabById(pending.destinationId);
     if (source == null ||
         target == null ||
         !source.connected ||
@@ -868,6 +1135,7 @@ class FileWorkspaceModel extends ChangeNotifier {
     transfer = cancellation;
     transferSourceId = source.id;
     transferDestinationId = target.id;
+    _activeSourceId = source.id;
     transferName = '准备传输 ${selected.length} 个项目';
     transferred = 0;
     total = null;
@@ -880,10 +1148,7 @@ class FileWorkspaceModel extends ChangeNotifier {
     var cleanupFailed = false;
     final conflictsByName = {
       for (final conflict in pending.conflicts)
-        (target.isLocal && Platform.isWindows
-                ? conflict.name.toLowerCase()
-                : conflict.name):
-            conflict,
+        _nameKey(conflict.name, target.isLocal): conflict,
     };
     try {
       for (final file in selected.skip(completed)) {
@@ -969,9 +1234,7 @@ class FileWorkspaceModel extends ChangeNotifier {
           destinationDirectory,
           file.name,
         );
-        final key = target.isLocal && Platform.isWindows
-            ? file.name.toLowerCase()
-            : file.name;
+        final key = _nameKey(file.name, target.isLocal);
         final conflict = conflictsByName[key];
         if (conflict == null) {
           await copyTo(destinationPath);
@@ -1061,6 +1324,7 @@ class FileWorkspaceModel extends ChangeNotifier {
       source.clearSelection();
       success = true;
       _pendingTransfer = null;
+      _releaseExternalSource(pending.sourceId);
     } catch (e) {
       failed = e is! TransferCancelled;
       message =
@@ -1075,6 +1339,14 @@ class FileWorkspaceModel extends ChangeNotifier {
       transfer = null;
       transferSourceId = null;
       transferDestinationId = null;
+      final activeSourceId = _activeSourceId;
+      _activeSourceId = null;
+      // 关闭之后不再保留断点；没有断点接手的源在这里释放，此时本地的读取
+      // 才真正全部退出，系统资源现在停才安全。
+      if (_disposed) _pendingTransfer = null;
+      if (_pendingTransfer == null && activeSourceId != null) {
+        _releaseExternalSource(activeSourceId);
+      }
       if (!_disposed) {
         await target.browse();
         _notify();
@@ -1091,6 +1363,14 @@ class FileWorkspaceModel extends ChangeNotifier {
   void dispose() {
     _disposed = true;
     transfer?.cancel();
+    // 关闭之后不能继续续传，断点状态立刻作废。暂停或闲置的外部源没有本地
+    // 读取在用，现在就能释放；正在传输的那个留到 [_runDrop] 的 finally，
+    // 否则会停掉读取还在依赖的系统作用域。
+    _pendingTransfer = null;
+    for (final source in List.of(_externalSources)) {
+      if (source.tab.id == _activeSourceId) continue;
+      _releaseExternal(source);
+    }
     transferSpeed.removeListener(_notify);
     transferSpeed.dispose();
     for (final pane in panes) {
@@ -1101,6 +1381,14 @@ class FileWorkspaceModel extends ChangeNotifier {
     }
     super.dispose();
   }
+}
+
+/// 一次外部拖入占用的隐藏本地源，以及系统资源的释放回调（例如 macOS 的
+/// 安全作用域）。源不进入任何面板，只能由模型自己保留和释放。
+class _ExternalSource {
+  _ExternalSource(this.tab, this.release);
+  final FileLocationTab tab;
+  final Future<void> Function()? release;
 }
 
 class _DropTransfer {

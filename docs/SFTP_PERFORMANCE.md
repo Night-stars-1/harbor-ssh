@@ -1,4 +1,6 @@
-# SFTP download performance — 2026-09-28
+# SFTP transfer performance
+
+## Download — 2026-09-28
 
 Two bottlenecks were measured on Windows x64 Release/AOT:
 
@@ -71,3 +73,26 @@ Replacing the packet cipher with libsodium's SIMD primitives through FFI (see
 
 The packet open routine alone measured about 916 MiB/s (AVX2) on the same
 machine, so the cipher is no longer the bottleneck at this link speed.
+
+## Pipelined uploads — 2026-10-17
+
+Uploads awaited each source buffer (64–256 KiB) before reading the next, so
+the pipeline drained once per buffer: the window never covered the round
+trip, while downloads kept 128 reads in flight. `writeUploadStream`
+(`lib/data/upload_stream.dart`) now keeps up to 64 WRITE requests of 32 KiB in
+flight across buffers. Progress, and therefore the resume checkpoint, still
+only advances over the contiguous acknowledged prefix, and the resume tail is
+taken from the bytes before that offset rather than the last buffer read.
+
+Measured against OpenSSH 9.6 (chacha20-poly1305) in WSL2 with `netem` adding
+2 ms RTT, 512 MiB of random data, Windows x64 AOT, the two paths alternating
+in one process:
+
+| Path | Results (MiB/s) |
+| --- | --- |
+| Previous upload (`writeBytes` per buffer) | 19.9, 18.9, 19.7 |
+| Pipelined upload | 90.7, 84.8, 95.1 |
+| Download (`readRange`), same link | 131–183 |
+
+Download is unchanged by this work. Results on a physical LAN depend on the
+server's disk and CPU as well as the link.
