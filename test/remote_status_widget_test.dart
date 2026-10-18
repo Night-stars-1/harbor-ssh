@@ -90,6 +90,10 @@ const _metrics = RemoteHostMetrics(
     ),
   ],
   disksAvailable: true,
+  cpuTemperatures: [
+    RemoteTemperature(sensor: 'coretemp', label: 'Package id 0', celsius: 64),
+    RemoteTemperature(sensor: 'coretemp', label: 'Core 1', celsius: 88),
+  ],
 );
 
 /// CPU, memory and transfer rates only: every list-style detail is absent.
@@ -123,8 +127,9 @@ Widget _statusBar({
   RemoteHostMetrics? metrics = _metrics,
   bool connected = true,
   double textScale = 1,
+  Brightness brightness = Brightness.light,
 }) => MaterialApp(
-  theme: harborTheme(),
+  theme: harborTheme(brightness: brightness),
   builder: (context, child) => MediaQuery(
     data: MediaQuery.of(context)
         .copyWith(textScaler: TextScaler.linear(textScale)),
@@ -232,28 +237,37 @@ __HARBOR_REMOTE_METRICS_END__
     expect(find.text('60%'), findsOneWidget);
     // CPU 与网速需要两次采样，首样本只显示占位符。
     expect(find.text('--'), findsNWidgets(3));
-    await tester.pump(const Duration(seconds: 5));
+    // 补采在 1 秒后，不必等设定的 5 秒。
+    await tester.pump(const Duration(seconds: 1));
     await tester.pump();
     expect(first.calls, 2);
     expect(find.text('80%'), findsOneWidget);
     expect(find.text('1000 B/s'), findsOneWidget);
 
-    await show(first, refreshSeconds: 2);
-    await tester.pump(const Duration(seconds: 1));
+    // 之后仍按设定间隔，中间不再多采。
+    await tester.pump(const Duration(seconds: 3));
+    await tester.pump();
     expect(first.calls, 2);
     await tester.pump(const Duration(seconds: 1));
     await tester.pump();
     expect(first.calls, 3);
 
+    await show(first, refreshSeconds: 2);
+    await tester.pump(const Duration(seconds: 1));
+    expect(first.calls, 3);
+    await tester.pump(const Duration(seconds: 1));
+    await tester.pump();
+    expect(first.calls, 4);
+
     await show(first, visible: false);
     expect(find.byType(RemoteStatusBar).hitTestable(), findsNothing);
     await tester.pump(const Duration(seconds: 15));
-    expect(first.calls, 3);
+    expect(first.calls, 4);
 
     await show(second);
     expect(second.calls, 1);
     expect(find.text('--'), findsNWidgets(3));
-    expect(first.calls, 3);
+    expect(first.calls, 4);
     second.disconnect();
     await tester.pump();
     expect(find.text('状态不可用'), findsOneWidget);
@@ -856,6 +870,50 @@ __HARBOR_REMOTE_METRICS_END__
     expect(tester.takeException(), isNull);
   });
 
+  testWidgets('CPU 详情显示封装温度、来源与更高的单核读数，无传感器时显示占位', (tester) async {
+    _setView(tester, const Size(900, 600));
+    await tester.pumpWidget(_statusBar());
+    await _openDetails(tester, 'cpu');
+    final tile = find.byKey(const ValueKey('cpu-temperature'));
+    expect(tile, findsOneWidget);
+    expect(find.byKey(const ValueKey('cpu-temperature-value')), findsOneWidget);
+    expect(_detailsTexts(tester), containsAll(['64°C', '最高 88°C']));
+    expect(_detailsTexts(tester), contains('Package id 0 · coretemp'));
+    expect(tester.getSemantics(tile).label, 'CPU 温度 64°C，最高 88°C');
+    final valueBox = tester.getRect(
+      find.byKey(const ValueKey('cpu-temperature-value')),
+    );
+    final sourceBox = tester.getRect(
+      find.byKey(const ValueKey('cpu-temperature-source')),
+    );
+    final percentBox = tester.getRect(find.text('47.0%'));
+    expect(valueBox.right, lessThanOrEqualTo(sourceBox.left));
+    expect(
+      sourceBox.right,
+      lessThanOrEqualTo(percentBox.left),
+      reason: '温度和传感器名都应在 CPU 使用率百分比左边',
+    );
+    expect((valueBox.center.dy - percentBox.center.dy).abs(), lessThan(8));
+    expect((sourceBox.center.dy - percentBox.center.dy).abs(), lessThan(8));
+    await tester.tap(_trigger('cpu'));
+    await _closeDetails(tester);
+
+    await tester.pumpWidget(_statusBar(metrics: _bareMetrics));
+    await _openDetails(tester, 'cpu');
+    expect(
+      find.descendant(
+        of: find.byKey(const ValueKey('cpu-temperature')),
+        matching: find.text('--'),
+      ),
+      findsOneWidget,
+      reason: '没有传感器时不能编造温度',
+    );
+    expect(_detailsTexts(tester), contains('主机未提供温度传感器'));
+    expect(find.byKey(const ValueKey('cpu-temperature-hottest')), findsNothing);
+    await tester.pumpWidget(const SizedBox.shrink());
+    expect(tester.takeException(), isNull);
+  });
+
   testWidgets('未启用 Swap 不显示虚构百分比，缺少内存总量时进程占比未知', (tester) async {
     _setView(tester, const Size(320, 550));
     await tester.pumpWidget(
@@ -1041,4 +1099,300 @@ __HARBOR_REMOTE_METRICS_END__
     await tester.pumpWidget(const SizedBox.shrink());
     expect(tester.takeException(), isNull);
   });
+
+  testWidgets('硬盘温度按物理设备列出，不随 df 分区重复', (tester) async {
+    _setView(tester, const Size(420, 640));
+    final sample = parseRemoteMetrics('''
+__HARBOR_REMOTE_METRICS_BEGIN__
+os Linux
+uptime 200
+disks-ok
+df /dev/nvme0n1p2 ext4 100000000 50000000 50000000 50% /
+df /dev/nvme0n1p1 vfat 512000 1024 510976 1% /boot/efi
+df /dev/sda1 ext4 2000000000 1000000000 1000000000 50% /data
+disktemp nvme nvme0n1 38000 Samsung SSD 990 PRO 2TB
+disktemp drivetemp sda 31000 WDC WD40EFRX-68N32N0
+__HARBOR_REMOTE_METRICS_END__
+''')!;
+    final metrics = RemoteHostMetrics.fromSamples(sample, null);
+    // 温度来自 hwmon 的整块物理盘，df 只提供分区，两者必须分别呈现。
+    expect(metrics.diskTemperatures.length, 2);
+    await tester.pumpWidget(_statusBar(metrics: metrics));
+    await _openDetails(tester, 'disk');
+
+    expect(
+      find.byKey(const ValueKey('disk-temperature-nvme0n1')),
+      findsOneWidget,
+    );
+    expect(find.byKey(const ValueKey('disk-temperature-sda')), findsOneWidget);
+    // 分区名不参与温度行：一块盘背多个挂载点也只出现一次。
+    expect(
+      find.byKey(const ValueKey('disk-temperature-nvme0n1p2')),
+      findsNothing,
+    );
+    expect(
+      find.byKey(const ValueKey('disk-temperature-nvme0n1p1')),
+      findsNothing,
+    );
+    expect(find.byKey(const ValueKey('disk-temperature-sda1')), findsNothing);
+
+    expect(
+      find.byKey(const ValueKey('disk-temperature-value-nvme0n1')),
+      findsOneWidget,
+    );
+    expect(
+      find.byKey(const ValueKey('disk-temperature-value-sda')),
+      findsOneWidget,
+    );
+    final texts = _detailsTexts(tester);
+    expect(texts, containsAll(['38°C', '31°C']));
+    expect(texts, contains('NVMe · Samsung SSD 990 PRO 2TB'));
+    expect(texts, contains('WDC WD40EFRX-68N32N0'));
+    expect(
+      tester
+          .getSemantics(find.byKey(const ValueKey('disk-temperature-nvme0n1')))
+          .label,
+      'nvme0n1 38°C，NVMe · Samsung SSD 990 PRO 2TB',
+    );
+    expect(
+      tester
+          .getSemantics(find.byKey(const ValueKey('disk-temperature-sda')))
+          .label,
+      'sda 31°C，WDC WD40EFRX-68N32N0',
+    );
+    // 分区行仍在，温度组不替代它们。
+    expect(find.byKey(const ValueKey('disk-mount-/')), findsOneWidget);
+    expect(find.byKey(const ValueKey('disk-mount-/data')), findsOneWidget);
+    expect(tester.takeException(), isNull);
+    await tester.pumpWidget(const SizedBox.shrink());
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('没有 df 分区时仍显示物理盘温度', (tester) async {
+    _setView(tester, const Size(420, 640));
+    await tester.pumpWidget(
+      _statusBar(
+        metrics: const RemoteHostMetrics(
+          diskPercent: 72,
+          diskTemperatures: [
+            RemoteDiskTemperature(
+              device: 'nvme0n1',
+              celsius: 38,
+              nvme: true,
+              model: 'Samsung SSD 990 PRO 2TB',
+            ),
+          ],
+        ),
+      ),
+    );
+    await _openDetails(tester, 'disk');
+    expect(
+      find.byKey(const ValueKey('disk-temperature-nvme0n1')),
+      findsOneWidget,
+    );
+    expect(_detailsTexts(tester), contains('38°C'));
+    // 分区缺失只影响分区行，物理盘温度照常显示。
+    expect(
+      find.descendant(of: _details, matching: find.text('分区信息不可用')),
+      findsOneWidget,
+    );
+    expect(find.byKey(const ValueKey('disk-mount-/')), findsNothing);
+    expect(tester.takeException(), isNull);
+    await tester.pumpWidget(const SizedBox.shrink());
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('没有硬盘温度传感器时明确提示，不伪造 0', (tester) async {
+    _setView(tester, const Size(420, 640));
+    // _metrics 有真实分区，但没有 hwmon 盘温。
+    await tester.pumpWidget(_statusBar());
+    await _openDetails(tester, 'disk');
+    expect(find.byKey(const ValueKey('disk-temperatures')), findsOneWidget);
+    expect(
+      find.descendant(of: _details, matching: find.text('主机未提供硬盘温度传感器')),
+      findsOneWidget,
+    );
+    expect(
+      find.byKey(const ValueKey('disk-temperature-nvme0n1')),
+      findsNothing,
+    );
+    expect(
+      find.descendant(of: _details, matching: find.textContaining('°C')),
+      findsNothing,
+      reason: '没有传感器时不能编造 0°C',
+    );
+    // 缺少温度不影响分区行。
+    expect(find.byKey(const ValueKey('disk-mount-/')), findsOneWidget);
+    expect(tester.takeException(), isNull);
+    await tester.pumpWidget(const SizedBox.shrink());
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('盘温消失或替换后不残留旧读数', (tester) async {
+    _setView(tester, const Size(420, 640));
+    const disks = [
+      RemoteDiskUsage(
+        device: '/dev/nvme0n1p2',
+        mountPoint: '/',
+        totalBytes: 100,
+        usedBytes: 50,
+        availableBytes: 50,
+      ),
+    ];
+    await tester.pumpWidget(
+      _statusBar(
+        metrics: const RemoteHostMetrics(
+          diskPercent: 50,
+          disks: disks,
+          disksAvailable: true,
+          diskTemperatures: [
+            RemoteDiskTemperature(
+              device: 'nvme0n1',
+              celsius: 38,
+              nvme: true,
+              model: 'Samsung SSD 990 PRO 2TB',
+            ),
+            RemoteDiskTemperature(
+              device: 'sda',
+              celsius: 31,
+              nvme: false,
+              model: 'WDC WD40EFRX-68N32N0',
+            ),
+          ],
+        ),
+      ),
+    );
+    await _openDetails(tester, 'disk');
+    expect(
+      find.byKey(const ValueKey('disk-temperature-nvme0n1')),
+      findsOneWidget,
+    );
+    expect(find.byKey(const ValueKey('disk-temperature-sda')), findsOneWidget);
+
+    // 第二次采样只剩一块盘：消失的旧读数不能留着。
+    await tester.pumpWidget(
+      _statusBar(
+        metrics: const RemoteHostMetrics(
+          diskPercent: 50,
+          disks: disks,
+          disksAvailable: true,
+          diskTemperatures: [
+            RemoteDiskTemperature(
+              device: 'sda',
+              celsius: 31,
+              nvme: false,
+              model: 'WDC WD40EFRX-68N32N0',
+            ),
+          ],
+        ),
+      ),
+    );
+    await _pumpFrames(tester);
+    expect(_details, findsOneWidget, reason: '读数更新不应关闭已打开的详情');
+    expect(
+      find.byKey(const ValueKey('disk-temperature-nvme0n1')),
+      findsNothing,
+    );
+    expect(find.byKey(const ValueKey('disk-temperature-sda')), findsOneWidget);
+
+    // 传感器整体消失时改为明确提示，而不是沿用上一次的温度。
+    await tester.pumpWidget(
+      _statusBar(
+        metrics: const RemoteHostMetrics(
+          diskPercent: 50,
+          disks: disks,
+          disksAvailable: true,
+        ),
+      ),
+    );
+    await _pumpFrames(tester);
+    expect(find.byKey(const ValueKey('disk-temperature-sda')), findsNothing);
+    expect(
+      find.descendant(of: _details, matching: find.text('主机未提供硬盘温度传感器')),
+      findsOneWidget,
+    );
+    expect(
+      find.descendant(of: _details, matching: find.textContaining('°C')),
+      findsNothing,
+    );
+    await tester.pumpWidget(const SizedBox.shrink());
+    expect(tester.takeException(), isNull);
+  });
+
+  for (final (width, scale) in [(320.0, 2.0), (240.0, 1.5)]) {
+    for (final brightness in [Brightness.light, Brightness.dark]) {
+      testWidgets('$width 宽 @${scale}x ${brightness.name} 下温度卡片不溢出', (
+        tester,
+      ) async {
+        _setView(tester, Size(width, 600));
+        await tester.pumpWidget(
+          _statusBar(
+            textScale: scale,
+            brightness: brightness,
+            metrics: const RemoteHostMetrics(
+              cpuPercent: 47,
+              diskPercent: 72,
+              cpuTemperatures: [
+                // 传感器名很长，封装读数优先于更热的单核。
+                RemoteTemperature(
+                  sensor: 'k10temp_thermal_zone_extended',
+                  label: 'Package id 0',
+                  celsius: 64,
+                ),
+                RemoteTemperature(
+                  sensor: 'k10temp',
+                  label: 'Core 1',
+                  celsius: 88,
+                ),
+              ],
+              diskTemperatures: [
+                RemoteDiskTemperature(
+                  device: 'nvme0n1',
+                  celsius: 38,
+                  nvme: true,
+                  model: 'Samsung SSD 990 PRO 2TB MZ-V9P2T0BW',
+                ),
+                RemoteDiskTemperature(
+                  device: 'sda',
+                  celsius: 31,
+                  nvme: false,
+                  model: 'WDC WD40EFRX-68N32N0 4TB SATA',
+                ),
+              ],
+            ),
+          ),
+        );
+        await _openDetails(tester, 'cpu');
+        expect(
+          find.byKey(const ValueKey('cpu-temperature-value')),
+          findsOneWidget,
+        );
+        expect(
+          find.byKey(const ValueKey('cpu-temperature-source')),
+          findsOneWidget,
+        );
+        expect(
+          find.byKey(const ValueKey('cpu-temperature-hottest')),
+          findsOneWidget,
+        );
+        expect(tester.takeException(), isNull, reason: 'CPU 温度卡片溢出');
+
+        await tester.tap(_trigger('disk'));
+        await _pumpFrames(tester);
+        expect(
+          find.byKey(const ValueKey('disk-temperature-nvme0n1')),
+          findsOneWidget,
+        );
+        expect(
+          find.byKey(const ValueKey('disk-temperature-sda')),
+          findsOneWidget,
+        );
+        expect(_detailsTexts(tester), contains('38°C'));
+        expect(tester.takeException(), isNull, reason: '硬盘温度行溢出');
+
+        await tester.pumpWidget(const SizedBox.shrink());
+        expect(tester.takeException(), isNull);
+      });
+    }
+  }
 }

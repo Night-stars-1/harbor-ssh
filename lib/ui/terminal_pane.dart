@@ -323,7 +323,13 @@ class _TerminalPaneState extends State<TerminalPane> {
   // while this pane is visible and connected. Results carry a generation so
   // a rebind, disconnect or hide discards anything that lands late instead
   // of painting stale values into the status strip.
+  //
+  // CPU and transfer rates need two samples. The periodic timer waits a full
+  // interval before its first tick, so the first pair is closed after one
+  // second instead of the configured cadence.
+  static const _metricsPrimeDelay = Duration(seconds: 1);
   Timer? _metricsTimer;
+  Timer? _metricsPrimeTimer;
   RemoteMetricsSample? _metricsSample;
   RemoteHostMetrics? _metrics;
   bool _metricsLoading = false;
@@ -349,6 +355,8 @@ class _TerminalPaneState extends State<TerminalPane> {
   void _stopMetrics({bool notify = true}) {
     _metricsTimer?.cancel();
     _metricsTimer = null;
+    _metricsPrimeTimer?.cancel();
+    _metricsPrimeTimer = null;
     // Invalidate any in-flight probe so its result is dropped.
     _metricsGeneration++;
     final wasVisible = _metrics != null || _metricsLoading;
@@ -373,6 +381,7 @@ class _TerminalPaneState extends State<TerminalPane> {
     }
     _metricsInFlight = false;
     if (!mounted || generation != _metricsGeneration) return;
+    final hadBaseline = _metricsSample != null;
     setState(() {
       _metricsLoading = false;
       if (sample == null) {
@@ -383,6 +392,17 @@ class _TerminalPaneState extends State<TerminalPane> {
         _metrics = RemoteHostMetrics.fromSamples(sample, _metricsSample);
         _metricsSample = sample;
       }
+    });
+    if (sample != null && !hadBaseline) _schedulePrimeSample();
+  }
+
+  void _schedulePrimeSample() {
+    if (widget.statusRefreshSeconds <= _metricsPrimeDelay.inSeconds) return;
+    _metricsPrimeTimer?.cancel();
+    _metricsPrimeTimer = Timer(_metricsPrimeDelay, () {
+      _metricsPrimeTimer = null;
+      if (!mounted || !_metricsEligible || _metricsInFlight) return;
+      unawaited(_sampleMetrics());
     });
   }
 

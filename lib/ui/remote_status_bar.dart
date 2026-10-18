@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
 import '../data/remote_metrics.dart';
+import 'theme.dart';
 
 /// Compact metrics with a single anchored detail panel; missing data stays
 /// unavailable instead of being rendered as zero.
@@ -331,6 +332,7 @@ class _RemoteStatusBarState extends State<RemoteStatusBar> {
   ) {
     final percent = metrics?.cpuPercent;
     final cores = metrics?.cpuCores ?? const <RemoteCpuCore>[];
+    final tags = _cpuTemperatureTags(context, metrics);
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       mainAxisSize: MainAxisSize.min,
@@ -341,6 +343,8 @@ class _RemoteStatusBarState extends State<RemoteStatusBar> {
           'CPU 使用率',
           _percent(percent, precise: true),
           percent,
+          beforeValue: tags.child,
+          beforeValueWidth: tags.width,
         ),
         const SizedBox(height: 10),
         _UsageBar(
@@ -348,7 +352,7 @@ class _RemoteStatusBarState extends State<RemoteStatusBar> {
           color: _barTone(colors, percent),
           height: 8,
         ),
-        const SizedBox(height: 14),
+        const SizedBox(height: 10),
         if (cores.isEmpty)
           _note(context, colors, '每核心数据不可用')
         else ...[
@@ -406,6 +410,74 @@ class _RemoteStatusBarState extends State<RemoteStatusBar> {
             ),
           ),
         ],
+      ),
+    );
+  }
+
+  /// Temperature, sensor name, and a hotter reading sit in tags left of the
+  /// CPU percent. Nothing temperature-related is repeated under the bar.
+  ({Widget child, double width}) _cpuTemperatureTags(
+    BuildContext context,
+    RemoteHostMetrics? metrics,
+  ) {
+    final reading = metrics?.cpuTemperature;
+    final hottest = metrics?.hottestCpuTemperature;
+    final celsius = reading?.celsius;
+    final String? hotLabel;
+    if (hottest != null &&
+        reading != null &&
+        hottest.celsius - reading.celsius >= 1) {
+      hotLabel = '最高 ${_celsius(hottest.celsius)}';
+    } else {
+      hotLabel = null;
+    }
+    final source = reading == null
+        ? '主机未提供温度传感器'
+        : reading.label == null
+        ? reading.sensor
+        : '${reading.label} · ${reading.sensor}';
+    final valueLabel = celsius == null ? '--' : _celsius(celsius);
+    final valueWidth = _temperatureTagWidth(context, valueLabel);
+    final sourceWidth = _temperatureTagWidth(context, source);
+    final hotWidth = hotLabel == null
+        ? 0.0
+        : 6 + _temperatureTagWidth(context, hotLabel);
+    return (
+      width: valueWidth + 6 + sourceWidth + hotWidth,
+      child: Semantics(
+        key: const ValueKey('cpu-temperature'),
+        container: true,
+        label: celsius == null
+            ? 'CPU 温度不可用'
+            : 'CPU 温度 ${_celsius(celsius)}'
+                  '${hotLabel == null ? '' : '，$hotLabel'}',
+        excludeSemantics: true,
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            _temperatureTag(
+              context,
+              valueLabel,
+              key: const ValueKey('cpu-temperature-value'),
+              celsius: celsius,
+            ),
+            const SizedBox(width: 6),
+            _temperatureTag(
+              context,
+              source,
+              key: const ValueKey('cpu-temperature-source'),
+            ),
+            if (hotLabel != null) ...[
+              const SizedBox(width: 6),
+              _temperatureTag(
+                context,
+                hotLabel,
+                key: const ValueKey('cpu-temperature-hottest'),
+                celsius: hottest?.celsius,
+              ),
+            ],
+          ],
+        ),
       ),
     );
   }
@@ -744,6 +816,8 @@ class _RemoteStatusBarState extends State<RemoteStatusBar> {
           percent,
         ),
         const SizedBox(height: 12),
+        _diskTemperatureSummary(context, metrics?.diskTemperatures ?? const []),
+        _divider(colors),
         // No `df` rows means no per-mount figures at all; deriving "available"
         // from the aggregate would disagree with the filesystem's reserved
         // blocks, so the panel stays explicitly unavailable.
@@ -758,6 +832,112 @@ class _RemoteStatusBarState extends State<RemoteStatusBar> {
     );
   }
 
+  /// Physical-disk temperatures stay separate from df mounts. No reading is a
+  /// single quiet line: an empty tonal card was louder than the partitions.
+  Widget _diskTemperatureSummary(
+    BuildContext context,
+    List<RemoteDiskTemperature> readings,
+  ) {
+    final theme = Theme.of(context);
+    final colors = theme.colorScheme;
+    if (readings.isEmpty) {
+      return Row(
+        key: const ValueKey('disk-temperatures'),
+        children: [
+          Icon(
+            Icons.device_thermostat_outlined,
+            size: 16,
+            color: colors.onSurfaceVariant,
+          ),
+          const SizedBox(width: 6),
+          Expanded(
+            child: Text(
+              '主机未提供硬盘温度传感器',
+              maxLines: 2,
+              overflow: TextOverflow.ellipsis,
+              style: theme.textTheme.bodySmall?.copyWith(
+                color: colors.onSurfaceVariant,
+              ),
+            ),
+          ),
+        ],
+      );
+    }
+    return Column(
+      key: const ValueKey('disk-temperatures'),
+      crossAxisAlignment: CrossAxisAlignment.start,
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        for (var index = 0; index < readings.length; index++) ...[
+          if (index > 0) const SizedBox(height: 10),
+          _diskTemperatureRow(context, readings[index]),
+        ],
+      ],
+    );
+  }
+
+  Widget _diskTemperatureRow(
+    BuildContext context,
+    RemoteDiskTemperature reading,
+  ) {
+    final theme = Theme.of(context);
+    final colors = theme.colorScheme;
+    final description = reading.nvme
+        ? reading.model == null
+              ? 'NVMe'
+              : 'NVMe · ${reading.model}'
+        : reading.model ?? '';
+    return Semantics(
+      key: ValueKey('disk-temperature-${reading.device}'),
+      container: true,
+      label:
+          '${reading.device} ${_celsius(reading.celsius)}'
+          '${description.isEmpty ? '' : '，$description'}',
+      excludeSemantics: true,
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Text(
+                  reading.device,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: theme.textTheme.labelLarge,
+                ),
+                if (description.isNotEmpty) ...[
+                  const SizedBox(height: 2),
+                  Text(
+                    description,
+                    maxLines: 2,
+                    overflow: TextOverflow.ellipsis,
+                    style: theme.textTheme.labelSmall?.copyWith(
+                      color: colors.onSurfaceVariant,
+                    ),
+                  ),
+                ],
+              ],
+            ),
+          ),
+          const SizedBox(width: 12),
+          Text(
+            _celsius(reading.celsius),
+            key: ValueKey('disk-temperature-value-${reading.device}'),
+            style: theme.textTheme.titleMedium?.copyWith(
+              color: _temperatureTone(colors, reading.celsius),
+              fontWeight: FontWeight.w600,
+              fontFeatures: _tabular,
+              height: 1.1,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
   Widget _diskRow(
     BuildContext context,
     ColorScheme colors,
@@ -769,7 +949,7 @@ class _RemoteStatusBarState extends State<RemoteStatusBar> {
       key: ValueKey('disk-mount-${disk.mountPoint}'),
       padding: const EdgeInsets.only(top: 2, bottom: 12),
       child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
+        crossAxisAlignment: CrossAxisAlignment.stretch,
         mainAxisSize: MainAxisSize.min,
         children: [
           Row(
@@ -783,8 +963,6 @@ class _RemoteStatusBarState extends State<RemoteStatusBar> {
                 ),
               ),
               const SizedBox(width: 8),
-              _diskDeviceTag(context, colors, disk.device),
-              const SizedBox(width: 10),
               Text(
                 _percent(percent),
                 maxLines: 1,
@@ -794,6 +972,15 @@ class _RemoteStatusBarState extends State<RemoteStatusBar> {
                 ),
               ),
             ],
+          ),
+          const SizedBox(height: 2),
+          Text(
+            disk.device,
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            style: theme.textTheme.labelSmall?.copyWith(
+              color: colors.onSurfaceVariant,
+            ),
           ),
           const SizedBox(height: 6),
           _UsageBar(percent: percent, color: _barTone(colors, percent)),
@@ -807,35 +994,6 @@ class _RemoteStatusBarState extends State<RemoteStatusBar> {
             ),
           ),
         ],
-      ),
-    );
-  }
-
-  Widget _diskDeviceTag(
-    BuildContext context,
-    ColorScheme colors,
-    String device,
-  ) {
-    final theme = Theme.of(context);
-    return ConstrainedBox(
-      constraints: const BoxConstraints(maxWidth: 132),
-      child: DecoratedBox(
-        decoration: BoxDecoration(
-          color: colors.surfaceContainerHighest,
-          borderRadius: BorderRadius.circular(999),
-        ),
-        child: Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 2),
-          child: Text(
-            device,
-            maxLines: 1,
-            overflow: TextOverflow.ellipsis,
-            style: theme.textTheme.labelSmall?.copyWith(
-              color: colors.onSurfaceVariant,
-              fontFeatures: _tabular,
-            ),
-          ),
-        ),
       ),
     );
   }
@@ -937,34 +1095,169 @@ class _RemoteStatusBarState extends State<RemoteStatusBar> {
     );
   }
 
+  /// Inner width of the details panel. [_details] clamps to the screen and
+  /// then insets 16px; MenuAnchor measures intrinsic height, so this cannot
+  /// come from a LayoutBuilder.
+  double _popupContentWidth(MediaQueryData media) {
+    final room = math.max(
+      0.0,
+      media.size.width - media.padding.horizontal - 24,
+    );
+    return math.max(0.0, math.min(380.0, room) - 32);
+  }
+
+  double _singleLineWidth(BuildContext context, String text, TextStyle? style) {
+    final painter = TextPainter(
+      text: TextSpan(
+        text: text,
+        style: DefaultTextStyle.of(context).style.merge(style),
+      ),
+      textDirection: Directionality.of(context),
+      textScaler: MediaQuery.textScalerOf(context),
+      maxLines: 1,
+    )..layout();
+    final width = painter.width;
+    painter.dispose();
+    return width;
+  }
+
+  Widget _temperatureTag(
+    BuildContext context,
+    String label, {
+    required Key key,
+    double? celsius,
+  }) {
+    final tone = _temperatureTone(Theme.of(context).colorScheme, celsius);
+    final base = Theme.of(context).textTheme.labelMedium;
+    final style = base?.copyWith(
+      color: tone,
+      fontWeight: FontWeight.w600,
+      fontFeatures: _tabular,
+      height: 1,
+      leadingDistribution: TextLeadingDistribution.even,
+    );
+    return Container(
+      key: key,
+      alignment: Alignment.center,
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+      decoration: ShapeDecoration(
+        color: tone.withValues(alpha: 0.16),
+        shape: HarborShapes.pill,
+      ),
+      child: Text(
+        label,
+        maxLines: 1,
+        softWrap: false,
+        textAlign: TextAlign.center,
+        textHeightBehavior: const TextHeightBehavior(
+          applyHeightToFirstAscent: false,
+          applyHeightToLastDescent: false,
+        ),
+        strutStyle: StrutStyle(
+          fontSize: base?.fontSize,
+          fontWeight: FontWeight.w600,
+          height: 1,
+          leading: 0,
+          forceStrutHeight: true,
+          leadingDistribution: TextLeadingDistribution.even,
+        ),
+        style: style,
+      ),
+    );
+  }
+
+  double _temperatureTagWidth(BuildContext context, String label) {
+    final style = Theme.of(context).textTheme.labelMedium?.copyWith(
+      fontWeight: FontWeight.w600,
+      fontFeatures: _tabular,
+      height: 1,
+    );
+    return _singleLineWidth(context, label, style) + 16;
+  }
+
   Widget _headline(
     BuildContext context,
     ColorScheme colors,
     String title,
     String value,
-    double? percent,
-  ) {
+    double? percent, {
+    Widget? beforeValue,
+    double beforeValueWidth = 0,
+  }) {
     final theme = Theme.of(context);
+    final valueStyle = theme.textTheme.headlineSmall?.copyWith(
+      color: _textTone(colors, percent),
+      fontFeatures: _tabular,
+      height: 1,
+      leadingDistribution: TextLeadingDistribution.even,
+    );
+    final titleStyle = theme.textTheme.titleSmall?.copyWith(
+      height: 1,
+      leadingDistribution: TextLeadingDistribution.even,
+    );
+    const textHeight = TextHeightBehavior(
+      applyHeightToFirstAscent: false,
+      applyHeightToLastDescent: false,
+    );
+    final titleText = Text(
+      title,
+      maxLines: 1,
+      overflow: TextOverflow.ellipsis,
+      textHeightBehavior: textHeight,
+      style: titleStyle,
+    );
+    final valueText = Text(
+      value,
+      maxLines: 1,
+      softWrap: false,
+      textHeightBehavior: textHeight,
+      style: valueStyle,
+    );
+    final tagShift = MediaQuery.textScalerOf(context).scale(1.5);
+    final trailing = beforeValue == null
+        ? valueText
+        : Row(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.center,
+            children: [
+              Transform.translate(
+                offset: Offset(0, tagShift),
+                child: beforeValue,
+              ),
+              const SizedBox(width: 8),
+              valueText,
+            ],
+          );
+    final contentWidth = _popupContentWidth(MediaQuery.of(context));
+    final valueWidth = _singleLineWidth(context, value, valueStyle);
+    final leading = beforeValue == null ? 0.0 : beforeValueWidth + 8;
+    // A headlineSmall percent at large text scale can be wider than the
+    // popup. Stack it instead of letting the title collapse and still
+    // overflowing the row.
+    if (valueWidth + leading + 8 + 48 > contentWidth) {
+      return Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          titleText,
+          const SizedBox(height: 2),
+          Align(
+            alignment: Alignment.centerRight,
+            child: FittedBox(
+              fit: BoxFit.scaleDown,
+              alignment: Alignment.centerRight,
+              child: trailing,
+            ),
+          ),
+        ],
+      );
+    }
     return Row(
+      crossAxisAlignment: CrossAxisAlignment.center,
       children: [
-        Expanded(
-          child: Text(
-            title,
-            maxLines: 1,
-            overflow: TextOverflow.ellipsis,
-            style: theme.textTheme.titleSmall,
-          ),
-        ),
+        Expanded(child: titleText),
         const SizedBox(width: 8),
-        Text(
-          value,
-          maxLines: 1,
-          style: theme.textTheme.headlineSmall?.copyWith(
-            color: _textTone(colors, percent),
-            fontFeatures: _tabular,
-            height: 1.1,
-          ),
-        ),
+        trailing,
       ],
     );
   }
@@ -1029,6 +1322,21 @@ class _RemoteStatusBarState extends State<RemoteStatusBar> {
   );
 
   static const _tabular = [FontFeature.tabularFigures()];
+
+  /// Common CPU throttle points sit near 90–100 °C; warn well before them.
+  static const _warmCelsius = 70.0;
+  static const _hotCelsius = 85.0;
+
+  static Color _temperatureTone(ColorScheme colors, double? celsius) =>
+      celsius == null
+      ? colors.onSurfaceVariant
+      : celsius >= _hotCelsius
+      ? colors.error
+      : celsius >= _warmCelsius
+      ? colors.tertiary
+      : colors.onSurface;
+
+  static String _celsius(double value) => '${value.round()}°C';
 
   static Color _textTone(ColorScheme colors, double? percent) => percent == null
       ? colors.onSurfaceVariant

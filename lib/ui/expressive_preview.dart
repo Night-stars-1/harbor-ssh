@@ -392,6 +392,24 @@ const _remoteMetricsSample = RemoteHostMetrics(
   processesAvailable: true,
   disks: _remoteDisks,
   disksAvailable: true,
+  cpuTemperatures: [
+    RemoteTemperature(sensor: 'coretemp', label: 'Package id 0', celsius: 62),
+    RemoteTemperature(sensor: 'coretemp', label: 'Core 3', celsius: 71),
+  ],
+  diskTemperatures: [
+    RemoteDiskTemperature(
+      device: 'nvme0n1',
+      model: 'Samsung SSD 980 PRO 1TB',
+      nvme: true,
+      celsius: 42,
+    ),
+    RemoteDiskTemperature(
+      device: 'sda',
+      model: 'ST4000VN008-2DR166',
+      nvme: false,
+      celsius: 36,
+    ),
+  ],
 );
 
 Widget _remoteStatusPreview({

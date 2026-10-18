@@ -125,6 +125,38 @@ __HARBOR_REMOTE_METRICS_END__
       expect(cpuOnly.diskTotalBytes, isNull);
     });
 
+    test('只有 hwmon 可读的 Linux 主机仍给出温度读数，而不是 null', () {
+      final sensorsOnly = parseRemoteMetrics('''
+__HARBOR_REMOTE_METRICS_BEGIN__
+os Linux
+temp hwmon coretemp 58000 Package id 0
+disktemp nvme nvme0n1 42900 Samsung SSD 970
+disktemp drivetemp sda 31000 ST1000DM010-2EP102
+__HARBOR_REMOTE_METRICS_END__
+''')!;
+      expect(sensorsOnly.uptimeSeconds, isNull);
+      expect(sensorsOnly.cpuTotal, isNull);
+      expect(sensorsOnly.disks, isEmpty);
+      expect(sensorsOnly.disksAvailable, isFalse);
+      final metrics = RemoteHostMetrics.fromSamples(sensorsOnly, null);
+      expect(metrics.cpuTemperature!.celsius, 58);
+      expect(metrics.diskTemperatures.map((reading) => reading.device), [
+        'nvme0n1',
+        'sda',
+      ]);
+      // 越界温度仍然不算读数：只有被丢弃的传感器行时依旧是 null。
+      expect(
+        parseRemoteMetrics('''
+__HARBOR_REMOTE_METRICS_BEGIN__
+os Linux
+temp hwmon coretemp 255000 Core 0
+disktemp drivetemp sda -273000
+__HARBOR_REMOTE_METRICS_END__
+'''),
+        isNull,
+      );
+    });
+
     test('未启用 Swap 与错误空闲值不伪造占用率', () {
       final disabled = parseRemoteMetrics('''
 __HARBOR_REMOTE_METRICS_BEGIN__
@@ -246,6 +278,197 @@ __HARBOR_REMOTE_METRICS_END__
 ''')!;
       expect(sample.cpuCores, isEmpty);
       expect(sample.uptimeSeconds, 5);
+    });
+
+    test('CPU 温度：毫摄氏度换算、标签保留，封装传感器代表整颗 CPU', () {
+      final sample = parseRemoteMetrics('''
+__HARBOR_REMOTE_METRICS_BEGIN__
+os Linux
+uptime 5
+temp hwmon coretemp 71000 Core 3
+temp hwmon coretemp 62500 Package id 0
+temp hwmon coretemp 62500 Package id 0
+__HARBOR_REMOTE_METRICS_END__
+''')!;
+      expect(sample.cpuTemperatures, hasLength(2));
+      final metrics = RemoteHostMetrics.fromSamples(sample, null);
+      expect(metrics.cpuTemperature!.label, 'Package id 0');
+      expect(metrics.cpuTemperature!.celsius, 62.5);
+      expect(metrics.hottestCpuTemperature!.celsius, 71);
+    });
+
+    test('AMD 优先 Tdie，没有封装传感器时取最高读数', () {
+      RemoteTemperature? pick(String rows) => RemoteHostMetrics.fromSamples(
+        parseRemoteMetrics('''
+__HARBOR_REMOTE_METRICS_BEGIN__
+os Linux
+uptime 5
+$rows
+__HARBOR_REMOTE_METRICS_END__
+''')!,
+        null,
+      ).cpuTemperature;
+      expect(
+        pick('temp hwmon k10temp 75000 Tctl\ntemp hwmon k10temp 65000 Tdie')!
+            .label,
+        'Tdie',
+      );
+      expect(
+        pick('temp zone soc-thermal 48000\ntemp zone cpu1-thermal 53000')!
+            .celsius,
+        53,
+      );
+    });
+
+    test('温度越界、非数字、非法传感器名与哨兵外的伪造读数被丢弃', () {
+      final sample = parseRemoteMetrics('''
+temp hwmon coretemp 99000 Package id 0
+__HARBOR_REMOTE_METRICS_BEGIN__
+os Linux
+uptime 5
+temp hwmon coretemp 255000 Core 0
+temp hwmon coretemp -50000 Core 1
+temp hwmon coretemp warm Core 2
+temp hwmon core\$temp 40000 Core 3
+temp other cpu 40000
+temp zone x86_pkg_temp
+__HARBOR_REMOTE_METRICS_END__
+''')!;
+      expect(sample.cpuTemperatures, isEmpty);
+      expect(
+        RemoteHostMetrics.fromSamples(sample, null).cpuTemperature,
+        isNull,
+      );
+    });
+
+    test('硬盘温度：NVMe 与 SATA 分别换算毫摄氏度并保留型号', () {
+      final sample = parseRemoteMetrics('''
+__HARBOR_REMOTE_METRICS_BEGIN__
+os Linux
+uptime 5
+disktemp nvme nvme0n1 42900 Samsung SSD 970 EVO Plus 1TB
+disktemp drivetemp sda 31000 ST1000DM010-2EP102
+disktemp drivetemp sdb 31050
+__HARBOR_REMOTE_METRICS_END__
+''')!;
+      expect(sample.diskTemperatures.map((reading) => reading.device), [
+        'nvme0n1',
+        'sda',
+        'sdb',
+      ]);
+      final nvme = sample.diskTemperatures.first;
+      expect(nvme.nvme, isTrue);
+      expect(nvme.celsius, 42.9);
+      expect(nvme.model, 'Samsung SSD 970 EVO Plus 1TB');
+      final sata = sample.diskTemperatures[1];
+      expect(sata.nvme, isFalse);
+      expect(sata.celsius, 31);
+      expect(sata.model, 'ST1000DM010-2EP102');
+      // 毫摄氏度而不是十分之一度：31050 是 31.05 度。
+      expect(sample.diskTemperatures.last.celsius, closeTo(31.05, 1e-9));
+      expect(sample.diskTemperatures.last.model, isNull);
+      // 硬盘温度不依赖 df：本份样本没有任何 df 行，读数照样透传。
+      expect(sample.disksAvailable, isFalse);
+      final metrics = RemoteHostMetrics.fromSamples(sample, null);
+      expect(metrics.diskTemperatures.map((reading) => reading.device), [
+        'nvme0n1',
+        'sda',
+        'sdb',
+      ]);
+      expect(metrics.diskTemperatures.first.celsius, 42.9);
+    });
+
+    test('硬盘温度：型号去掉 sysfs 填充，超长型号只丢型号不丢读数', () {
+      final tooLong = 'M' * 65;
+      final sample = parseRemoteMetrics('''
+__HARBOR_REMOTE_METRICS_BEGIN__
+os Linux
+uptime 5
+disktemp nvme nvme0n1 42900   Samsung   SSD   970   EVO Plus${' ' * 8}
+disktemp drivetemp sda 31000 $tooLong
+disktemp drivetemp sdb 30000
+__HARBOR_REMOTE_METRICS_END__
+''')!;
+      expect(sample.diskTemperatures, hasLength(3));
+      expect(sample.diskTemperatures.first.model, 'Samsung SSD 970 EVO Plus');
+      expect(sample.diskTemperatures[1].model, isNull);
+      expect(sample.diskTemperatures[1].celsius, 31);
+      expect(sample.diskTemperatures.last.model, isNull);
+      expect(sample.diskTemperatures.last.celsius, 30);
+    });
+
+    test('硬盘温度：畸形、越界与不可用读数都不产生条目', () {
+      final sample = parseRemoteMetrics('''
+__HARBOR_REMOTE_METRICS_BEGIN__
+os Linux
+uptime 5
+disktemp nvme nvme0n1
+disktemp drivetemp sda${'  '}
+disktemp drivetemp sdb warm
+disktemp smartctl sdc 30000
+disktemp nvme ../sda 30000
+disktemp nvme nvme0n1 200000
+disktemp drivetemp sdd -50000
+disktemp drivetemp sde -273000
+disktemp drivetemp sdf
+disktemp
+__HARBOR_REMOTE_METRICS_END__
+''')!;
+      expect(sample.diskTemperatures, isEmpty);
+      expect(
+        RemoteHostMetrics.fromSamples(sample, null).diskTemperatures,
+        isEmpty,
+      );
+    });
+
+    test('硬盘温度：同一设备只保留首个读数，顺序按块设备名固定', () {
+      final sample = parseRemoteMetrics('''
+__HARBOR_REMOTE_METRICS_BEGIN__
+os Linux
+uptime 5
+disktemp drivetemp sdb 31000 ST2000DM008
+disktemp nvme nvme0n1 42900
+disktemp nvme nvme0n1 90000 Duplicate
+disktemp drivetemp sda 30000
+__HARBOR_REMOTE_METRICS_END__
+''')!;
+      expect(sample.diskTemperatures.map((reading) => reading.device), [
+        'nvme0n1',
+        'sda',
+        'sdb',
+      ]);
+      // 同一块盘的第二个读数被忽略，保留的是探针先给出的那一个。
+      expect(sample.diskTemperatures.first.celsius, 42.9);
+      expect(sample.diskTemperatures.first.model, isNull);
+      expect(sample.diskTemperatures.last.celsius, 31);
+    });
+
+    test('CPU 温度与硬盘温度不会互相混入', () {
+      final sample = parseRemoteMetrics('''
+__HARBOR_REMOTE_METRICS_BEGIN__
+os Linux
+uptime 5
+temp hwmon coretemp 58000 Package id 0
+temp hwmon coretemp 61000 Core 0
+disktemp nvme nvme0n1 42900 Samsung SSD 970
+disktemp drivetemp sda 31000 ST1000DM010-2EP102
+__HARBOR_REMOTE_METRICS_END__
+''')!;
+      final metrics = RemoteHostMetrics.fromSamples(sample, null);
+      expect(metrics.cpuTemperatures.map((reading) => reading.sensor), [
+        'coretemp',
+        'coretemp',
+      ]);
+      expect(metrics.cpuTemperature!.celsius, 58);
+      expect(metrics.hottestCpuTemperature!.celsius, 61);
+      expect(metrics.diskTemperatures.map((reading) => reading.device), [
+        'nvme0n1',
+        'sda',
+      ]);
+      expect(metrics.diskTemperatures.map((reading) => reading.nvme), [
+        true,
+        false,
+      ]);
     });
 
     test('进程按 RSS 取前十，单位为字节且只保留进程名', () {
@@ -761,6 +984,51 @@ __HARBOR_REMOTE_METRICS_END__
         ],
       );
       expect(RemoteHostMetrics.fromSamples(noRoot, null).diskPercent, isNull);
+    });
+
+    test('硬盘温度只取当前样本：首份样本可见，消失的硬盘不沿用', () {
+      const firstSample = RemoteMetricsSample(
+        uptimeSeconds: 100,
+        cpuTemperatures: [
+          RemoteTemperature(
+            sensor: 'coretemp',
+            label: 'Package id 0',
+            celsius: 58,
+          ),
+        ],
+        diskTemperatures: [
+          RemoteDiskTemperature(
+            device: 'nvme0n1',
+            celsius: 42.9,
+            nvme: true,
+            model: 'Samsung SSD 970 EVO Plus 1TB',
+          ),
+          RemoteDiskTemperature(device: 'sda', celsius: 31, nvme: false),
+        ],
+      );
+      // 首份样本没有差值基准，但硬盘温度本来就不需要差值。
+      final initial = RemoteHostMetrics.fromSamples(firstSample, null);
+      expect(initial.diskTemperatures.map((reading) => reading.device), [
+        'nvme0n1',
+        'sda',
+      ]);
+      expect(initial.diskTemperatures.first.celsius, 42.9);
+      expect(initial.diskTemperatures.first.nvme, isTrue);
+      expect(initial.diskTemperatures.last.model, isNull);
+
+      const laterSample = RemoteMetricsSample(
+        uptimeSeconds: 105,
+        diskTemperatures: [
+          RemoteDiskTemperature(device: 'sda', celsius: 33, nvme: false),
+        ],
+      );
+      final later = RemoteHostMetrics.fromSamples(laterSample, firstSample);
+      // 拔掉的 NVMe 不沿用上一份读数，剩下的硬盘用本份样本的温度。
+      expect(later.diskTemperatures.map((reading) => reading.device), ['sda']);
+      expect(later.diskTemperatures.single.celsius, 33);
+      // 当前样本没有 CPU 传感器，也不沿用上一份的 CPU 温度。
+      expect(later.cpuTemperatures, isEmpty);
+      expect(later.cpuTemperature, isNull);
     });
   });
 }

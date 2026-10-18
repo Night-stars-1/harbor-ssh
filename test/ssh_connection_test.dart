@@ -690,6 +690,11 @@ void main() {
         final second = await connection.readRemoteMetrics();
         expect(first, isNotNull);
         expect(second, isNotNull);
+        // 硬盘温度不需要样本差值，首份样本就有读数。
+        expect(first!.diskTemperatures.map((reading) => reading.device), [
+          'nvme0n1',
+          'sda',
+        ]);
         final metrics = RemoteHostMetrics.fromSamples(second!, first);
         expect(metrics.cpuPercent, greaterThan(0));
         expect(metrics.memoryPercent, greaterThan(0));
@@ -710,6 +715,21 @@ void main() {
         ]);
         expect(metrics.disks.first.totalBytes, 20480000 * 1024);
         expect(metrics.disks.first.availableBytes, 9216000 * 1024);
+        // 硬盘温度来自 hwmon，与 df 的挂载卷无关，顺序按块设备名固定。
+        expect(metrics.diskTemperatures.map((reading) => reading.device), [
+          'nvme0n1',
+          'sda',
+        ]);
+        expect(metrics.diskTemperatures.first.celsius, 42.9);
+        expect(metrics.diskTemperatures.first.nvme, isTrue);
+        // sysfs 型号里的填充必须被去掉。
+        expect(
+          metrics.diskTemperatures.first.model,
+          'Samsung SSD 970 EVO Plus 1TB',
+        );
+        expect(metrics.diskTemperatures.last.celsius, 31);
+        expect(metrics.diskTemperatures.last.nvme, isFalse);
+        expect(metrics.diskTemperatures.last.model, 'ST1000DM010-2EP102');
         expect(connection.terminal.buffer.getText(), before);
         connection.send('still-interactive\r');
         await eventually(

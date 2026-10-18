@@ -110,6 +110,68 @@ if command -v df > /dev/null 2>&1; then
     done
   fi
 fi
+metrics_hwmon_found=
+for metrics_hwmon in /sys/class/hwmon/hwmon*; do
+  [ -r "$metrics_hwmon/name" ] || continue
+  metrics_chip=
+  IFS= read -r metrics_chip < "$metrics_hwmon/name" || metrics_chip=
+  case "$metrics_chip" in
+    coretemp|k10temp|k8temp|zenpower|cpu_thermal|cpu-thermal|soc_thermal|cputemp|apple_smc_temp)
+      for metrics_input in "$metrics_hwmon"/temp*_input; do
+        [ -r "$metrics_input" ] || continue
+        metrics_value=
+        IFS= read -r metrics_value < "$metrics_input" || continue
+        metrics_label=
+        metrics_label_file=${metrics_input%_input}_label
+        if [ -r "$metrics_label_file" ]; then
+          IFS= read -r metrics_label < "$metrics_label_file" || metrics_label=
+        fi
+        printf "temp hwmon %s %s %s\n" "$metrics_chip" "$metrics_value" "$metrics_label"
+        metrics_hwmon_found=1
+      done
+      ;;
+    nvme|drivetemp)
+      [ -r "$metrics_hwmon/temp1_input" ] || continue
+      metrics_value=
+      IFS= read -r metrics_value < "$metrics_hwmon/temp1_input" || continue
+      metrics_device=$(cd -P "$metrics_hwmon/device" 2>/dev/null && pwd) || continue
+      metrics_block=
+      for metrics_candidate in "$metrics_device"/block/* "$metrics_device"/nvme* "$metrics_device"/nvme/nvme*/nvme*; do
+        [ -d "$metrics_candidate" ] || continue
+        metrics_name=${metrics_candidate##*/}
+        case "$metrics_name" in
+          nvme*c*n*) continue ;;
+          nvme*n*|sd*|hd*|vd*|xvd*|mmcblk*) metrics_block=$metrics_name; break ;;
+        esac
+      done
+      [ -n "$metrics_block" ] || metrics_block=${metrics_device##*/}
+      if [ ! -r "$metrics_device/model" ]; then
+        for metrics_candidate in "$metrics_device"/nvme/nvme*; do
+          [ -r "$metrics_candidate/model" ] && metrics_device=$metrics_candidate && break
+        done
+      fi
+      metrics_model=
+      if [ -r "$metrics_device/model" ]; then
+        IFS= read -r metrics_model < "$metrics_device/model" || metrics_model=
+      fi
+      printf "disktemp %s %s %s %s\n" "$metrics_chip" "$metrics_block" "$metrics_value" "$metrics_model"
+      ;;
+  esac
+done
+if [ -z "$metrics_hwmon_found" ]; then
+  for metrics_zone in /sys/class/thermal/thermal_zone*; do
+    [ -r "$metrics_zone/type" ] && [ -r "$metrics_zone/temp" ] || continue
+    metrics_type=
+    IFS= read -r metrics_type < "$metrics_zone/type" || continue
+    case "$metrics_type" in
+      x86_pkg_temp|*cpu*|*CPU*|soc*) ;;
+      *) continue ;;
+    esac
+    metrics_value=
+    IFS= read -r metrics_value < "$metrics_zone/temp" || continue
+    printf "temp zone %s %s\n" "$metrics_type" "$metrics_value"
+  done
+fi
 printf "__HARBOR_REMOTE_METRICS_END__\n"
 ''';
 
@@ -138,6 +200,48 @@ final class RemoteCpuCore {
   /// 0..100, or null on the first sample, for a hot-plugged core, and after a
   /// counter reset.
   final double? percent;
+}
+
+/// One CPU temperature sensor reading.
+final class RemoteTemperature {
+  const RemoteTemperature({
+    required this.sensor,
+    required this.celsius,
+    this.label,
+  });
+
+  /// hwmon chip (`coretemp`, `k10temp`, ...) or thermal zone type
+  /// (`x86_pkg_temp`, `cpu-thermal`, ...).
+  final String sensor;
+
+  /// The channel's own label (`Package id 0`, `Tctl`, `Core 3`), when the
+  /// driver provides one.
+  final String? label;
+
+  final double celsius;
+}
+
+/// One drive's temperature from its hwmon sensor (`nvme` or `drivetemp`).
+final class RemoteDiskTemperature {
+  const RemoteDiskTemperature({
+    required this.device,
+    required this.celsius,
+    required this.nvme,
+    this.model,
+  });
+
+  /// Whole-disk block name (`nvme0n1`, `sda`); the controller or SCSI address
+  /// when no block device could be resolved.
+  final String device;
+
+  /// Model string as the drive reports it, padding removed.
+  final String? model;
+
+  /// NVMe drives run hotter by design than SATA/SAS disks.
+  final bool nvme;
+
+  /// NVMe composite or drive temperature.
+  final double celsius;
 }
 
 /// One process from `ps`, reduced to what memory accounting needs.
@@ -229,6 +333,8 @@ final class RemoteMetricsSample {
     this.processesAvailable = false,
     this.disks = const [],
     this.disksAvailable = false,
+    this.cpuTemperatures = const [],
+    this.diskTemperatures = const [],
   });
 
   /// `/proc/uptime` first field, in seconds. Used as the interval clock so
@@ -278,6 +384,17 @@ final class RemoteMetricsSample {
 
   /// True only when the probe confirmed `df` produced a listing.
   final bool disksAvailable;
+
+  /// CPU temperature sensors in probe order. hwmon CPU chips win; thermal
+  /// zones are read only when no such chip exists. Empty on hosts without
+  /// sensors, which includes most virtual machines and containers.
+  final List<RemoteTemperature> cpuTemperatures;
+
+  /// Drive temperatures from `nvme` and `drivetemp` hwmon sensors, one per
+  /// drive and ordered by block device name, so the rows a user sees do not
+  /// depend on the kernel's hwmon probe order. SATA disks report only once the
+  /// `drivetemp` module is loaded.
+  final List<RemoteDiskTemperature> diskTemperatures;
 }
 
 /// Instantaneous figures derived from one or two [RemoteMetricsSample]s.
@@ -300,6 +417,8 @@ final class RemoteHostMetrics {
     this.processesAvailable = false,
     this.disks = const [],
     this.disksAvailable = false,
+    this.cpuTemperatures = const [],
+    this.diskTemperatures = const [],
   });
 
   /// CPU, memory and disk usage as a percentage (0..100), or null when the
@@ -338,6 +457,46 @@ final class RemoteHostMetrics {
 
   /// Whether the probe could read the mount table at all.
   final bool disksAvailable;
+
+  /// CPU temperature sensors of the current sample.
+  final List<RemoteTemperature> cpuTemperatures;
+
+  /// Drive temperatures of the current sample, one per drive the host
+  /// reported, ordered by block device name. Read from the current sample
+  /// only: a drive that disappeared is not carried over from the previous one.
+  final List<RemoteDiskTemperature> diskTemperatures;
+
+  /// The reading that represents the whole CPU: the package or die sensor
+  /// when the driver names one, otherwise the hottest reading.
+  RemoteTemperature? get cpuTemperature {
+    for (final pattern in _packageSensors) {
+      for (final reading in cpuTemperatures) {
+        if (pattern.hasMatch(reading.label ?? reading.sensor)) return reading;
+      }
+    }
+    return hottestCpuTemperature;
+  }
+
+  /// The hottest CPU sensor, or null without readings.
+  RemoteTemperature? get hottestCpuTemperature {
+    RemoteTemperature? hottest;
+    for (final reading in cpuTemperatures) {
+      if (hottest == null || reading.celsius > hottest.celsius) {
+        hottest = reading;
+      }
+    }
+    return hottest;
+  }
+
+  /// Whole-CPU sensor names in preference order: Intel package, AMD die
+  /// (Tdie excludes the Tctl fan-control offset), then generic CPU zones.
+  static final _packageSensors = [
+    RegExp(r'^Package id \d+$'),
+    RegExp(r'^Tdie$'),
+    RegExp(r'^Tctl$'),
+    RegExp(r'^x86_pkg_temp$'),
+    RegExp(r'^CPU( Temperature)?$', caseSensitive: false),
+  ];
 
   /// Derive metrics from [current]; [previous] is required for [cpuPercent],
   /// [cpuCores] percentages and the transfer rates, and may be null for the
@@ -380,6 +539,8 @@ final class RemoteHostMetrics {
       processesAvailable: current.processesAvailable,
       disks: current.disks,
       disksAvailable: current.disksAvailable,
+      cpuTemperatures: current.cpuTemperatures,
+      diskTemperatures: current.diskTemperatures,
     );
   }
 
@@ -536,6 +697,8 @@ RemoteMetricsSample? parseRemoteMetrics(String output) {
   final parsedDisks = <RemoteDiskUsage>[];
   var disksAvailable = false;
   final mountTypes = <String, String>{};
+  final cpuTemperatures = <RemoteTemperature>[];
+  final diskTemperatures = <RemoteDiskTemperature>[];
 
   for (final raw in lines.sublist(start + 1, end)) {
     final line = raw.trim();
@@ -601,6 +764,23 @@ RemoteMetricsSample? parseRemoteMetrics(String output) {
           final disk = _parseBasicDisk(value, mountTypes);
           if (disk != null) parsedDisks.add(disk);
         }
+      case 'temp':
+        final reading = _parseTemperature(value);
+        if (reading != null &&
+            cpuTemperatures.length < _maxTemperatures &&
+            !cpuTemperatures.any(
+              (seen) =>
+                  seen.sensor == reading.sensor && seen.label == reading.label,
+            )) {
+          cpuTemperatures.add(reading);
+        }
+      case 'disktemp':
+        final reading = _parseDiskTemperature(value);
+        if (reading != null &&
+            diskTemperatures.length < _maxTemperatures &&
+            !diskTemperatures.any((seen) => seen.device == reading.device)) {
+          diskTemperatures.add(reading);
+        }
     }
   }
 
@@ -612,14 +792,18 @@ RemoteMetricsSample? parseRemoteMetrics(String output) {
   // Anything that is not a confirmed Linux host has no /proc contract at all.
   if (os != 'Linux') return null;
   // A Linux host that exposed nothing readable (missing /proc, restricted
-  // container) must not look like a live reading of zeroes.
+  // container) must not look like a live reading of zeroes. A temperature is a
+  // reading like any other: a host whose only readable interface is hwmon
+  // still has something to show, and dropping it would hide real sensors.
   if (uptimeSeconds == null &&
       cpuTotal == null &&
       cpuCores.isEmpty &&
       memoryTotalKb == null &&
       disks.isEmpty &&
       networkRxBytes == null &&
-      networkTxBytes == null) {
+      networkTxBytes == null &&
+      cpuTemperatures.isEmpty &&
+      diskTemperatures.isEmpty) {
     return null;
   }
 
@@ -659,6 +843,11 @@ RemoteMetricsSample? parseRemoteMetrics(String output) {
     final byResident = right.residentBytes.compareTo(left.residentBytes);
     return byResident != 0 ? byResident : left.pid.compareTo(right.pid);
   });
+  // Kernel hwmon indices are handed out in probe order, which changes between
+  // boots, so probe order would reshuffle the drive rows for no reason. The
+  // devices are unique after de-duplication, which makes the name a total
+  // order: a fixed order with nothing invented.
+  diskTemperatures.sort((left, right) => left.device.compareTo(right.device));
 
   return RemoteMetricsSample(
     uptimeSeconds: uptimeSeconds,
@@ -679,6 +868,58 @@ RemoteMetricsSample? parseRemoteMetrics(String output) {
     processesAvailable: processesAvailable,
     disks: disks,
     disksAvailable: disksAvailable,
+    cpuTemperatures: cpuTemperatures,
+    diskTemperatures: diskTemperatures,
+  );
+}
+
+/// `hwmon <chip> <millidegrees> [label...]` or `zone <type> <millidegrees>`.
+///
+/// Sysfs reports millidegrees Celsius. Readings outside -40..150 °C come from
+/// disconnected inputs or broken drivers and are dropped instead of shown.
+RemoteTemperature? _parseTemperature(String value) {
+  final tokens = _tokens(value);
+  if (tokens.length < 3) return null;
+  final source = tokens[0];
+  if (source != 'hwmon' && source != 'zone') return null;
+  final sensor = tokens[1];
+  if (!_sensorName.hasMatch(sensor)) return null;
+  final milli = int.tryParse(tokens[2]);
+  if (milli == null) return null;
+  final celsius = milli / 1000;
+  if (celsius < -40 || celsius > 150) return null;
+  final label = source == 'hwmon' && tokens.length > 3
+      ? tokens.sublist(3).join(' ')
+      : null;
+  if (label != null && label.length > 48) return null;
+  return RemoteTemperature(sensor: sensor, label: label, celsius: celsius);
+}
+
+/// `<nvme|drivetemp> <device> <millidegrees> [model...]`.
+///
+/// The value is the chip's `temp1_input`, which is the whole-drive reading on
+/// both drivers: an NVMe controller reports its composite temperature there
+/// (Sensor 1/2 live in `temp2`/`temp3` and are deliberately not used), and
+/// `drivetemp` reports the SATA drive temperature. The model keeps its inner
+/// spacing with sysfs padding removed; a model too long to be real is dropped
+/// while the reading is kept.
+RemoteDiskTemperature? _parseDiskTemperature(String value) {
+  final tokens = _tokens(value);
+  if (tokens.length < 3) return null;
+  final kind = tokens[0];
+  if (kind != 'nvme' && kind != 'drivetemp') return null;
+  final device = tokens[1];
+  if (!_driveName.hasMatch(device)) return null;
+  final milli = int.tryParse(tokens[2]);
+  if (milli == null) return null;
+  final celsius = milli / 1000;
+  if (celsius < -40 || celsius > 150) return null;
+  final model = tokens.length > 3 ? tokens.sublist(3).join(' ') : null;
+  return RemoteDiskTemperature(
+    device: device,
+    model: model == null || model.length > 64 ? null : model,
+    nvme: kind == 'nvme',
+    celsius: celsius,
   );
 }
 
@@ -929,6 +1170,9 @@ bool _isStorageVolume(RemoteDiskUsage disk) {
 /// Largest resident processes kept per sample.
 const _maxProcesses = 10;
 
+/// CPU sensor channels kept per sample; large servers expose one per core.
+const _maxTemperatures = 64;
+
 /// Filesystem types that describe kernel state, a container layer or a
 /// read-only image rather than a volume with space to account for.
 const _virtualFileSystemTypes = <String>{
@@ -975,6 +1219,8 @@ final _mountEscape = RegExp(r'\\([0-7]{3})');
 final _coreId = RegExp(r'^cpu\d{1,4}$');
 final _whitespace = RegExp(r'\s');
 final _interfaceName = RegExp(r'^[a-zA-Z0-9_.:@-]{1,64}$');
+final _sensorName = RegExp(r'^[a-zA-Z0-9_.-]{1,32}$');
+final _driveName = RegExp(r'^[a-zA-Z0-9_.:-]{1,32}$');
 final _whitespaceRun = RegExp(r'\s+');
 
 List<String> _tokens(String value) =>

@@ -366,6 +366,9 @@ class Server(paramiko.ServerInterface):
             def metrics_reply():
                 try:
                     # Fixed virtual Linux procfs results; never run a client command.
+                    # A sysfs model attribute is space padded; the probe reports it
+                    # without the padding.
+                    nvme_model = "Samsung SSD 970 EVO Plus 1TB".ljust(40)
                     channel.sendall((
                         "login banner\n__HARBOR_REMOTE_METRICS_BEGIN__\n"
                         "os Linux\n"
@@ -382,6 +385,10 @@ class Server(paramiko.ServerInterface):
                         "df overlay overlay 10240000 4096000 6144000 40% /var/lib/docker/overlay2/test/merged\n"
                         "df /dev/sdb1 ext4 20480000 10240000 9216000 53% /data volume\n"
                         "df /dev/sda1 ext4 10240000 4096000 6144000 40% /\n"
+                        "temp hwmon coretemp 58000 Package id 0\n"
+                        "temp hwmon coretemp 61000 Core 0\n"
+                        f"disktemp nvme nvme0n1 42900 {nvme_model}\n"
+                        "disktemp drivetemp sda 31000 ST1000DM010-2EP102\n"
                         "__HARBOR_REMOTE_METRICS_END__\n"
                     ).encode())
                     channel.send_exit_status(0)
