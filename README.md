@@ -7,7 +7,7 @@
 - **主机**：新增、编辑、删除、收藏、标签、搜索和拖动排序。
 - **登录**：密码、PEM/OpenSSH 私钥和加密私钥口令。密码、私钥和已信任的主机指纹保存在系统安全存储。
 - **连接**：首次连接显示 SHA256 指纹；指纹变化时弹窗对照新旧指纹，核实后可确认更新并继续连接，取消则保留原指纹并阻止连接。
-- **身份**：在「设置 → 身份」为连接设置替换用的地址和端口，用于内网、内网穿透和代理等不同网络场景。切换身份后新建连接和重新连接改用新的地址和端口，中转主机也一样。主机指纹仍按连接自己的地址校验；身份只保存在本机，不参与同步。见 [使用说明](docs/network-identities.md)。
+- **身份**：在「设置 → 身份」为连接设置替换用的地址和端口，用于内网、内网穿透和代理等不同网络场景。切换身份后新建连接和重新连接改用新的地址和端口。
 - **终端**：多会话、复制粘贴、字体与换行、远端资源状态。手机提供常用按键辅助栏。
 - **端口转发**：本地转发、远程转发和 SOCKS5 代理；
 - **文件**：SFTP 浏览和 UTF-8 文本编辑，可与本地目录互传。桌面端可拖放文件和文件夹。
@@ -80,9 +80,6 @@ tar -xzf build/linux/packages/harbor-ssh-linux-x64.tar.gz
 ```
 
 便携包需自行安装 GTK 3、libsecret 和 `xdg-utils`，中文显示需安装 CJK 字体（例如 `fonts-noto-cjk`）。密码和主机指纹存储依赖已启动并解锁的 Secret Service（例如 GNOME Keyring）；本地文件选择依赖桌面的 XDG Desktop Portal 服务。
-
-GitHub Actions 的 `Build Harbor SSH` 工作流支持手动构建，Linux 的两个包保存在 `harbor-ssh-linux` Artifact 中。发布 GitHub Release 时也会自动构建并上传这两个文件。包版本默认取 `pubspec.yaml`（去掉构建号），Release 构建使用 tag；本地可用 `bash tool/package_linux.sh v1.0.39` 显式指定版本。Linux 暂不支持应用内安装更新，更新时前往 Release 下载后重新安装。
-
 
 ## macOS 自签名
 
