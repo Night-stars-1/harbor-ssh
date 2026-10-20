@@ -31,6 +31,9 @@ BuildArch:      x86_64
 Requires:       gtk3
 Requires:       libsecret
 Requires:       xdg-utils
+# Flutter's renderer loads these dynamically, outside ELF DT_NEEDED scanning.
+Requires:       libEGL.so.1()(64bit)
+Requires:       libGLESv2.so.2()(64bit)
 Recommends:     gnome-keyring
 Recommends:     xdg-desktop-portal
 Recommends:     google-noto-sans-cjk-fonts

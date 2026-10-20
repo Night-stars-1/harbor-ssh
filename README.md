@@ -67,7 +67,7 @@ Android 正式签名使用 `android/key.properties.example` 对应的密钥。�
 
 ### Linux 安装
 
-Linux 包面向 x86_64，基于 Ubuntu 24.04 构建；需要兼容的 glibc、GTK 3 和 libsecret，不支持 ARM64。RPM 包自动声明 ELF 运行库依赖，包括 glibc 2.38 或更高版本，不适用于运行库过旧的发行版。
+Linux 包面向 x86_64，基于 Ubuntu 24.04 构建；需要兼容的 glibc、GTK 3、libsecret，以及 EGL/OpenGL ES 运行库，不支持 ARM64。RPM 包自动声明运行库依赖，包括 glibc 2.38 或更高版本，不适用于运行库过旧的发行版。
 
 ```sh
 # 安装本地 deb，自动安装依赖，并添加 Harbor SSH 应用菜单入口
@@ -82,7 +82,7 @@ tar -xzf build/linux/packages/harbor-ssh-linux-x64.tar.gz
 ./harbor-ssh-linux-x64/harbor_ssh
 ```
 
-便携包需自行安装 GTK 3、libsecret 和 `xdg-utils`，中文显示需安装 CJK 字体（例如 `fonts-noto-cjk`）。密码和主机指纹存储依赖已启动并解锁的 Secret Service（例如 GNOME Keyring）；本地文件选择依赖桌面的 XDG Desktop Portal 服务。
+便携包需自行安装 GTK 3、libsecret、EGL/OpenGL ES 运行库和 `xdg-utils`，中文显示需安装 CJK 字体（例如 `fonts-noto-cjk`）。密码和主机指纹存储依赖已启动并解锁的 Secret Service（例如 GNOME Keyring）；本地文件选择依赖桌面的 XDG Desktop Portal 服务。
 
 ## macOS 自签名
 
