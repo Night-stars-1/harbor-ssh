@@ -10,6 +10,7 @@ import 'package:harbor_ssh/data/remote_metrics.dart';
 import 'package:harbor_ssh/data/terminal_ai.dart';
 import 'package:harbor_ssh/domain/host.dart';
 import 'package:harbor_ssh/domain/remote_file.dart';
+import 'package:harbor_ssh/domain/network_identity.dart';
 import 'package:harbor_ssh/data/file_copy.dart';
 import 'package:harbor_ssh/data/local_files.dart';
 import 'package:harbor_ssh/data/resumable_copy.dart';
@@ -1439,6 +1440,74 @@ void main() {
         );
         expect(connection.status, ConnectionStatus.failed);
         expect(connection.terminal.onOutput, isNull);
+      });
+      test('身份替换地址端口后连接成功，指纹仍按连接自身地址保存，切回默认则不再替换', () async {
+        final repository = memoryRepository();
+        // The saved endpoint is unreachable; only the identity reaches the fixture.
+        const saved = Host(
+          id: 'tunneled',
+          name: '穿透服务器',
+          address: 'tunnel-fixture.invalid',
+          port: 2200,
+          username: 'tester',
+        );
+        final identities = NetworkIdentities(
+          identities: [
+            NetworkIdentity(
+              id: 'frp',
+              name: 'frp 穿透',
+              overrides: {
+                saved.id: EndpointOverride(address: '127.0.0.1', port: port),
+              },
+            ),
+          ],
+          activeId: 'frp',
+        );
+        await repository.saveNetworkIdentities(identities);
+        final prompts = <String>[];
+        final connection = SshConnection(id: 'identity', host: saved);
+        addTearDown(connection.dispose);
+        await connection.connect(
+          const Credentials(password: 'fixture-password'),
+          repository,
+          (type, fingerprint) async {
+            prompts.add(fingerprint);
+            return true;
+          },
+          openShell: false,
+        );
+        expect(
+          connection.status,
+          ConnectionStatus.connected,
+          reason: connection.error,
+        );
+        expect(connection.host.endpoint, 'tunnel-fixture.invalid:2200');
+        expect(prompts, hasLength(1));
+        connection.close();
+
+        final again = SshConnection(id: 'identity-again', host: saved);
+        addTearDown(again.dispose);
+        await again.connect(
+          const Credentials(password: 'fixture-password'),
+          repository,
+          (_, _) async => fail('同一连接经身份再次连接不应重新确认指纹'),
+          openShell: false,
+        );
+        expect(again.status, ConnectionStatus.connected, reason: again.error);
+        again.close();
+
+        await repository.saveNetworkIdentities(
+          identities.copyWith(activeId: ''),
+        );
+        final direct = SshConnection(id: 'identity-default', host: saved);
+        addTearDown(direct.dispose);
+        await direct.connect(
+          const Credentials(password: 'fixture-password'),
+          repository,
+          (_, _) async => true,
+          openShell: false,
+        );
+        expect(direct.status, ConnectionStatus.failed);
       });
       test('拒绝未知指纹与错误密码均无法打开终端', () async {
         final rejected = SshConnection(id: '3', host: host());

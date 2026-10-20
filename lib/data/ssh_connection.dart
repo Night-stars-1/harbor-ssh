@@ -140,6 +140,10 @@ class SshConnection extends ChangeNotifier {
         host.jumpHostId.isEmpty ? const [] : await repository.loadHosts(),
       );
       if (!_current(generation)) return;
+      // Read at dial time so switching identity applies to the next connect,
+      // reconnects included, without touching sessions already open.
+      final network = await repository.loadNetworkIdentities();
+      if (!_current(generation)) return;
       final credentialsByHost = <String, Credentials>{host.id: credentials};
       for (final hop in route.take(route.length - 1)) {
         final stored = await repository.loginCredentials(hop);
@@ -162,14 +166,15 @@ class SshConnection extends ChangeNotifier {
                     : hopCredentials.passphrase,
               )
             : null;
+        final (address, port) = network.endpointOf(hop);
         final socket = previous == null
             ? await SSHSocket.connect(
-                hop.address,
-                hop.port,
+                address,
+                port,
                 timeout: const Duration(seconds: 15),
               )
             : await previous
-                  .forwardLocal(hop.address, hop.port)
+                  .forwardLocal(address, port)
                   .timeout(const Duration(seconds: 15));
         if (!_current(generation)) {
           socket.destroy();

@@ -825,7 +825,7 @@ class _WorkspaceState extends State<Workspace> {
 
   void _backFromSettings() {
     if (_settingsNavigation.value != null) {
-      _settingsNavigation.value = null;
+      _settingsNavigation.back();
     } else {
       model.closeSettings();
     }

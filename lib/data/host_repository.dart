@@ -5,6 +5,7 @@ import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import '../domain/host.dart';
+import '../domain/network_identity.dart';
 
 abstract interface class KeyValueStore {
   Future<String?> read(String key);
@@ -156,6 +157,7 @@ class HostRepository {
   final KeyValueStore preferences, secrets;
   static const _hostsKey = 'harbor.hosts.v1';
   static const _usersKey = 'harbor.users.v1';
+  static const _identitiesKey = 'harbor.network-identities.v1';
   Future<void> _keyWrites = Future<void>.value();
 
   Future<T> _serializeKeys<T>(Future<T> Function() action) {
@@ -236,6 +238,17 @@ class HostRepository {
   Future<Credentials?> userCredentials(String id) => credentials('user.$id');
   Future<void> saveUserCredentials(String id, Credentials? value) =>
       saveCredentials('user.$id', value);
+
+  /// Device-local only: [SyncStorage] never captures identities.
+  Future<NetworkIdentities> loadNetworkIdentities() async {
+    final value = await preferences.read(_identitiesKey);
+    return value == null
+        ? const NetworkIdentities()
+        : NetworkIdentities.fromJson(jsonDecode(value) as Map);
+  }
+
+  Future<void> saveNetworkIdentities(NetworkIdentities value) =>
+      preferences.write(_identitiesKey, jsonEncode(value.toJson()));
   String _hostKey(Host host) =>
       'harbor.known.${base64Url.encode(utf8.encode(host.endpoint))}';
   Future<bool> verifyHost(

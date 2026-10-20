@@ -16,6 +16,7 @@ import '../data/sync_storage.dart';
 import '../data/webdav_sync.dart';
 import '../domain/sync_snapshot.dart';
 import '../domain/host.dart';
+import '../domain/network_identity.dart';
 import '../domain/appearance.dart';
 import '../domain/app_update.dart';
 import 'file_workspace_model.dart';
@@ -115,6 +116,29 @@ class WorkspaceModel extends ChangeNotifier {
       }
     } catch (_) {
       // An unreadable update preference falls back to automatic checks.
+    }
+  }
+
+  NetworkIdentities networkIdentities = const NetworkIdentities();
+  Future<void> _identitiesWrite = Future.value();
+
+  Future<void> saveNetworkIdentities(NetworkIdentities value) {
+    final operation = _identitiesWrite.then((_) async {
+      await repository.saveNetworkIdentities(value);
+      if (_disposed) return;
+      networkIdentities = value;
+      _notify();
+    });
+    _identitiesWrite = operation.catchError((Object _) {});
+    return operation;
+  }
+
+  Future<void> _loadNetworkIdentities() async {
+    try {
+      final saved = await repository.loadNetworkIdentities();
+      if (!_disposed) networkIdentities = saved;
+    } catch (_) {
+      // Unreadable identities fall back to each connection's own endpoint.
     }
   }
 
@@ -325,6 +349,7 @@ class WorkspaceModel extends ChangeNotifier {
     await _loadUpdatePreferences();
     await _loadAiSettings();
     await _loadHostOrder();
+    await _loadNetworkIdentities();
     await _loadLocalBookmarks();
     var stage = StartupStage.localDirectory;
     try {

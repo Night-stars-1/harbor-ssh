@@ -5,6 +5,8 @@ import '../data/terminal_ai.dart';
 import '../domain/sync_snapshot.dart';
 import '../domain/appearance.dart';
 import '../domain/app_update.dart';
+import '../domain/host.dart';
+import '../domain/network_identity.dart';
 import 'workspace_model.dart';
 
 /// Both windows use the main workspace's sync service and storage lock.
@@ -15,6 +17,11 @@ abstract class SyncSettingsController extends ChangeNotifier {
   Future<void> saveAppearance(AppearancePreferences value);
   UpdatePreferences get updatePreferences;
   Future<void> saveUpdatePreferences(UpdatePreferences value);
+  NetworkIdentities get networkIdentities;
+  Future<void> saveNetworkIdentities(NetworkIdentities value);
+
+  /// Connections an identity can reroute; credentials are never included.
+  List<Host> get hosts;
   CloudSyncConfig? get settings;
   bool get busy;
   bool get failed;
@@ -55,6 +62,13 @@ class LocalSyncSettingsController extends SyncSettingsController {
   @override
   Future<void> saveUpdatePreferences(UpdatePreferences value) =>
       model.saveUpdatePreferences(value);
+  @override
+  NetworkIdentities get networkIdentities => model.networkIdentities;
+  @override
+  Future<void> saveNetworkIdentities(NetworkIdentities value) =>
+      model.saveNetworkIdentities(value);
+  @override
+  List<Host> get hosts => model.hosts;
   @override
   String get defaultLocalPath => model.defaultLocalPath;
   @override

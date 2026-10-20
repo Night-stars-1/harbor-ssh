@@ -30,11 +30,7 @@ void showSettingsNotice(
 /// scaffold — dialogs render above one, so a snack bar would sit behind them —
 /// place it in the navigator overlay instead.
 class SettingsNotice extends StatelessWidget {
-  const SettingsNotice({
-    super.key,
-    required this.message,
-    this.error = false,
-  });
+  const SettingsNotice({super.key, required this.message, this.error = false});
   final String message;
   final bool error;
 
@@ -82,21 +78,22 @@ class SettingsNotice extends StatelessWidget {
 }
 
 class SettingsGroup extends StatelessWidget {
-  const SettingsGroup({super.key, required this.title, required this.children});
-  final String title;
+  const SettingsGroup({super.key, this.title, required this.children});
+  final String? title;
   final List<Widget> children;
   @override
   Widget build(BuildContext context) => Column(
     crossAxisAlignment: CrossAxisAlignment.stretch,
     children: [
-      Padding(
-        padding: const EdgeInsets.fromLTRB(16, 0, 16, 10),
-        child: Text(
-          title,
-          style: Theme.of(context).textTheme.labelLarge
-              ?.copyWith(color: Theme.of(context).colorScheme.primary),
+      if (title != null)
+        Padding(
+          padding: const EdgeInsets.fromLTRB(16, 0, 16, 10),
+          child: Text(
+            title!,
+            style: Theme.of(context).textTheme.labelLarge
+                ?.copyWith(color: Theme.of(context).colorScheme.primary),
+          ),
         ),
-      ),
       for (var i = 0; i < children.length; i++) ...[
         if (i > 0) const SizedBox(height: HarborShapes.listGap),
         Material(

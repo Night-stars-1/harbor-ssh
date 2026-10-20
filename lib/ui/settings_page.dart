@@ -4,6 +4,7 @@ import 'about_settings.dart';
 import 'cloud_sync_settings.dart';
 import 'appearance_settings.dart';
 import 'ai_settings.dart';
+import 'identity_settings.dart';
 import 'local_file_settings.dart';
 import 'expressive_widgets.dart';
 import 'theme.dart';
@@ -14,17 +15,45 @@ import 'workspace_model.dart';
 
 class SettingsNavigation extends ValueNotifier<int?> {
   SettingsNavigation() : super(null);
-  String get title => value == null
-      ? '设置'
-      : value == 0
-      ? '本地文件'
-      : value == 1
-      ? '云同步'
-      : value == 3
-      ? 'AI'
-      : value == 4
-      ? '关于'
-      : '外观';
+
+  /// A page opened inside the current section, such as one identity. Its
+  /// title replaces the section title; switching section closes it.
+  String? get subpage => _subpage;
+  String? _subpage, _subpageTitle;
+
+  void openSubpage(String id, String title) {
+    _subpage = id;
+    _subpageTitle = title;
+    notifyListeners();
+  }
+
+  void closeSubpage() {
+    if (_subpage == null) return;
+    _subpage = _subpageTitle = null;
+    notifyListeners();
+  }
+
+  /// Closes the subpage first, then the section.
+  void back() => _subpage != null ? closeSubpage() : value = null;
+
+  @override
+  set value(int? section) {
+    if (section == super.value) return closeSubpage();
+    _subpage = _subpageTitle = null;
+    super.value = section;
+  }
+
+  String get title =>
+      _subpageTitle ??
+      switch (value) {
+        null => '设置',
+        0 => '本地文件',
+        1 => '云同步',
+        3 => 'AI',
+        4 => '关于',
+        5 => '身份',
+        _ => '外观',
+      };
 }
 
 class SettingsPage extends StatefulWidget {
@@ -58,14 +87,15 @@ class _SettingsPageState extends State<SettingsPage> {
     super.dispose();
   }
 
-  static const _titles = ['本地文件', '云同步', '外观', 'AI', '关于'];
-  static const _sectionOrder = [2, 0, 3, 1, 4];
+  static const _titles = ['本地文件', '云同步', '外观', 'AI', '关于', '身份'];
+  static const _sectionOrder = [2, 5, 0, 3, 1, 4];
   static const _icons = [
     Icons.folder_outlined,
     Icons.cloud_outlined,
     Icons.palette_outlined,
     Icons.auto_awesome_outlined,
     Icons.info_outline_rounded,
+    Icons.alt_route_rounded,
   ];
   static const _descriptions = [
     '默认目录',
@@ -73,6 +103,7 @@ class _SettingsPageState extends State<SettingsPage> {
     '主题色、显示模式与终端字体',
     '模型服务与终端任务',
     '版本与应用更新',
+    '按网络场景替换连接地址与端口',
   ];
 
   void _select(int index) => navigation.value = index;
@@ -148,11 +179,11 @@ class _SettingsPageState extends State<SettingsPage> {
         final detail = wide || _showDetail;
         final theme = Theme.of(context);
         return PopScope(
-          canPop: widget.navigation != null || wide || !_showDetail,
+          canPop:
+              navigation.subpage == null &&
+              (widget.navigation != null || wide || !_showDetail),
           onPopInvokedWithResult: (didPop, result) {
-            if (!didPop && widget.navigation == null && !wide && _showDetail) {
-              navigation.value = null;
-            }
+            if (!didPop && widget.navigation == null) navigation.back();
           },
           child: Material(
             color: widget.desktop && widget.standalone
@@ -212,7 +243,19 @@ class _SettingsPageState extends State<SettingsPage> {
                             ),
                             child: Row(
                               children: [
-                                if (!wide && _showDetail) ...[
+                                if (navigation.subpage != null) ...[
+                                  IconButton(
+                                    key: const ValueKey(
+                                      'settings-subpage-back',
+                                    ),
+                                    onPressed: navigation.closeSubpage,
+                                    icon: Icon(
+                                      Icons.arrow_back_rounded,
+                                      semanticLabel: _titles[_section],
+                                    ),
+                                  ),
+                                  const SizedBox(width: 8),
+                                ] else if (!wide && _showDetail) ...[
                                   IconButton(
                                     key: const ValueKey(
                                       'settings-category-back',
@@ -227,7 +270,13 @@ class _SettingsPageState extends State<SettingsPage> {
                                 ],
                                 Expanded(
                                   child: Text(
-                                    detail ? _titles[_section] : '设置',
+                                    navigation.subpage != null
+                                        ? navigation.title
+                                        : detail
+                                        ? _titles[_section]
+                                        : '设置',
+                                    maxLines: 1,
+                                    overflow: TextOverflow.ellipsis,
                                     style: theme.textTheme.headlineSmall,
                                   ),
                                 ),
@@ -269,6 +318,13 @@ class _SettingsPageState extends State<SettingsPage> {
                               ExcludeFocus(
                                 excluding: !detail || _section != 4,
                                 child: AboutSettings(controller: controller),
+                              ),
+                              ExcludeFocus(
+                                excluding: !detail || _section != 5,
+                                child: IdentitySettings(
+                                  controller: controller,
+                                  navigation: navigation,
+                                ),
                               ),
                               SettingsList(
                                 children: [_categories(rail: false)],

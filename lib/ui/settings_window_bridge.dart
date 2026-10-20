@@ -7,6 +7,8 @@ import '../data/terminal_ai.dart';
 import '../domain/sync_snapshot.dart';
 import '../domain/appearance.dart';
 import '../domain/app_update.dart';
+import '../domain/host.dart';
+import '../domain/network_identity.dart';
 import 'sync_settings_controller.dart';
 
 const settingsWindowChannel = MethodChannel('harbor/settings_window');
@@ -32,6 +34,8 @@ class SettingsWindowHost {
     'updatePreferences': controller.updatePreferences.toJson(),
     'defaultLocalPath': controller.defaultLocalPath,
     'aiSettings': controller.aiSettings.toJson(),
+    'networkIdentities': controller.networkIdentities.toJson(),
+    'hosts': [for (final host in controller.hosts) host.toJson()],
   };
 
   void _changed() {
@@ -59,6 +63,10 @@ class SettingsWindowHost {
         case 'saveUpdatePreferences':
           await controller.saveUpdatePreferences(
             UpdatePreferences.fromJson(call.arguments as Map),
+          );
+        case 'saveNetworkIdentities':
+          await controller.saveNetworkIdentities(
+            NetworkIdentities.fromJson(call.arguments as Map),
           );
         case 'saveAiSettings':
           await controller.saveAiSettings(
@@ -139,6 +147,17 @@ class RemoteSyncSettingsController extends SyncSettingsController {
   @override
   Future<void> saveUpdatePreferences(UpdatePreferences value) =>
       _request('saveUpdatePreferences', value.toJson());
+  @override
+  NetworkIdentities get networkIdentities =>
+      NetworkIdentities.fromJson(_state['networkIdentities'] as Map? ?? {});
+  @override
+  Future<void> saveNetworkIdentities(NetworkIdentities value) =>
+      _request('saveNetworkIdentities', value.toJson());
+  @override
+  List<Host> get hosts => [
+    for (final item in _state['hosts'] as List? ?? const [])
+      Host.fromJson(Map<String, dynamic>.from(item as Map)),
+  ];
   @override
   String get defaultLocalPath => _state['defaultLocalPath'] as String? ?? '';
   @override
