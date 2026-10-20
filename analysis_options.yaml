@@ -17,6 +17,7 @@ analyzer:
     - macos/**
     # Upstream dependency sources retain their original lint conventions.
     - third_party/**
+    - linux/**
 
 linter:
   # The lint rules applied to this project can be customized in the

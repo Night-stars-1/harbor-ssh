@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=Harbor SSH
+GenericName=SSH Workspace
+Comment=SSH workspace with terminal sessions, SFTP and port forwarding
+Exec=harbor-ssh
+Icon=harbor-ssh
+Terminal=false
+StartupNotify=true
+StartupWMClass=com.harborssh.harbor_ssh
+Categories=Network;RemoteAccess;Utility;
+Keywords=ssh;terminal;sftp;port-forward;harbor;

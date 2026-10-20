@@ -1,6 +1,6 @@
 # Harbor SSH
 
-面向 Windows、macOS 和 Android 的 SSH 工作空间。用同一套界面管理主机、终端、文件，以及当前会话里的 AI 助手。
+面向 Windows、macOS、Linux 和 Android 的 SSH 工作空间。用同一套界面管理主机、终端、文件，以及当前会话里的 AI 助手。
 
 ## 功能
 
@@ -33,6 +33,7 @@
 flutter pub get
 flutter run -d windows
 flutter run -d macos
+flutter run -d linux
 flutter run -d <android-device-id>
 ```
 
@@ -45,6 +46,12 @@ flutter build windows --release
 # macOS，需要 Xcode，且必须在 Mac 上执行
 flutter build macos --release
 
+# Linux x86_64，在 Ubuntu 24.04 上执行
+sudo apt-get update
+sudo apt-get install -y clang cmake ninja-build pkg-config libgtk-3-dev libsecret-1-dev liblzma-dev libstdc++-12-dev
+flutter build linux --release
+bash tool/package_linux.sh
+
 # Android，需要 Android SDK 与 JDK
 flutter build apk --release --split-per-abi
 ```
@@ -53,9 +60,29 @@ flutter build apk --release --split-per-abi
 
 - Windows：`build/windows/x64/runner/Release/`。分发时保留整个目录，不要只拷贝 exe。
 - macOS：`build/macos/Build/Products/Release/Harbor SSH.app`。
+- Linux：`build/linux/packages/harbor-ssh-linux-amd64.deb`（安装包）与 `harbor-ssh-linux-x64.tar.gz`（便携包）。原始 bundle 位于 `build/linux/x64/release/bundle/`，必须保留完整目录。
 - Android：`build/app/outputs/flutter-apk/` 下按架构生成的 `app-*-release.apk`，安装与设备匹配的一个即可。
 
 Android 正式签名使用 `android/key.properties.example` 对应的密钥。不要把 keystore 或密码提交到仓库。
+
+### Linux 安装
+
+Linux 包面向 x86_64，基于 Ubuntu 24.04 构建；需要兼容的 glibc、GTK 3 和 libsecret，不支持 ARM64。
+
+```sh
+# 安装本地 deb，自动安装依赖，并添加 Harbor SSH 应用菜单入口
+sudo apt install ./build/linux/packages/harbor-ssh-linux-amd64.deb
+harbor-ssh
+
+# 或解压便携包（仍需系统运行库，不是静态可执行文件）
+tar -xzf build/linux/packages/harbor-ssh-linux-x64.tar.gz
+./harbor-ssh-linux-x64/harbor_ssh
+```
+
+便携包需自行安装 GTK 3、libsecret 和 `xdg-utils`，中文显示需安装 CJK 字体（例如 `fonts-noto-cjk`）。密码和主机指纹存储依赖已启动并解锁的 Secret Service（例如 GNOME Keyring）；本地文件选择依赖桌面的 XDG Desktop Portal 服务。
+
+GitHub Actions 的 `Build Harbor SSH` 工作流支持手动构建，Linux 的两个包保存在 `harbor-ssh-linux` Artifact 中。发布 GitHub Release 时也会自动构建并上传这两个文件。包版本默认取 `pubspec.yaml`（去掉构建号），Release 构建使用 tag；本地可用 `bash tool/package_linux.sh v1.0.39` 显式指定版本。Linux 暂不支持应用内安装更新，更新时前往 Release 下载后重新安装。
+
 
 ## macOS 自签名
 
