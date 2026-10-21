@@ -10,6 +10,27 @@ def scale(src, size):
     return src.resize((size, size), Image.Resampling.LANCZOS)
 
 
+def rounded_icon(src):
+    icon = src.copy()
+    mask_size = icon.width * 4
+    mask = Image.new("L", (mask_size, mask_size), 0)
+    ImageDraw.Draw(mask).rounded_rectangle(
+        (0, 0, mask_size - 1, mask_size - 1),
+        radius=mask_size * 0.22,
+        fill=255,
+    )
+    icon.putalpha(
+        ImageChops.multiply(icon.getchannel("A"), scale(mask, icon.width))
+    )
+    return icon
+
+
+def write_linux_icon(master):
+    target = ROOT / "linux/packaging/harbor-ssh.png"
+    scale(rounded_icon(master), 512).save(target, "PNG")
+    print("wrote", target)
+
+
 def macos_icon(src, size):
     # The legacy macOS appiconset includes its outer transparent canvas.
     # Reserve 3/32 on each side: an 832px tile on the 1024px master canvas.
@@ -43,12 +64,20 @@ def main():
     targets = parser.add_mutually_exclusive_group()
     targets.add_argument("--android-only", action="store_true")
     targets.add_argument("--macos-only", action="store_true")
+    targets.add_argument(
+        "--linux-only",
+        action="store_true",
+        help="Write only linux/packaging/harbor-ssh.png with transparent rounded corners; leave other platform icons unchanged.",
+    )
     args = parser.parse_args()
     source = ROOT / "assets/branding/harbor-ssh-icon.png"
     with Image.open(source) as image:
         master = scale(image.convert("RGBA"), 1024)
-        if not args.android_only:
+        if not args.android_only and not args.linux_only:
             write_macos_icons(image)
+        if args.linux_only:
+            write_linux_icon(master)
+            return
     if args.macos_only:
         return
     android = {
@@ -64,12 +93,9 @@ def main():
     print("wrote Android launcher icons from", source)
     if args.android_only:
         return
-    # Keep the existing Windows icon treatment independent of the macOS canvas.
-    mask = Image.new("L", (4096, 4096), 0)
-    ImageDraw.Draw(mask).rounded_rectangle(
-        (0, 0, 4095, 4095), radius=4096 * 0.22, fill=255
-    )
-    master.putalpha(ImageChops.multiply(master.getchannel("A"), scale(mask, 1024)))
+    write_linux_icon(master)
+    # Keep the Windows icon treatment independent of the macOS canvas.
+    master = rounded_icon(master)
     ico = ROOT / "windows/runner/resources/app_icon.ico"
     sizes = (16, 24, 32, 48, 64, 128, 256)
     scale(master, 256).save(

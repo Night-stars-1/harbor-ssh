@@ -1,11 +1,28 @@
 import 'dart:collection';
 
+const _highSurrogateStart = 0xD800;
+
+const _highSurrogateEnd = 0xDBFF;
+
+const _lowSurrogateStart = 0xDC00;
+
+const _lowSurrogateEnd = 0xDFFF;
+
+/// A queue of code points that keeps the original [String] chunks instead of
+/// copying them into per-code-point lists.
+///
+/// The public counters ([length], [totalConsumed] and the arguments of
+/// [rollback]) are measured in code points, while the read position is the
+/// UTF-16 offset inside the first chunk. Surrogate pairs are only combined when
+/// both halves come from the same chunk, which matches the per-chunk
+/// `String.runes` semantics.
 class ByteConsumer {
-  final _queue = ListQueue<List<int>>();
+  final _queue = ListQueue<String>();
 
-  final _consumed = ListQueue<List<int>>();
+  final _consumed = ListQueue<String>();
 
-  var _currentOffset = 0;
+  /// UTF-16 offset of the next unconsumed code unit in the first chunk.
+  var _currentUnitOffset = 0;
 
   var _length = 0;
 
@@ -13,49 +30,102 @@ class ByteConsumer {
 
   void add(String data) {
     if (data.isEmpty) return;
-    final runes = data.runes.toList(growable: false);
-    _queue.addLast(runes);
-    _length += runes.length;
+    _queue.addLast(data);
+    _length += _countCodePoints(data);
   }
 
   int peek() {
     final data = _queue.first;
-    if (_currentOffset < data.length) {
-      return data[_currentOffset];
-    } else {
-      final result = consume();
-      rollback();
-      return result;
+    if (_currentUnitOffset < data.length) {
+      return _codePointAt(data, _currentUnitOffset);
     }
+    final result = consume();
+    rollback();
+    return result;
   }
 
   int consume() {
-    final data = _queue.first;
+    while (true) {
+      final data = _queue.first;
 
-    if (_currentOffset >= data.length) {
-      _consumed.add(_queue.removeFirst());
-      _currentOffset -= data.length;
-      return consume();
+      if (_currentUnitOffset >= data.length) {
+        _consumed.add(_queue.removeFirst());
+        _currentUnitOffset -= data.length;
+        continue;
+      }
+
+      final offset = _currentUnitOffset;
+      final unit = data.codeUnitAt(offset);
+
+      _length--;
+      _totalConsumed++;
+
+      if (unit < _highSurrogateStart) {
+        _currentUnitOffset = offset + 1;
+        return unit;
+      }
+
+      if (unit <= _highSurrogateEnd && offset + 1 < data.length) {
+        final low = data.codeUnitAt(offset + 1);
+        if (low >= _lowSurrogateStart && low <= _lowSurrogateEnd) {
+          _currentUnitOffset = offset + 2;
+          return 0x10000 +
+              ((unit - _highSurrogateStart) << 10) +
+              (low - _lowSurrogateStart);
+        }
+      }
+
+      _currentUnitOffset = offset + 1;
+      return unit;
     }
-
-    _length--;
-    _totalConsumed++;
-    return data[_currentOffset++];
   }
 
   /// Rolls back the last [n] call.
   void rollback([int n = 1]) {
-    _currentOffset -= n;
     _totalConsumed -= n;
     _length += n;
-    while (_currentOffset < 0) {
-      final rollback = _consumed.removeLast();
-      _queue.addFirst(rollback);
-      _currentOffset += rollback.length;
+
+    if (n < 0) {
+      _advance(-n);
+      return;
+    }
+
+    var remaining = n;
+    while (remaining > 0) {
+      if (_currentUnitOffset == 0) {
+        final data = _consumed.removeLast();
+        _queue.addFirst(data);
+        _currentUnitOffset = data.length;
+        continue;
+      }
+      _currentUnitOffset = _previousCodePointOffset(
+        _queue.first,
+        _currentUnitOffset,
+      );
+      remaining--;
     }
   }
 
-  /// Rolls back to the state when this consumer had [length] bytes.
+  /// Moves the read position forward by [count] code points without changing
+  /// the counters. Only reachable through a negative [rollback] argument.
+  void _advance(int count) {
+    var remaining = count;
+    while (remaining > 0) {
+      if (_queue.isEmpty) return;
+      final data = _queue.first;
+      if (_currentUnitOffset >= data.length) {
+        _consumed.add(_queue.removeFirst());
+        _currentUnitOffset -= data.length;
+        continue;
+      }
+      final offset = _currentUnitOffset;
+      final codePoint = _codePointAt(data, offset);
+      _currentUnitOffset = offset + (codePoint > 0xFFFF ? 2 : 1);
+      remaining--;
+    }
+  }
+
+  /// Rolls back to the state when this consumer had [length] code points.
   void rollbackTo(int length) {
     rollback(length - _length);
   }
@@ -78,30 +148,61 @@ class ByteConsumer {
   void reset() {
     _queue.clear();
     _consumed.clear();
-    _currentOffset = 0;
+    _currentUnitOffset = 0;
     _totalConsumed = 0;
     _length = 0;
   }
+
+  static int _codePointAt(String data, int offset) {
+    final unit = data.codeUnitAt(offset);
+    if (unit >= _highSurrogateStart && unit <= _highSurrogateEnd) {
+      if (offset + 1 < data.length) {
+        final low = data.codeUnitAt(offset + 1);
+        if (low >= _lowSurrogateStart && low <= _lowSurrogateEnd) {
+          return 0x10000 +
+              ((unit - _highSurrogateStart) << 10) +
+              (low - _lowSurrogateStart);
+        }
+      }
+    }
+    return unit;
+  }
+
+  /// Offset of the code point that ends at [offset], pairing the high and low
+  /// surrogate halves only when they belong to this chunk.
+  static int _previousCodePointOffset(String data, int offset) {
+    var previous = offset - 1;
+    if (previous > 0) {
+      final unit = data.codeUnitAt(previous);
+      if (unit >= _lowSurrogateStart && unit <= _lowSurrogateEnd) {
+        final high = data.codeUnitAt(previous - 1);
+        if (high >= _highSurrogateStart && high <= _highSurrogateEnd) {
+          previous--;
+        }
+      }
+    }
+    return previous;
+  }
 }
 
-// void main() {
-//   final consumer = ByteConsumer();
-//   consumer.add(Uint8List.fromList([1, 2, 3]));
-//   consumer.add(Uint8List.fromList([4, 5, 6]));
-
-//   while (consumer.isNotEmpty) {
-//     print(consumer.consume());
-//   }
-
-//   consumer.rollback(5);
-
-//   while (consumer.isNotEmpty) {
-//     print(consumer.consume());
-//   }
-
-//   consumer.rollbackTo(3);
-
-//   while (consumer.isNotEmpty) {
-//     print(consumer.consume());
-//   }
-// }
+/// Counts the code points of [data] without allocating an intermediate list.
+/// Unpaired surrogates count as one code point, as with `String.runes`.
+int _countCodePoints(String data) {
+  final length = data.length;
+  var count = 0;
+  var i = 0;
+  while (i < length) {
+    final unit = data.codeUnitAt(i);
+    i++;
+    if (unit >= _highSurrogateStart && unit <= _highSurrogateEnd) {
+      if (i < length) {
+        final next = data.codeUnitAt(i);
+        if (next >= _lowSurrogateStart && next <= _lowSurrogateEnd) {
+          i++;
+        }
+      }
+    }
+    count++;
+  }
+  return count;
+}

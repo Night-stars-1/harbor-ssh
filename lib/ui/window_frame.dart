@@ -13,7 +13,11 @@ bool get usesWindowsTitleBar =>
 bool get usesMacosTitleBar =>
     !kIsWeb && defaultTargetPlatform == TargetPlatform.macOS;
 
-bool get usesCustomTitleBar => usesWindowsTitleBar || usesMacosTitleBar;
+bool get usesLinuxTitleBar =>
+    !kIsWeb && defaultTargetPlatform == TargetPlatform.linux;
+
+bool get usesCustomTitleBar =>
+    usesWindowsTitleBar || usesMacosTitleBar || usesLinuxTitleBar;
 
 const _macosTrafficLightInset = 78.0;
 
@@ -171,7 +175,7 @@ class _WindowsWindowFrameState extends State<WindowsWindowFrame>
   @override
   Widget build(BuildContext context) {
     final colors = Theme.of(context).colorScheme;
-    return Column(
+    final frame = Column(
       children: [
         if (!_fullScreen)
           Material(
@@ -252,6 +256,17 @@ class _WindowsWindowFrameState extends State<WindowsWindowFrame>
           ),
         Expanded(child: Semantics(container: true, child: widget.child)),
       ],
+    );
+    if (!usesLinuxTitleBar) return frame;
+    // Linux has no native resize border once the header bar is hidden, so the
+    // shared frame is wrapped in Flutter-drawn resize edges. The wrapper adds
+    // no visible border and is disabled while maximized or full screen.
+    return DragToResizeArea(
+      key: const ValueKey('linux-resize-area'),
+      enableResizeEdges: _maximized || _fullScreen
+          ? const <ResizeEdge>[]
+          : null,
+      child: frame,
     );
   }
 }

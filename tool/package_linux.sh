@@ -27,7 +27,7 @@ cd -- "$repo_root"
 
 bundle_dir="build/linux/x64/release/bundle"
 binary_name="harbor_ssh"
-icon_src="assets/branding/harbor-ssh-icon.png"
+icon_src="linux/packaging/harbor-ssh.png"
 desktop_src="linux/packaging/harbor-ssh.desktop"
 control_src="linux/packaging/control.in"
 rpm_spec="linux/packaging/harbor-ssh.spec"

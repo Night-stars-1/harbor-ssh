@@ -152,6 +152,9 @@ class RenderTerminal extends RenderBox with RelayoutWhenSystemFontsChangeMixin {
   set onEditableRect(EditableRectCallback? value) {
     if (value == _onEditableRect) return;
     _onEditableRect = value;
+    // A new consumer (e.g. a rebuilt text input client) needs the current
+    // geometry even when nothing about the terminal changed.
+    _scheduleEditableRectUpdate();
     markNeedsLayout();
   }
 
@@ -185,7 +188,7 @@ class RenderTerminal extends RenderBox with RelayoutWhenSystemFontsChangeMixin {
     if ((next - _horizontalOffset).abs() < 0.5) return;
     _horizontalOffset = next;
     markNeedsPaint();
-    if (attached) _notifyEditableRect();
+    if (attached) _scheduleEditableRectUpdate();
     _reportHorizontalMetrics();
   }
 
@@ -244,7 +247,7 @@ class RenderTerminal extends RenderBox with RelayoutWhenSystemFontsChangeMixin {
   void _onScroll() {
     _stickToBottom = _scrollOffset >= _maxScrollExtent;
     markNeedsLayout();
-    _notifyEditableRect();
+    _scheduleEditableRectUpdate();
   }
 
   void _onFocusChange() {
@@ -261,7 +264,7 @@ class RenderTerminal extends RenderBox with RelayoutWhenSystemFontsChangeMixin {
     }
     resetCursorBlink();
     markNeedsLayout();
-    _notifyEditableRect();
+    _scheduleEditableRectUpdate();
   }
 
   void _onControllerUpdate() {
@@ -279,6 +282,9 @@ class RenderTerminal extends RenderBox with RelayoutWhenSystemFontsChangeMixin {
     _controller.addListener(_onControllerUpdate);
     _focusNode.addListener(_onFocusChange);
     resetCursorBlink();
+    // Reattaching can move the render object without changing the cursor
+    // cell, so always publish the geometry again for the new position.
+    _scheduleEditableRectUpdate();
   }
 
   @override
@@ -296,6 +302,7 @@ class RenderTerminal extends RenderBox with RelayoutWhenSystemFontsChangeMixin {
   void reassemble() {
     super.reassemble();
     resetCursorBlink();
+    _scheduleEditableRectUpdate();
   }
 
   @override
@@ -327,9 +334,10 @@ class RenderTerminal extends RenderBox with RelayoutWhenSystemFontsChangeMixin {
       _followHorizontal = false;
       _revealCursor();
     }
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (attached) _notifyEditableRect();
-    });
+    // This is the only post-frame callback this render object needs for the
+    // editable rect. It coalesces layout, scroll and terminal notifications
+    // into a single evaluation at the end of the frame.
+    _scheduleEditableRectUpdate();
     _reportHorizontalMetrics();
   }
 
@@ -492,6 +500,34 @@ class RenderTerminal extends RenderBox with RelayoutWhenSystemFontsChangeMixin {
   ) {
     final position = getCellOffset(offset);
     return _terminal.mouseInput(button, buttonState, position);
+  }
+
+  bool _editableRectUpdateScheduled = false;
+  bool _editableRectDirty = false;
+
+  /// Requests a single editable rect (IME candidate window) update at the end
+  /// of the current frame. Terminal output, scrolling, resizing and horizontal
+  /// scrolling all funnel here instead of synchronously computing
+  /// [localToGlobal] and notifying the platform for every terminal change.
+  ///
+  /// A post-frame callback does not itself request a new frame, so a callback
+  /// that only reads the settled layout can never keep the pipeline busy.
+  void _scheduleEditableRectUpdate() {
+    _editableRectDirty = true;
+    if (_editableRectUpdateScheduled) return;
+    _editableRectUpdateScheduled = true;
+    WidgetsBinding.instance.addPostFrameCallback(_flushEditableRectUpdate);
+  }
+
+  void _flushEditableRectUpdate(Duration _) {
+    _editableRectUpdateScheduled = false;
+    if (!_editableRectDirty) return;
+    // The render object may have been detached (or its widget disposed) before
+    // the frame ended; never touch geometry or callbacks in that state. Keep
+    // the request pending so a later attach/layout still publishes it.
+    if (!attached || !hasSize) return;
+    _editableRectDirty = false;
+    _notifyEditableRect();
   }
 
   void _notifyEditableRect() {

@@ -288,6 +288,15 @@ class _TerminalPaneState extends State<TerminalPane> {
   final _scrollController = ScrollController();
   final _linkStyle = TerminalLinkStyle(const Color(0xff9ecaff));
 
+  // TerminalView rebuilds replace the render object's theme and text style.
+  // Both classes carry no value equality, so a freshly built instance clears
+  // the painter's paragraph cache even when nothing visual changed. Reuse the
+  // same instances across hover, completion and output rebuilds and only
+  // rebuild them when the actual colors or font size change.
+  TerminalTheme? _cachedTerminalTheme;
+  ColorScheme? _cachedTerminalColors;
+  TerminalStyle? _cachedTerminalTextStyle;
+
   late double _fontSize = widget.fontSize.clamp(10, 24).toDouble();
   PointerDownEvent? _linkDown;
   Uri? _pressedLink;
@@ -636,14 +645,7 @@ class _TerminalPaneState extends State<TerminalPane> {
     final local = render.globalToLocal(globalPosition);
     if (!(Offset.zero & render.size).contains(local)) return null;
     final cell = render.getCellOffset(local);
-    for (final link in terminalLinks(
-      widget.session.terminal.buffer,
-      cell.y,
-      cell.y,
-    )) {
-      if (link.contains(cell)) return link.uri;
-    }
-    return null;
+    return _linkStyle.linkAt(widget.session.terminal.buffer, cell);
   }
 
   void _prepareLinkDecoration(int first, int last) {
@@ -666,10 +668,36 @@ class _TerminalPaneState extends State<TerminalPane> {
   }
 
   TerminalCellDecoration? _linkDecoration(int x, int y) {
+    // Most cells are not links; checking the decoration first keeps the
+    // selection lookup off that common path.
+    final decoration = _linkStyle.decoration(x, y);
+    if (decoration == null) return null;
     if (_controller.selection?.contains(CellOffset(x, y)) == true) {
       return null;
     }
-    return _linkStyle.decoration(x, y);
+    return decoration;
+  }
+
+  TerminalTheme _terminalTheme(ColorScheme colors) {
+    final cached = _cachedTerminalTheme;
+    if (cached != null && _cachedTerminalColors == colors) return cached;
+    _cachedTerminalColors = colors;
+    return _cachedTerminalTheme = harborTerminalTheme(colors);
+  }
+
+  TerminalStyle get _terminalTextStyle {
+    final cached = _cachedTerminalTextStyle;
+    if (cached != null && cached.fontSize == _fontSize) return cached;
+    return _cachedTerminalTextStyle = TerminalStyle(
+      fontSize: _fontSize,
+      fontFamily: 'monospace',
+      fontFamilyFallback: const [
+        'Consolas',
+        'Menlo',
+        'Noto Sans Mono',
+        'Courier New',
+      ],
+    );
   }
 
   void _selectOption(String value) {
@@ -997,20 +1025,11 @@ class _TerminalPaneState extends State<TerminalPane> {
                             readOnly: !connected,
                             shortcuts: const {},
                             deleteDetection: true,
-                            theme: harborTerminalTheme(colors),
+                            theme: _terminalTheme(colors),
                             padding: const EdgeInsets.all(16),
                             onPrepareCellDecoration: _prepareLinkDecoration,
                             cellDecoration: _linkDecoration,
-                            textStyle: TerminalStyle(
-                              fontSize: _fontSize,
-                              fontFamily: 'monospace',
-                              fontFamilyFallback: const [
-                                'Consolas',
-                                'Menlo',
-                                'Noto Sans Mono',
-                                'Courier New',
-                              ],
-                            ),
+                            textStyle: _terminalTextStyle,
                             onKeyEvent: (_, event) {
                               final completionResult = _completion?.handleKey(
                                 event,

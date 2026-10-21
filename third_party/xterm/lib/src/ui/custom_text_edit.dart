@@ -127,17 +127,49 @@ class CustomTextEditState extends State<CustomTextEdit> with TextInputClient {
     _connection?.setEditingState(value);
   }
 
+  static final _identityTransform = Matrix4.identity();
+  Rect? _lastEditableRect;
+  Rect? _lastCaretRect;
+  Size? _sentEditableSize;
+  Rect? _sentCaretRect;
+
+  /// Stores the latest editable geometry and forwards only the values that
+  /// actually changed to the platform.
+  ///
+  /// The geometry is cached even without an input connection: a connection
+  /// created later (first focus, focus regained, hot reload) is synchronized
+  /// from this cache immediately instead of waiting for the next frame.
   void setEditableRect(Rect rect, Rect caretRect) {
-    if (!hasInputConnection) {
+    _lastEditableRect = rect;
+    _lastCaretRect = caretRect;
+    _applyEditableGeometry(force: false);
+  }
+
+  void _applyEditableGeometry({required bool force}) {
+    final connection = _connection;
+    if (connection == null || !connection.attached) {
       return;
     }
 
-    _connection?.setEditableSizeAndTransform(
-      rect.size,
-      Matrix4.translationValues(0, 0, 0),
-    );
+    final rect = _lastEditableRect;
+    final caretRect = _lastCaretRect;
+    if (rect == null || caretRect == null) {
+      return;
+    }
 
-    _connection?.setCaretRect(caretRect);
+    final editableSize = rect.size;
+    if (force || _sentEditableSize != editableSize) {
+      _sentEditableSize = editableSize;
+      connection.setEditableSizeAndTransform(
+        editableSize,
+        _identityTransform,
+      );
+    }
+
+    if (force || _sentCaretRect != caretRect) {
+      _sentCaretRect = caretRect;
+      connection.setCaretRect(caretRect);
+    }
   }
 
   void _onFocusChange() {
@@ -180,13 +212,20 @@ class CustomTextEditState extends State<CustomTextEdit> with TextInputClient {
         enableIMEPersonalizedLearning: false,
       );
 
+      // A new connection has no platform-side geometry. Forget what the old
+      // one accepted so this first sync cannot be deduplicated away.
+      _sentEditableSize = null;
+      _sentCaretRect = null;
+
       _connection = TextInput.attach(this, config);
 
       _connection!.show();
 
-      // setEditableRect(Rect.zero, Rect.zero);
-
       _connection!.setEditingState(_initEditingState);
+
+      // A new connection starts with no platform-side geometry. Push the last
+      // known layout right away, even though the values did not change.
+      _applyEditableGeometry(force: true);
     }
   }
 
@@ -195,6 +234,8 @@ class CustomTextEditState extends State<CustomTextEdit> with TextInputClient {
       _connection!.close();
       _connection = null;
     }
+    _sentEditableSize = null;
+    _sentCaretRect = null;
   }
 
   TextEditingValue get _initEditingState => widget.deleteDetection

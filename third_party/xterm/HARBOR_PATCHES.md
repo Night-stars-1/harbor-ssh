@@ -129,3 +129,25 @@ delete-lines. Assigning `lines[i] = lines[j]` left the same line in two slots;
 replacing the stale source then detached the visible line and invalidated its
 selection anchors. This happened routinely when GNU screen scrolled its
 alternate buffer. `test/terminal_test.dart` covers scrolling and copying.
+
+## High-throughput output and IME geometry
+
+`lib/src/utils/byte_consumer.dart` retains the original immutable `String`
+chunks instead of expanding every chunk with `runes.toList`. Reading and
+rollback decode UTF-16 surrogate pairs within each chunk; `length`,
+`totalConsumed` and rollback arguments remain code-point counts. Separate
+chunks do not combine isolated surrogate halves. Consumed chunks are still
+released at the parser's existing boundaries.
+
+`lib/src/ui/render.dart` coalesces terminal, scroll and layout geometry
+notifications into one post-frame update using the final cursor position.
+Detached render objects do not publish geometry; reattachment schedules a
+fresh update. `lib/src/ui/custom_text_edit.dart` retains the latest geometry
+while unfocused and deduplicates unchanged editable size and caret rectangles
+per input connection. Every new input connection is synchronized again, even
+when its geometry matches the previous connection.
+
+Regression coverage: `test/terminal_parser_stream_test.dart` exercises split
+CSI/OSC sequences, UTF-8 byte boundaries, Unicode, cursor restoration and
+scrolling logs. `test/terminal_geometry_input_test.dart` covers output,
+scrolling, resizing, font changes, Chinese composition and focus reconnection.

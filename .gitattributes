@@ -1,2 +1,3 @@
 /tool/package_linux.sh text eol=lf
 /linux/packaging/* text eol=lf
+/linux/packaging/*.png binary
