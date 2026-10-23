@@ -4,11 +4,17 @@ import FlutterMacOS
 import window_manager
 
 
+/// Clicks that reach the backdrop belong to Flutter, never to a window drag.
+/// The title bar drag area calls startDragging explicitly.
+private final class WindowBackdropView: NSVisualEffectView {
+  override var mouseDownCanMoveWindow: Bool { false }
+}
+
 class MainFlutterWindow: NSWindow {
   private var localPathsChannel: FlutterMethodChannel?
   private var windowEffectChannel: FlutterMethodChannel?
   private weak var flutterViewController: FlutterViewController?
-  private let backdrop = NSVisualEffectView()
+  private let backdrop = WindowBackdropView()
   private var scopedDirectories: [String: (url: URL, started: Bool)] = [:]
   private var stagedBookmarks: [String: Data] = [:]
   private let bookmarkKey = "harbor.files.default-local-bookmark.v1"
@@ -31,6 +37,10 @@ class MainFlutterWindow: NSWindow {
     flutterViewController.view.frame = container.view.bounds
     flutterViewController.view.autoresizingMask = [.width, .height]
     container.view.addSubview(flutterViewController.view)
+    // Once the backdrop is visible AppKit delivers mouse events to it rather
+    // than to the transparent Flutter view above, so let them bubble to the
+    // Flutter controller instead of the container.
+    backdrop.nextResponder = flutterViewController
     self.flutterViewController = flutterViewController
     self.contentViewController = container
     self.setFrame(windowFrame, display: true)
