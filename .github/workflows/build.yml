@@ -68,6 +68,7 @@ jobs:
       - name: Run macOS native regression tests
         if: matrix.target == 'macos'
         run: |
+          flutter build macos --debug --config-only --no-pub
           xcodebuild test \
             -workspace macos/Runner.xcworkspace \
             -scheme Runner \
