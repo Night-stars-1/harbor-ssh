@@ -5,6 +5,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:harbor_ssh/data/sync_storage.dart';
 import 'package:harbor_ssh/domain/host.dart';
 import 'package:harbor_ssh/domain/network_identity.dart';
+import 'package:harbor_ssh/domain/sync_snapshot.dart';
 import 'package:harbor_ssh/ui/settings_page.dart';
 import 'package:harbor_ssh/ui/settings_window_bridge.dart';
 import 'package:harbor_ssh/ui/sync_settings_controller.dart';
@@ -22,7 +23,7 @@ const _office = Host(
 
 void main() {
   for (final size in [const Size(360, 720), const Size(1100, 820)]) {
-    testWidgets('新建身份后进入规则页添加替换，启用后重启仍生效且不进入云同步 $size', (tester) async {
+    testWidgets('新建身份后进入规则页添加替换，启用后重启仍生效并随云同步 $size', (tester) async {
       tester.view.physicalSize = size;
       tester.view.devicePixelRatio = 1;
       addTearDown(tester.view.resetPhysicalSize);
@@ -157,8 +158,19 @@ void main() {
         6022,
       ));
       reloaded.dispose();
+      expect(model.networkIdentities.activeId, saved.id);
       final snapshot = (await SyncStorage(repository).capture()).encode();
-      expect(snapshot, isNot(contains('frp.example.com')));
+      final synced =
+          SyncSnapshot.decode(snapshot).records['identity:${saved.id}'];
+      expect(synced, isNotNull);
+      final data = Map<String, dynamic>.from(synced!['data'] as Map);
+      expect(data['name'], 'frp 穿透');
+      expect(
+        Map<String, dynamic>.from((data['overrides'] as Map)['office'] as Map),
+        {'address': 'frp.example.com', 'port': 6022},
+      );
+      // 身份定义随加密同步，当前选中的身份只留在本机。
+      expect(snapshot, isNot(contains('activeId')));
 
       await tester.tap(find.byKey(ValueKey('identity-open-${saved.id}')));
       await tester.pumpAndSettle();

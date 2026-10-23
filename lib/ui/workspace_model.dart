@@ -120,17 +120,29 @@ class WorkspaceModel extends ChangeNotifier {
   }
 
   NetworkIdentities networkIdentities = const NetworkIdentities();
-  Future<void> _identitiesWrite = Future.value();
 
-  Future<void> saveNetworkIdentities(NetworkIdentities value) {
-    final operation = _identitiesWrite.then((_) async {
-      await repository.saveNetworkIdentities(value);
+  Future<void> saveNetworkIdentities(NetworkIdentities value) async {
+    if (saving) throw StateError('正在保存，请稍后重试');
+    // Only a definition change needs a cloud round trip; which identity this
+    // device uses never leaves it.
+    final changed = !SyncSnapshot.same(
+      [for (final identity in networkIdentities.identities) identity.toJson()],
+      [for (final identity in value.identities) identity.toJson()],
+    );
+    _saving = true;
+    _notify();
+    try {
+      // 本地提交走仓库锁：与同步的快照/恢复事务串行，锁内只有本地读写。
+      await repository.withLocalData(
+        () => repository.saveNetworkIdentities(value),
+      );
       if (_disposed) return;
       networkIdentities = value;
+      if (changed) _scheduleSync();
+    } finally {
+      _saving = false;
       _notify();
-    });
-    _identitiesWrite = operation.catchError((Object _) {});
-    return operation;
+    }
   }
 
   Future<void> _loadNetworkIdentities() async {
@@ -213,6 +225,11 @@ class WorkspaceModel extends ChangeNotifier {
   final List<SshConnection> _sessions = [];
   List<SshConnection> get sessions => List.unmodifiable(_sessions);
   String? activeSessionId;
+
+  /// 切换页面前的终端。列表页的 [filter] 会清空 [activeSessionId]，
+  /// 但标题栏的「返回终端」仍要记住目标，因此单独保留；会话关闭后
+  /// [lastTerminal] 会因为找不到会话而失效。
+  String? _lastTerminalId;
   String query = '';
   String? selectedTag;
   bool ungroupedOnly = false;
@@ -318,6 +335,38 @@ class WorkspaceModel extends ChangeNotifier {
     return null;
   }
 
+  /// 可返回的终端：最近显示过的会话仍在 [sessions] 里才有效，
+  /// 关闭后失效，不会退回到另一个会话。
+  SshConnection? get lastTerminal {
+    final id = _lastTerminalId;
+    if (id == null) return null;
+    for (final session in sessions) {
+      if (session.id == id) return session;
+    }
+    return null;
+  }
+
+  /// 终端真正显示在屏幕上，而不是被页面覆盖。
+  bool get showsTerminal =>
+      !showingSettings &&
+      !showingFiles &&
+      !showingPortForwards &&
+      activeSession != null;
+
+  /// 仅在页面覆盖终端、且仍有可返回的终端时提供「返回终端」。
+  bool get canReturnToTerminal => !showsTerminal && lastTerminal != null;
+
+  /// 离开终端页前记住当前终端，供标题栏的「返回终端」使用。
+  void _rememberTerminal() {
+    final id = activeSession?.id;
+    if (id != null) _lastTerminalId = id;
+  }
+
+  void returnToTerminal() {
+    final session = lastTerminal;
+    if (session != null) selectSession(session.id);
+  }
+
   List<String> get tags =>
       _hosts.expand((h) => h.tags).toSet().toList()..sort();
   List<Host> get filteredHosts =>
@@ -359,6 +408,8 @@ class WorkspaceModel extends ChangeNotifier {
       );
       stage = StartupStage.recovery;
       await SyncStorage(repository).recover();
+      // Recovery may have rolled identities back; reload the restored ones.
+      await _loadNetworkIdentities();
       stage = StartupStage.hosts;
       final hosts = await repository.loadHosts();
       stage = StartupStage.users;
@@ -464,6 +515,8 @@ class WorkspaceModel extends ChangeNotifier {
           await SyncStorage(repository).recover();
           _hosts = await repository.loadHosts();
           _users = await repository.loadUsers();
+          // The applied snapshot may have renamed or deleted identities.
+          networkIdentities = await repository.loadNetworkIdentities();
         });
       } catch (_) {
         loadError = '本地同步数据尚未恢复，请检查存储权限后重试';
@@ -661,6 +714,7 @@ class WorkspaceModel extends ChangeNotifier {
     showingSettings = false;
     showingFiles = false;
     showingPortForwards = false;
+    _rememberTerminal();
     favoritesOnly = favorites;
     ungroupedOnly = ungrouped;
     selectedTag = ungrouped ? null : tag;
@@ -674,6 +728,7 @@ class WorkspaceModel extends ChangeNotifier {
     showingFiles = false;
     showingPortForwards = false;
     activeSessionId = id;
+    if (id != null) _lastTerminalId = id;
     _notify();
   }
 
@@ -694,6 +749,7 @@ class WorkspaceModel extends ChangeNotifier {
     );
     _sessions.add(session);
     activeSessionId = session.id;
+    _lastTerminalId = session.id;
     session.addListener(_notify);
     _notify();
     unawaited(
@@ -710,6 +766,7 @@ class WorkspaceModel extends ChangeNotifier {
 
   void closeSession(SshConnection session) {
     _sessions.remove(session);
+    if (_lastTerminalId == session.id) _lastTerminalId = null;
     if (activeSessionId == session.id) {
       activeSessionId = _sessions.lastOrNull?.id;
     }
@@ -729,6 +786,7 @@ class WorkspaceModel extends ChangeNotifier {
 
   void showFiles() {
     showingSettings = false;
+    _rememberTerminal();
     showingFiles = true;
     showingPortForwards = false;
     _notify();
@@ -737,6 +795,7 @@ class WorkspaceModel extends ChangeNotifier {
   void showPortForwards({String? sessionId}) {
     showingSettings = false;
     showingFiles = false;
+    _rememberTerminal();
     showingPortForwards = true;
     if (sessionId != null) {
       portForwardSessionId = sessionId;
@@ -746,6 +805,7 @@ class WorkspaceModel extends ChangeNotifier {
   }
 
   void showSettings() {
+    _rememberTerminal();
     showingSettings = true;
     _notify();
   }

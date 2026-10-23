@@ -1,6 +1,7 @@
 import 'dart:convert';
 
 import 'host.dart';
+import 'network_identity.dart';
 
 enum SyncConflictChoice { local, remote }
 
@@ -27,7 +28,10 @@ class SyncSnapshot {
 
   factory SyncSnapshot.decode(String value) {
     final json = jsonDecode(value) as Map<String, dynamic>;
-    if (json['version'] != 1 || json['records'] is! Map) {
+    // Version 2 adds network identities; version 1 archives stay readable so
+    // the first sync after an upgrade still sees the previous baseline.
+    if ((json['version'] != 1 && json['version'] != 2) ||
+        json['records'] is! Map) {
       throw const FormatException('不支持的同步数据格式');
     }
     final records = <String, Map<String, dynamic>>{};
@@ -50,10 +54,19 @@ class SyncSnapshot {
         if (id != 'key:${user.id}' || user.id.isEmpty) {
           throw const FormatException('无效的凭证数据');
         }
+      } else if (id.startsWith('identity:')) {
+        final identity = NetworkIdentity.fromJson(data);
+        if (data['id'] is! String ||
+            identity.id.isEmpty ||
+            data['name'] is! String ||
+            id != 'identity:${identity.id}') {
+          throw const FormatException('无效的网络身份数据');
+        }
       } else {
         throw const FormatException('不支持的同步记录');
       }
-      if (record['secret'] != null) {
+      // Identities carry no credentials: never parse them as a `key:` record.
+      if (!id.startsWith('identity:') && record['secret'] != null) {
         Credentials.fromJson(
           Map<String, dynamic>.from(record['secret'] as Map),
         );
@@ -63,7 +76,13 @@ class SyncSnapshot {
     return SyncSnapshot(records);
   }
 
-  String encode() => jsonEncode({'version': 1, 'records': records});
+  /// Version 2 archives carry network identities. Older clients reject that
+  /// version instead of silently dropping them, while archives without
+  /// identities stay version 1 for interoperability.
+  String encode() => jsonEncode({
+    'version': records.keys.any((id) => id.startsWith('identity:')) ? 2 : 1,
+    'records': records,
+  });
 
   static bool same(Object? a, Object? b) => _canonical(a) == _canonical(b);
   static String _canonical(Object? value) {

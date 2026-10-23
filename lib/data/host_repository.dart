@@ -239,7 +239,7 @@ class HostRepository {
   Future<void> saveUserCredentials(String id, Credentials? value) =>
       saveCredentials('user.$id', value);
 
-  /// Device-local only: [SyncStorage] never captures identities.
+  /// Definitions are synced; [NetworkIdentities.activeId] stays device-local.
   Future<NetworkIdentities> loadNetworkIdentities() async {
     final value = await preferences.read(_identitiesKey);
     return value == null

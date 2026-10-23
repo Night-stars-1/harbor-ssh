@@ -7,21 +7,25 @@
 - **主机**：新增、编辑、删除、收藏、标签、搜索和拖动排序。
 - **登录**：密码、PEM/OpenSSH 私钥和加密私钥口令。密码、私钥和已信任的主机指纹保存在系统安全存储。
 - **连接**：首次连接显示 SHA256 指纹；指纹变化时弹窗对照新旧指纹，核实后可确认更新并继续连接，取消则保留原指纹并阻止连接。
-- **身份**：在「设置 → 身份」为连接设置替换用的地址和端口，用于内网、内网穿透和代理等不同网络场景。切换身份后新建连接和重新连接改用新的地址和端口。
-- **终端**：多会话、复制粘贴、字体与换行、远端资源状态。手机提供常用按键辅助栏。
+- **身份**：在「设置 → 身份」为连接设置替换用的地址和端口，用于内网、内网穿透和代理等不同网络场景。身份名称和规则支持加密同步，当前选择由各设备独立保存；切换后新建连接和重新连接改用新的地址和端口。
+- **标题栏导航**：在「设置 → 外观」开启「导航放到标题栏」后，宽屏桌面的标题栏显示「返回终端」按钮，可从其他页面回到离开前选中的终端并保留内容。已在终端页或原会话已关闭时，按钮置灰不可点击。
+
 - **端口转发**：本地转发、远程转发和 SOCKS5 代理；
 - **文件**：SFTP 浏览和 UTF-8 文本编辑，可与本地目录互传。桌面端可拖放文件和文件夹。
 - **AI**：在当前 SSH 会话中执行任务，支持图片和本机加密历史。Windows 可将面板弹出为独立窗口。
-- **同步**：用 WebDAV 或 GitHub Gist 加密同步连接和凭证。不同步终端内容、AI 历史和主机指纹。
+- **同步**：用 WebDAV 或 GitHub Gist 加密同步连接、凭证和身份定义。不同步当前身份选择、终端内容、AI 历史和主机指纹。同步身份前，需将所有设备升级到支持此功能的版本。
 
 ## 截图
 
-| 桌面 | 深色 |
-| --- | --- |
+
+| 桌面                                      | 深色                                           |
+| --------------------------------------- | -------------------------------------------- |
 | ![桌面连接列表](docs/screenshots/desktop.png) | ![深色连接列表](docs/screenshots/desktop-dark.png) |
 
-| 手机 | 文件 | AI |
-| --- | --- | --- |
+
+
+| 手机                                     | 文件                                       | AI                                    |
+| -------------------------------------- | ---------------------------------------- | ------------------------------------- |
 | ![手机连接列表](docs/screenshots/mobile.png) | ![SFTP 文件列表](docs/screenshots/files.png) | ![终端与 AI 助手](docs/screenshots/ai.png) |
 
 
@@ -48,7 +52,7 @@ flutter build macos --release
 
 # Linux x86_64，在 Ubuntu 24.04 上执行
 sudo apt-get update
-sudo apt-get install -y clang cmake ninja-build pkg-config libgtk-3-dev libsecret-1-dev liblzma-dev libstdc++-12-dev rpm
+sudo apt-get install -y clang cmake ninja-build pkg-config libgtk-3-dev libsecret-1-dev libwayland-dev libx11-dev liblzma-dev libstdc++-12-dev rpm
 flutter build linux --release
 bash tool/package_linux.sh
 
@@ -82,7 +86,7 @@ tar -xzf build/linux/packages/harbor-ssh-linux-x64.tar.gz
 ./harbor-ssh-linux-x64/harbor_ssh
 ```
 
-便携包需自行安装 GTK 3、libsecret、EGL/OpenGL ES 运行库和 `xdg-utils`，中文显示需安装 CJK 字体（例如 `fonts-noto-cjk`）。密码和主机指纹存储依赖已启动并解锁的 Secret Service（例如 GNOME Keyring）；本地文件选择依赖桌面的 XDG Desktop Portal 服务。
+便携包需自行安装 GTK 3、libsecret、Wayland 客户端库（Ubuntu：`libwayland-client0`）、EGL/OpenGL ES 运行库和 `xdg-utils`，中文显示需安装 CJK 字体（例如 `fonts-noto-cjk`）。密码和主机指纹存储依赖已启动并解锁的 Secret Service（例如 GNOME Keyring）；本地文件选择依赖桌面的 XDG Desktop Portal 服务。
 
 ## macOS 自签名
 

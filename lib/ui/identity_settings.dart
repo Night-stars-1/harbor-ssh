@@ -27,6 +27,9 @@ class IdentitySettings extends StatefulWidget {
 class _IdentitySettingsState extends State<IdentitySettings> {
   bool _saving = false;
 
+  /// 同步或其它本地写入进行中时禁止编辑：保存守卫会拒绝并报错。
+  bool get _busy => _saving || widget.controller.busy;
+
   void _open(NetworkIdentity identity) =>
       widget.navigation.openSubpage(identity.id, identity.name);
 
@@ -188,7 +191,7 @@ class _IdentitySettingsState extends State<IdentitySettings> {
 
   /// Right-click on desktop, long press on touch: the same rename/delete menu.
   Future<void> _identityMenu(NetworkIdentity identity, Offset position) async {
-    if (_saving) return;
+    if (_busy) return;
     final overlay =
         Overlay.of(context).context.findRenderObject()! as RenderBox;
     final point = overlay.globalToLocal(position);
@@ -239,7 +242,7 @@ class _IdentitySettingsState extends State<IdentitySettings> {
         RadioGroup<String>(
           groupValue: value.activeId,
           onChanged: (id) {
-            if (!_saving && id != null && id != value.activeId) {
+            if (!_busy && id != null && id != value.activeId) {
               _save(value.copyWith(activeId: id));
             }
           },
@@ -248,7 +251,7 @@ class _IdentitySettingsState extends State<IdentitySettings> {
               RadioListTile<String>(
                 key: const ValueKey('identity-default'),
                 value: '',
-                enabled: !_saving,
+                enabled: !_busy,
                 title: const Text('默认'),
                 subtitle: const Text('使用每个连接自己的地址和端口'),
                 controlAffinity: ListTileControlAffinity.leading,
@@ -263,11 +266,11 @@ class _IdentitySettingsState extends State<IdentitySettings> {
                       : null,
                   child: ListTile(
                     key: ValueKey('identity-open-${identity.id}'),
-                    enabled: !_saving,
+                    enabled: !_busy,
                     leading: Radio<String>(
                       key: ValueKey('identity-${identity.id}'),
                       value: identity.id,
-                      enabled: !_saving,
+                      enabled: !_busy,
                     ),
                     title: Text(identity.name),
                     subtitle: Text(
@@ -287,7 +290,7 @@ class _IdentitySettingsState extends State<IdentitySettings> {
           alignment: Alignment.centerRight,
           child: FilledButton.icon(
             key: const ValueKey('identity-add'),
-            onPressed: _saving ? null : _create,
+            onPressed: _busy ? null : _create,
             icon: const Icon(Icons.add_rounded),
             label: const Text('新建身份'),
           ),
@@ -352,7 +355,7 @@ class _IdentitySettingsState extends State<IdentitySettings> {
               for (final entry in identity.overrides.entries)
                 ListTile(
                   key: ValueKey('identity-rule-${entry.key}'),
-                  enabled: !_saving,
+                  enabled: !_busy,
                   leading: const Icon(Icons.alt_route_rounded),
                   title: Text(hosts[entry.key]?.name ?? '已删除的连接'),
                   subtitle: Text.rich(
@@ -373,7 +376,7 @@ class _IdentitySettingsState extends State<IdentitySettings> {
                   trailing: IconButton(
                     key: ValueKey('identity-rule-delete-${entry.key}'),
                     tooltip: '删除规则',
-                    onPressed: _saving
+                    onPressed: _busy
                         ? null
                         : () => _deleteRule(identity, entry.key),
                     icon: const Icon(Icons.delete_outline_rounded),
@@ -386,7 +389,7 @@ class _IdentitySettingsState extends State<IdentitySettings> {
           alignment: Alignment.centerRight,
           child: FilledButton.icon(
             key: const ValueKey('identity-rule-add'),
-            onPressed: _saving || !available ? null : () => _editRule(identity),
+            onPressed: _busy || !available ? null : () => _editRule(identity),
             icon: const Icon(Icons.add_rounded),
             label: const Text('添加规则'),
           ),

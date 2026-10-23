@@ -73,8 +73,9 @@ class NetworkIdentity {
       );
 }
 
-/// Every identity on this device and the one currently in effect. Stored only
-/// locally: which network the device is on is never synced to other devices.
+/// Every identity on this device and the one currently in effect. The
+/// definitions sync like connections, but which network this device is on is
+/// [activeId] and never leaves it.
 @immutable
 class NetworkIdentities {
   const NetworkIdentities({this.identities = const [], this.activeId = ''});

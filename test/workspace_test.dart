@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:io';
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
@@ -8,6 +9,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:harbor_ssh/ui/app.dart';
 import 'package:harbor_ssh/ui/terminal_pane.dart';
 import 'package:harbor_ssh/data/host_repository.dart';
+import 'package:harbor_ssh/data/local_files.dart';
 import 'package:harbor_ssh/data/public_key_install.dart';
 import 'package:harbor_ssh/data/ssh_connection.dart';
 import 'package:harbor_ssh/data/ssh_keys.dart';
@@ -478,6 +480,192 @@ void main() {
     expect(find.descendant(of: sidebar, matching: find.text('标签')), findsOne);
     expect(find.descendant(of: sidebar, matching: toggle), findsOneWidget);
     expect(session.terminal.buffer.lines[0].getText(), 'retained output');
+    expect(tester.takeException(), isNull);
+    await tester.pumpWidget(const SizedBox.shrink());
+    debugDefaultTargetPlatformOverride = null;
+  });
+
+  testWidgets('标题栏返回终端：跨页面回到切换前的会话，关闭后置灰', (tester) async {
+    tester.view.physicalSize = const Size(1280, 800);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    debugDefaultTargetPlatformOverride = TargetPlatform.windows;
+    addTearDown(() => debugDefaultTargetPlatformOverride = null);
+    const channel = MethodChannel('window_manager');
+    tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+      channel,
+      (call) async => call.method == 'isFocused' ? true : false,
+    );
+    addTearDown(
+      () => tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+        channel,
+        null,
+      ),
+    );
+    final first = SshConnection(id: 'first', host: testHost)
+      ..status = ConnectionStatus.connected;
+    first.terminal.write('first output');
+    final second = SshConnection(
+      id: 'second',
+      host: const Host(
+        id: 'host-2',
+        name: '第二服务器',
+        address: 'second.example.com',
+        username: 'root',
+      ),
+    )..status = ConnectionStatus.connected;
+    second.terminal.write('second output');
+    // SFTP 页会为本机目录建立标签；用空的临时目录作为文档目录，
+    // 避免扫描开发机或 CI 上的真实用户目录。
+    final home = Directory.systemTemp.createTempSync('harbor-return-terminal-');
+    addTearDown(() async {
+      // 恢复静态的目录准备状态，并清理本次创建的临时目录。
+      await LocalFiles.prepareDefaultHome();
+      if (home.existsSync()) home.deleteSync(recursive: true);
+    });
+    // 当前会话是列表中的第一个，而不是最后一个会话。
+    final model = _SidebarWorkspaceModel([
+      first,
+      second,
+    ], localDocumentsDirectory: () async => home);
+    // 只推进有限帧，直到进入明确状态；不把固定帧数当作笼统等待。
+    Future<void> pumpUntil(bool Function() condition, String reason) async {
+      for (var frame = 0; frame < 500; frame++) {
+        if (condition()) return;
+        await tester.pump(const Duration(milliseconds: 20));
+      }
+      fail(reason);
+    }
+
+    await model.saveAppearance(
+      const AppearancePreferences(titleBarNavigation: true),
+    );
+    await tester.pumpWidget(HarborApp(model: model));
+    await pumpUntil(() => !model.loading, '工作区未完成启动加载');
+    model.fileWorkspace.defaultLocalPath = home.path;
+    // 真实目录读取必须在真实事件循环里完成：fake clock 只推进帧，
+    // 不会让 File I/O 完成。先在 runAsync 里加载好空临时目录的本机
+    // 标签，之后进入 SFTP 页只验证页面切换，不再依赖扫描进度。
+    await tester.runAsync(() async {
+      model.fileWorkspace.initializeDefaultLocal();
+      for (final tab in model.fileWorkspace.tabs) {
+        await tab.browse();
+      }
+    });
+    await tester.pumpAndSettle();
+    expect(model.fileWorkspace.tabs, hasLength(1));
+    expect(model.fileWorkspace.tabs.single.loading, isFalse);
+
+    final bar = find.byKey(const ValueKey('windows-title-bar'));
+    final sidebar = find.byKey(const ValueKey('workspace-sidebar'));
+    final button = find.byKey(const ValueKey('title-bar-return-terminal'));
+    IconButton navButton() => tester.widget<IconButton>(button);
+    Future<void> closeSession(String id) async {
+      await tester.tap(
+        find.byKey(ValueKey('session-menu-$id')),
+        buttons: kSecondaryMouseButton,
+        kind: PointerDeviceKind.mouse,
+      );
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('关闭会话'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('断开并关闭'));
+      await tester.pumpAndSettle();
+    }
+
+    // 已经在终端页：按钮存在但不可点击。
+    expect(find.descendant(of: bar, matching: button), findsOneWidget);
+    expect(model.activeSession, same(first));
+    expect(navButton().onPressed, isNull);
+    final terminalState = tester.state(find.byType(TerminalView));
+
+    // SFTP：本机标签已加载，这里只验证页面切换；返回后仍是同一个终端实例。
+    await tester.tap(find.byKey(const ValueKey('title-bar-files')));
+    await tester.pumpAndSettle();
+    expect(model.showingFiles, isTrue);
+    expect(navButton().onPressed, isNotNull);
+    await tester.tap(button);
+    await tester.pumpAndSettle();
+    expect(model.showingFiles, isFalse);
+    expect(model.activeSession, same(first));
+    expect(tester.state(find.byType(TerminalView)), same(terminalState));
+    expect(first.terminal.buffer.getText(), contains('first output'));
+    expect(navButton().onPressed, isNull);
+
+    // 端口转发：同样回到同一终端。
+    await tester.tap(find.byKey(const ValueKey('title-bar-port-forwards')));
+    await tester.pumpAndSettle();
+    expect(model.showingPortForwards, isTrue);
+    expect(navButton().onPressed, isNotNull);
+    await tester.tap(button);
+    await tester.pumpAndSettle();
+    expect(model.showingPortForwards, isFalse);
+    expect(model.activeSession, same(first));
+    expect(tester.state(find.byType(TerminalView)), same(terminalState));
+
+    // 列表页会清空 activeSessionId；跨多个列表页后仍记得原终端。
+    await tester.tap(find.byKey(const ValueKey('title-bar-all-hosts')));
+    await tester.pumpAndSettle();
+    expect(model.activeSessionId, isNull);
+    expect(model.sessions, [first, second]);
+    await tester.tap(find.byKey(const ValueKey('title-bar-favorites')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const ValueKey('title-bar-users')));
+    await tester.pumpAndSettle();
+    expect(model.activeSessionId, isNull);
+    expect(navButton().onPressed, isNotNull);
+    await tester.tap(button);
+    await tester.pumpAndSettle();
+    expect(model.activeSession, same(first));
+    expect(tester.state(find.byType(TerminalView)), same(terminalState));
+    expect(navButton().onPressed, isNull);
+
+    // 切到另一个会话后，记忆随之更新。
+    await tester.tap(
+      find.descendant(of: sidebar, matching: find.text('第二服务器')),
+    );
+    await tester.pumpAndSettle();
+    expect(model.activeSession, same(second));
+    await tester.tap(find.byKey(const ValueKey('title-bar-files')));
+    await tester.pumpAndSettle();
+    await tester.tap(button);
+    await tester.pumpAndSettle();
+    expect(model.activeSession, same(second));
+    expect(first.terminal.buffer.getText(), contains('first output'));
+
+    // 目标在页面打开时被关闭：不回到别的会话，按钮置灰且点击没有动作。
+    await tester.tap(find.byKey(const ValueKey('title-bar-files')));
+    await tester.pumpAndSettle();
+    await closeSession('second');
+    expect(model.sessions, [first]);
+    expect(model.showingFiles, isTrue);
+    expect(navButton().onPressed, isNull);
+    await tester.tap(button, warnIfMissed: false);
+    await tester.pumpAndSettle();
+    expect(model.showingFiles, isTrue);
+    expect(model.activeSessionId, 'first');
+
+    // 会话全部关闭：没有可返回的终端。
+    await closeSession('first');
+    expect(model.sessions, isEmpty);
+    expect(navButton().onPressed, isNull);
+    await tester.tap(find.byKey(const ValueKey('title-bar-all-hosts')));
+    await tester.pumpAndSettle();
+    expect(navButton().onPressed, isNull);
+
+    // 窄屏退回移动端布局：标题栏按钮消失。
+    tester.view.physicalSize = const Size(390, 844);
+    await tester.pumpAndSettle();
+    expect(button, findsNothing);
+    tester.view.physicalSize = const Size(1280, 800);
+    await tester.pumpAndSettle();
+    expect(button, findsOneWidget);
+
+    // 关闭「导航放到标题栏」后按钮不再出现。
+    await model.saveAppearance(const AppearancePreferences());
+    await tester.pumpAndSettle();
+    expect(button, findsNothing);
     expect(tester.takeException(), isNull);
     await tester.pumpWidget(const SizedBox.shrink());
     debugDefaultTargetPlatformOverride = null;
@@ -1226,7 +1414,10 @@ class _TerminalWorkspaceModel extends WorkspaceModel {
 }
 
 class _SidebarWorkspaceModel extends WorkspaceModel {
-  _SidebarWorkspaceModel(this.items) : super(memoryRepository()) {
+  _SidebarWorkspaceModel(
+    this.items, {
+    super.localDocumentsDirectory,
+  }) : super(memoryRepository()) {
     activeSessionId = items.first.id;
     for (final session in items) {
       session.addListener(notifyListeners);

@@ -11,7 +11,9 @@ import 'package:harbor_ssh/data/sync_cipher.dart';
 import 'package:harbor_ssh/data/sync_storage.dart';
 import 'package:harbor_ssh/data/webdav_sync.dart';
 import 'package:harbor_ssh/domain/host.dart';
+import 'package:harbor_ssh/domain/network_identity.dart';
 import 'package:harbor_ssh/domain/sync_snapshot.dart';
+import 'package:harbor_ssh/ui/workspace_model.dart';
 
 import 'support.dart';
 
@@ -22,6 +24,18 @@ SyncSnapshot snapshot(String? name, {bool favorite = false}) => SyncSnapshot({
       'secret': const Credentials(password: 'ssh-password').toJson(),
     },
 });
+
+const _officeIdentity = NetworkIdentity(
+  id: 'identity-office',
+  name: '公司内网',
+  overrides: {'host-1': EndpointOverride(address: '10.0.0.5', port: 2222)},
+);
+
+const _homeIdentity = NetworkIdentity(
+  id: 'identity-home',
+  name: '家里直连',
+  overrides: {'host-1': EndpointOverride(address: '192.168.10.88', port: 2222)},
+);
 
 void main() {
   test('三方合并保留新增、同步删除，双端修改和删除冲突不会静默覆盖', () {
@@ -1279,6 +1293,400 @@ void main() {
     expect(revived.settings!.expiresAt, isNull);
     expect(revived.settings!.refreshExpiresAt, isNull);
   });
+
+  test('WebDAV 两设备同步身份定义与替换规则，当前身份选择各自保留', () async {
+    final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+    addTearDown(() => server.close(force: true));
+    String? remote;
+    var revision = 0, puts = 0;
+    server.listen((request) async {
+      expect(
+        request.headers.value('authorization'),
+        'Basic ${base64Encode(utf8.encode('test:app-password'))}',
+      );
+      if (request.method == 'PROPFIND') {
+        request.response.statusCode = 207;
+      } else if (request.method == 'GET') {
+        request.response.statusCode = remote == null ? 404 : 200;
+        if (remote != null) {
+          request.response.headers.set('ETag', '"$revision"');
+          request.response.write(remote);
+        }
+      } else if (request.method == 'PUT') {
+        final incoming = await utf8.decoder.bind(request).join();
+        final expected = remote == null ? '*' : '"$revision"';
+        final actual = remote == null
+            ? request.headers.value('if-none-match')
+            : request.headers.value('if-match');
+        if (actual != expected) {
+          request.response.statusCode = 412;
+        } else {
+          remote = incoming;
+          revision++;
+          puts++;
+          request.response.statusCode = 201;
+        }
+      }
+      await request.response.close();
+    });
+    const password = 'shared-encryption-password';
+    // 旧客户端留下的存档只有连接，没有任何身份记录。
+    remote = await encryptSync(
+      SyncSnapshot({
+        'host:${testHost.id}': {'data': testHost.toJson(), 'secret': null},
+      }).encode(),
+      password,
+    );
+    revision = 1;
+    expect(
+      (jsonDecode(await decryptSync(remote!, password)) as Map)['version'],
+      1,
+    );
+    final settings = WebDavSettings(
+      url: 'http://127.0.0.1:${server.port}/dav/',
+      username: 'test',
+      password: 'app-password',
+      encryptionPassword: password,
+    );
+    final a = memoryRepository(), b = memoryRepository();
+    final syncA = WebDavSync(a), syncB = WebDavSync(b);
+    addTearDown(syncA.dispose);
+    addTearDown(syncB.dispose);
+    await syncA.saveSettings(settings);
+    await syncB.saveSettings(settings);
+    await syncA.testConnection(settings);
+
+    // A 建好带替换规则的身份并选中后上传。
+    await a.saveHosts([testHost]);
+    await a.saveNetworkIdentities(
+      const NetworkIdentities(
+        identities: [_officeIdentity],
+        activeId: 'identity-office',
+      ),
+    );
+    await syncA.synchronize();
+    final uploaded = await decryptSync(remote!, password);
+    expect((jsonDecode(uploaded) as Map)['version'], 2);
+    expect(uploaded, isNot(contains('activeId')));
+    expect(puts, 1);
+
+    // B 保持自己的身份与选择，只把 A 的身份追加到列表末尾。
+    await b.saveNetworkIdentities(
+      const NetworkIdentities(
+        identities: [_homeIdentity],
+        activeId: 'identity-home',
+      ),
+    );
+    await syncB.synchronize();
+    var bIdentities = await b.loadNetworkIdentities();
+    expect(bIdentities.identities.map((identity) => identity.id), [
+      'identity-home',
+      'identity-office',
+    ]);
+    expect(bIdentities.activeId, 'identity-home');
+    expect(bIdentities.endpointOf(testHost), ('192.168.10.88', 2222));
+    final downloaded = bIdentities.identities.last;
+    expect(downloaded.name, '公司内网');
+    expect(downloaded.endpointOf(testHost), ('10.0.0.5', 2222));
+    expect((await b.loadHosts()).single.id, testHost.id);
+    expect(puts, 2);
+
+    await syncA.synchronize();
+    final aIdentities = await a.loadNetworkIdentities();
+    expect(aIdentities.identities.map((identity) => identity.id), [
+      'identity-office',
+      'identity-home',
+    ]);
+    expect(aIdentities.activeId, 'identity-office');
+    expect(puts, 2);
+
+    // 仅切换当前身份：云端内容与上传次数都不变，另一端的选择也不受影响。
+    final cloudBeforeSwitch = remote;
+    await b.saveNetworkIdentities(
+      bIdentities.copyWith(activeId: 'identity-office'),
+    );
+    await syncB.synchronize();
+    expect(remote, cloudBeforeSwitch);
+    expect(puts, 2);
+    await syncA.synchronize();
+    expect(remote, cloudBeforeSwitch);
+    expect(puts, 2);
+    expect((await a.loadNetworkIdentities()).activeId, 'identity-office');
+
+    NetworkIdentity renamed(NetworkIdentity identity, String name) =>
+        NetworkIdentity(
+          id: identity.id,
+          name: name,
+          overrides: identity.overrides,
+        );
+
+    // A 改名并修改规则，B 同步后拿到新定义，仍保持自己的选择。
+    const newOffice = NetworkIdentity(
+      id: 'identity-office',
+      name: '公司内网（新）',
+      overrides: {
+        'host-1': EndpointOverride(address: '10.0.0.6', port: 2224),
+      },
+    );
+    await a.saveNetworkIdentities(
+      const NetworkIdentities(
+        identities: [newOffice, _homeIdentity],
+        activeId: 'identity-office',
+      ),
+    );
+    await syncA.synchronize();
+    await syncB.synchronize();
+    bIdentities = await b.loadNetworkIdentities();
+    expect(bIdentities.activeId, 'identity-office');
+    final syncedOffice = bIdentities.identities.firstWhere(
+      (identity) => identity.id == 'identity-office',
+    );
+    expect(syncedOffice.name, '公司内网（新）');
+    expect(bIdentities.endpointOf(testHost), ('10.0.0.6', 2224));
+
+    // 两端同时改名：冲突按身份名提示，选择一侧后收敛。
+    await a.saveNetworkIdentities(
+      NetworkIdentities(
+        identities: [renamed(syncedOffice, '总部网络'), _homeIdentity],
+        activeId: 'identity-office',
+      ),
+    );
+    await syncA.synchronize();
+    await b.saveNetworkIdentities(
+      bIdentities.copyWith(
+        identities: [
+          bIdentities.identities.first,
+          renamed(syncedOffice, '分公司网络'),
+        ],
+      ),
+    );
+    Object? conflict;
+    try {
+      await syncB.synchronize();
+    } on SyncConflict catch (error) {
+      conflict = error;
+    }
+    expect(conflict, isA<SyncConflict>());
+    expect((conflict! as SyncConflict).names, ['分公司网络']);
+    final putsBeforeChoice = puts;
+    await syncB.synchronize(choice: SyncConflictChoice.remote);
+    bIdentities = await b.loadNetworkIdentities();
+    expect(
+      bIdentities.identities
+          .firstWhere((identity) => identity.id == 'identity-office')
+          .name,
+      '总部网络',
+    );
+    expect(bIdentities.activeId, 'identity-office');
+    expect(puts, putsBeforeChoice);
+
+    // A 删除正被 B 选中的身份：删除传播，B 回到默认，连接本身不受影响。
+    await a.saveNetworkIdentities(
+      (await a.loadNetworkIdentities()).copyWith(identities: [_homeIdentity]),
+    );
+    final putsBeforeDelete = puts;
+    await syncA.synchronize();
+    expect(puts, putsBeforeDelete + 1);
+    await syncB.synchronize();
+    final bFinal = await b.loadNetworkIdentities();
+    expect(puts, putsBeforeDelete + 1);
+    expect(bFinal.identities.map((identity) => identity.id), [
+      'identity-home',
+    ]);
+    expect(bFinal.activeId, isEmpty);
+    expect(bFinal.endpointOf(testHost), (testHost.address, testHost.port));
+    expect((await b.loadHosts()).single.name, testHost.name);
+    expect((await a.loadHosts()).single.name, testHost.name);
+    expect(
+      SyncSnapshot.decode(
+        await decryptSync(remote!, password),
+      ).records.containsKey('identity:identity-office'),
+      isFalse,
+    );
+  }, timeout: const Timeout(Duration(minutes: 3)));
+
+  test('身份写入失败和重启恢复都还原身份定义与本机当前身份，旧版日志不丢身份', () async {
+    final preferences = _FailOnceStore();
+    final secrets = MemoryStore();
+    final repository = HostRepository(
+      preferences: preferences,
+      secrets: secrets,
+    );
+    await repository.saveHosts([testHost]);
+    await repository.saveNetworkIdentities(
+      const NetworkIdentities(
+        identities: [_officeIdentity, _homeIdentity],
+        activeId: 'identity-office',
+      ),
+    );
+    final storage = SyncStorage(repository);
+    final incoming = SyncSnapshot({
+      'host:${testHost.id}': {'data': testHost.toJson(), 'secret': null},
+      'identity:identity-home': {'data': _homeIdentity.toJson()},
+    });
+
+    // 云端删掉了本机正选中的身份，本轮写入在保存连接时失败：整次回滚。
+    preferences.failKey = 'harbor.hosts.v1';
+    await expectLater(storage.apply(incoming), throwsStateError);
+    final rolledBack = await repository.loadNetworkIdentities();
+    expect(rolledBack.identities.map((identity) => identity.id), [
+      'identity-home',
+      'identity-office',
+    ]);
+    expect(rolledBack.activeId, 'identity-office');
+    expect(rolledBack.endpointOf(testHost), ('10.0.0.5', 2222));
+    expect(secrets.values.containsKey('harbor.sync.pending.v1'), isFalse);
+    expect((await repository.loadHosts()).single.id, testHost.id);
+
+    // 提交中途断电：日志保留，重启恢复身份定义与被删掉的当前身份。
+    final before = await storage.capture();
+    await secrets.write(
+      'harbor.sync.pending.v1',
+      jsonEncode({
+        'before': before.encode(),
+        'incoming': incoming.encode(),
+        'activeId': 'identity-office',
+      }),
+    );
+    await repository.saveNetworkIdentities(
+      const NetworkIdentities(identities: [_homeIdentity]),
+    );
+    await storage.recover();
+    final recovered = await repository.loadNetworkIdentities();
+    expect(recovered.identities.map((identity) => identity.id), [
+      'identity-home',
+      'identity-office',
+    ]);
+    expect(recovered.activeId, 'identity-office');
+    expect(recovered.endpointOf(testHost), ('10.0.0.5', 2222));
+    expect(secrets.values.containsKey('harbor.sync.pending.v1'), isFalse);
+
+    // 旧客户端留下的日志没有身份概念：恢复连接，本机身份与选择原样保留。
+    final legacyBefore = SyncSnapshot({
+      'host:${testHost.id}': {
+        'data': {...testHost.toJson(), 'name': '旧名称'},
+        'secret': null,
+      },
+    });
+    final legacyIncoming = SyncSnapshot({
+      'host:${testHost.id}': {
+        'data': {...testHost.toJson(), 'name': '新名称'},
+        'secret': null,
+      },
+    });
+    await secrets.write(
+      'harbor.sync.pending.v1',
+      jsonEncode({
+        'before': legacyBefore.encode(),
+        'incoming': legacyIncoming.encode(),
+      }),
+    );
+    await storage.recover();
+    expect((await repository.loadHosts()).single.name, '旧名称');
+    final kept = await repository.loadNetworkIdentities();
+    expect(kept.identities.map((identity) => identity.id), [
+      'identity-home',
+      'identity-office',
+    ]);
+    expect(kept.activeId, 'identity-office');
+    expect(secrets.values.containsKey('harbor.sync.pending.v1'), isFalse);
+  }, timeout: const Timeout(Duration(minutes: 3)));
+
+  test('同步进行中拒绝修改身份，完成后主界面采用云端身份并保留本机选择', () async {
+    const password = 'shared-encryption-password';
+    final server = await _GatedWebDavServer.start();
+    addTearDown(server.close);
+    server.content = await encryptSync(
+      SyncSnapshot({
+        'host:${testHost.id}': {'data': testHost.toJson(), 'secret': null},
+        'identity:identity-office': {'data': _officeIdentity.toJson()},
+      }).encode(),
+      password,
+    );
+    server.revision = 1;
+    final repository = memoryRepository();
+    await repository.saveNetworkIdentities(
+      const NetworkIdentities(
+        identities: [_homeIdentity],
+        activeId: 'identity-home',
+      ),
+    );
+    final model = WorkspaceModel(repository);
+    addTearDown(model.dispose);
+    await model.initialize();
+    await model.cloudSync.saveSettings(
+      WebDavSettings(
+        url: 'http://127.0.0.1:${server.port}/dav/',
+        username: 'test',
+        password: 'app-password',
+        encryptionPassword: password,
+      ),
+    );
+
+    server.blockGet();
+    final syncing = model.syncNow();
+    await server.getReached.future;
+    await expectLater(
+      model.saveNetworkIdentities(
+        const NetworkIdentities(
+          identities: [_officeIdentity],
+          activeId: 'identity-office',
+        ),
+      ),
+      throwsStateError,
+    );
+    expect(
+      (await repository.loadNetworkIdentities()).identities.single.id,
+      'identity-home',
+    );
+    server.releaseGet();
+    await syncing;
+    expect(server.puts, 1);
+
+    expect(model.networkIdentities.identities.map((identity) => identity.id), [
+      'identity-home',
+      'identity-office',
+    ]);
+    expect(model.networkIdentities.activeId, 'identity-home');
+    expect(
+      model.networkIdentities.endpointOf(testHost),
+      ('192.168.10.88', 2222),
+    );
+  }, timeout: const Timeout(Duration(minutes: 3)));
+
+  test('启动恢复未完成的身份写入后主界面按恢复的当前身份拨号', () async {
+    final secrets = MemoryStore();
+    final repository = HostRepository(
+      preferences: MemoryStore(),
+      secrets: secrets,
+    );
+    await repository.saveHosts([testHost]);
+    final before = SyncSnapshot({
+      'host:${testHost.id}': {'data': testHost.toJson(), 'secret': null},
+      'identity:identity-office': {'data': _officeIdentity.toJson()},
+    });
+    final incoming = SyncSnapshot({
+      'host:${testHost.id}': {'data': testHost.toJson(), 'secret': null},
+    });
+    await secrets.write(
+      'harbor.sync.pending.v1',
+      jsonEncode({
+        'before': before.encode(),
+        'incoming': incoming.encode(),
+        'activeId': 'identity-office',
+      }),
+    );
+    // 断电前云端快照已经把身份定义和本机选择一起写掉。
+    await repository.saveNetworkIdentities(const NetworkIdentities());
+
+    final model = WorkspaceModel(repository);
+    addTearDown(model.dispose);
+    await model.initialize();
+
+    expect(model.networkIdentities.activeId, 'identity-office');
+    expect(model.networkIdentities.endpointOf(testHost), ('10.0.0.5', 2222));
+    expect(secrets.values.containsKey('harbor.sync.pending.v1'), isFalse);
+  }, timeout: const Timeout(Duration(minutes: 3)));
 }
 
 const _gistId = '0123456789abcdef';
@@ -1478,5 +1886,74 @@ class _FailOnceStore extends MemoryStore {
       throw StateError('disk failure');
     }
     await super.write(key, value);
+  }
+}
+
+/// 真实回环 WebDAV 服务器：GET 可被闸门停住，用来观察同步进行中的本地写入。
+class _GatedWebDavServer {
+  _GatedWebDavServer._(this._server);
+
+  static Future<_GatedWebDavServer> start() async {
+    final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+    final instance = _GatedWebDavServer._(server);
+    server.listen(instance._handle, onError: (Object _) {});
+    return instance;
+  }
+
+  final HttpServer _server;
+  int get port => _server.port;
+
+  String? content;
+  int revision = 0;
+  int puts = 0;
+  Completer<void>? _getGate;
+  final getReached = Completer<void>();
+
+  void blockGet() => _getGate = Completer<void>();
+
+  void releaseGet() {
+    final gate = _getGate;
+    if (gate != null && !gate.isCompleted) gate.complete();
+  }
+
+  Future<void> close() async {
+    releaseGet();
+    await _server.close(force: true);
+  }
+
+  Future<void> _handle(HttpRequest request) async {
+    try {
+      if (request.method == 'GET') {
+        if (!getReached.isCompleted) getReached.complete();
+        await _getGate?.future;
+        final body = content;
+        if (body == null) {
+          request.response.statusCode = 404;
+        } else {
+          request.response.statusCode = 200;
+          request.response.headers.set('ETag', '"$revision"');
+          request.response.write(body);
+        }
+      } else if (request.method == 'PUT') {
+        final incoming = await utf8.decoder.bind(request).join();
+        final expected = content == null ? '*' : '"$revision"';
+        final actual = content == null
+            ? request.headers.value('if-none-match')
+            : request.headers.value('if-match');
+        if (actual != expected) {
+          request.response.statusCode = 412;
+        } else {
+          content = incoming;
+          revision++;
+          puts++;
+          request.response.statusCode = 201;
+        }
+      } else {
+        request.response.statusCode = 207;
+      }
+      await request.response.close();
+    } catch (_) {
+      // 断言失败后服务器会被拆掉，忽略残留连接。
+    }
   }
 }

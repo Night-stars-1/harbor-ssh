@@ -111,6 +111,7 @@ class _HarborAppState extends State<HarborApp> {
                         : null,
                     actions: navigation
                         ? [
+                            _returnTerminalButton(widget.model, compact: true),
                             for (final destination in _primaryDestinations(
                               widget.model,
                             ))
@@ -255,6 +256,17 @@ Widget _sidebarToggle(WorkspaceModel model, {bool compact = false}) =>
             : Icons.keyboard_double_arrow_left_rounded,
         semanticLabel: model.sidebarCollapsed ? '展开侧栏' : '折叠侧栏',
       ),
+    );
+
+/// 回到切换页面前的终端；终端已在屏幕上或没有可返回的终端时置灰。
+Widget _returnTerminalButton(WorkspaceModel model, {bool compact = false}) =>
+    IconButton(
+      key: const ValueKey('title-bar-return-terminal'),
+      tooltip: '返回终端',
+      visualDensity: compact ? VisualDensity.compact : null,
+      iconSize: compact ? 20 : null,
+      onPressed: model.canReturnToTerminal ? model.returnToTerminal : null,
+      icon: const Icon(Icons.keyboard_return_rounded, semanticLabel: '返回终端'),
     );
 
 Widget _themeButton(
@@ -1029,12 +1041,9 @@ class _WorkspaceState extends State<Workspace> {
         final colors = Theme.of(context).colorScheme;
         if (model.showingSettings) _settingsOpened = true;
         if (model.showingPortForwards) _portForwardsOpened = true;
-        final terminalSession =
-            model.showingFiles ||
-                model.showingSettings ||
-                model.showingPortForwards
-            ? null
-            : model.activeSession;
+        final terminalSession = model.showsTerminal
+            ? model.activeSession
+            : null;
         final canAdd = !model.loading && model.loadError == null;
         final nestedPage =
             model.showingSettings ||
@@ -1344,11 +1353,7 @@ class _WorkspaceState extends State<Workspace> {
                                                 .value
                                                 .statusRefreshSeconds,
                                             desktop: wide,
-                                            visible:
-                                                !model.showingSettings &&
-                                                !model.showingFiles &&
-                                                !model.showingPortForwards &&
-                                                model.activeSession != null,
+                                            visible: model.showsTerminal,
                                             mobileController:
                                                 _terminalController,
                                             onSelect: model.selectSession,
