@@ -307,6 +307,23 @@ void main() {
 
       await openAi();
       expect(find.byType(TerminalAiPanel), findsOneWidget);
+
+      if (width >= 800) {
+        // Sizing the panel must not disturb the conversation or the session
+        // switch that follows. Measuring the pane keeps the expectation tied to
+        // the documented upper bound instead of a coincidence of the harness.
+        final paneWidth = tester.getSize(find.byType(TerminalPane).first).width;
+        final upper = paneWidth - 288 > 720 ? 720.0 : paneWidth - 288;
+        final handle = find.byKey(const ValueKey('ai-panel-resize-handle'));
+        expect(handle, findsOneWidget);
+        await tester.drag(handle, const Offset(-500, 0));
+        await tester.pumpAndSettle();
+        expect(
+          tester.getSize(find.byType(TerminalAiPanel)).width,
+          closeTo(upper, 0.01),
+        );
+      }
+
       final task =
           tester.widget<TerminalAiPanel>(find.byType(TerminalAiPanel)).task
             ..entries.add(AiTaskEntry('保留的对话', user: true))
@@ -369,6 +386,104 @@ void main() {
     });
   }
 
+  testWidgets('分屏中各终端的 AI 面板宽度互不影响，缩窄后恢复', (tester) async {
+    tester.view.physicalSize = const Size(2000, 900);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    final first = _Session('first');
+    addTearDown(first.dispose);
+    final key = GlobalKey<_HarnessState>();
+    await tester.pumpWidget(
+      _Harness(
+        key: key,
+        sessions: [first],
+        aiSettings: () => const AiSettings(
+          baseUrl: 'https://ai.example.com/v1',
+          model: 'test',
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const ValueKey('terminal-split-menu-0')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('左右分屏'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const ValueKey('terminal-session-picker-1')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('新建 · ${testHost.name}'));
+    await tester.pumpAndSettle();
+    final second = key.currentState!.active;
+    addTearDown(second.dispose);
+    expect(find.byType(TerminalPane), findsNWidgets(2));
+
+    Finder inPane(int side, Finder matching) => find.descendant(
+      of: find.byKey(ValueKey('terminal-region-$side')),
+      matching: matching,
+    );
+    final handle0 = inPane(
+      0,
+      find.byKey(const ValueKey('ai-panel-resize-handle')),
+    );
+    final handle1 = inPane(
+      1,
+      find.byKey(const ValueKey('ai-panel-resize-handle')),
+    );
+    final panel0 = inPane(0, find.byType(TerminalAiPanel));
+    final panel1 = inPane(1, find.byType(TerminalAiPanel));
+    await tester.tap(inPane(0, find.byKey(const ValueKey('terminal-ai'))));
+    await tester.pumpAndSettle();
+    await tester.tap(inPane(1, find.byKey(const ValueKey('terminal-ai'))));
+    await tester.pumpAndSettle();
+    expect(find.byType(TerminalAiPanel), findsNWidgets(2));
+    expect(handle0, findsOneWidget);
+    expect(handle1, findsOneWidget);
+    final initial0 = tester.getSize(panel0).width;
+    final initial1 = tester.getSize(panel1).width;
+    final paneWidth = tester
+        .getSize(inPane(0, find.byType(TerminalPane)))
+        .width;
+    expect(initial0, closeTo(initial1, 0.01));
+    expect(initial0, closeTo((paneWidth * .4).clamp(320.0, 440.0), 0.01));
+
+    // Sizing one pane leaves its neighbour alone. Both panes are the same
+    // width, so the documented upper bound applies to each of them.
+    final upper = paneWidth - 288 > 720 ? 720.0 : paneWidth - 288;
+    await tester.drag(handle0, const Offset(-500, 0));
+    await tester.pumpAndSettle();
+    expect(tester.getSize(panel0).width, closeTo(upper, 0.01));
+    expect(tester.getSize(panel1).width, closeTo(initial1, 0.01));
+    final widened = tester.getSize(panel0).width;
+    await tester.drag(handle1, const Offset(400, 0));
+    await tester.pumpAndSettle();
+    expect(tester.getSize(panel1).width, 320);
+    expect(tester.getSize(panel0).width, closeTo(widened, 0.01));
+
+    // Below the 800px breakpoint each pane shows its panel full width.
+    tester.view.physicalSize = const Size(1200, 900);
+    await tester.pumpAndSettle();
+    expect(find.byKey(const ValueKey('ai-panel-resize-handle')), findsNothing);
+    expect(
+      tester.getSize(panel0),
+      tester.getSize(inPane(0, find.byType(TerminalPane))),
+    );
+    expect(
+      tester.getSize(panel1),
+      tester.getSize(inPane(1, find.byType(TerminalPane))),
+    );
+
+    // Widening the window again restores both panels to their own widths.
+    tester.view.physicalSize = const Size(2000, 900);
+    await tester.pumpAndSettle();
+    expect(handle0, findsOneWidget);
+    expect(tester.getSize(panel0).width, closeTo(widened, 0.01));
+    expect(tester.getSize(panel1).width, 320);
+    expect(first.terminal.buffer.getText(), contains('first output'));
+    expect(second.terminal.buffer.getText(), contains('created output'));
+    expect(tester.takeException(), isNull);
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
+
   testWidgets('独立窗口选中从未打开 AI 的会话后，回到主窗口仍显示面板', (tester) async {
     tester.view.physicalSize = const Size(390, 800);
     tester.view.devicePixelRatio = 1;
@@ -407,7 +522,9 @@ void main() {
     );
     key.currentState!.controller.selectOption('ai');
     await tester.pumpAndSettle();
-    final taskA = tester.widget<TerminalAiPanel>(find.byType(TerminalAiPanel)).task;
+    final taskA = tester
+        .widget<TerminalAiPanel>(find.byType(TerminalAiPanel))
+        .task;
     await host.open(first.id);
     await tester.pumpAndSettle();
     expect(find.byType(TerminalAiPanel), findsNothing);

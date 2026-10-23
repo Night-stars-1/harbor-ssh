@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:io';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -696,6 +697,144 @@ bash deploy-marzban.sh 1
     expect(jsonEncode(rows), isNot(contains('password')));
     expect(h.remote.sessions.single.waitingApproval, isTrue);
   });
+
+  test('独立窗口改思考等级落在真实主控制器并进入下一次请求与快照', () async {
+    // This suite runs under TestWidgetsFlutterBinding, whose mock HttpClient
+    // answers every request with 400. This flow must reach a real loopback
+    // server, so lift that override for this test only.
+    final httpOverrides = HttpOverrides.current;
+    HttpOverrides.global = null;
+    addTearDown(() => HttpOverrides.global = httpOverrides);
+    final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+    addTearDown(() => server.close(force: true));
+    final bodies = <Map<String, dynamic>>[];
+    server.listen((request) async {
+      final body = jsonDecode(
+        await utf8.decoder.bind(request).join(),
+      ) as Map<String, dynamic>;
+      bodies.add(body);
+      request.response.headers.contentType = ContentType.json;
+      request.response.write(
+        jsonEncode({
+          'choices': [
+            {
+              'message': bodies.length == 1
+                  ? {
+                      'role': 'assistant',
+                      'content': null,
+                      'tool_calls': [
+                        {
+                          'id': 'call-1',
+                          'type': 'function',
+                          'function': {
+                            'name': 'run_command',
+                            'arguments': jsonEncode({
+                              'command': 'pwd',
+                              'reason': '检查目录',
+                              'requires_approval': false,
+                            }),
+                          },
+                        },
+                      ],
+                    }
+                  : {'role': 'assistant', 'content': '检查完成'},
+            },
+          ],
+        }),
+      );
+      await request.response.close();
+    });
+
+    final executor = _RecordingExecutor();
+    final task = AiTaskController(
+      settings: () => AiSettings(
+        baseUrl: 'http://127.0.0.1:${server.port}/v1',
+        apiKey: 'sk-window-secret',
+        model: 'window-model',
+      ),
+      executorFactory: () => executor,
+      connected: () => true,
+      clientFactory: TerminalAiClient.new,
+    );
+    final host = AiWindowHost(
+      appearance: () => const AppearancePreferences(),
+      pushInterval: Duration.zero,
+    );
+    final remote = RemoteAiTaskController();
+    final pushes = <Map<Object?, Object?>>[];
+    final messenger =
+        TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
+    Future<void> deliver(Object? payload) => messenger.handlePlatformMessage(
+      aiWindowChannel.name,
+      const StandardMethodCodec().encodeMethodCall(
+        MethodCall('changed', payload),
+      ),
+      null,
+    );
+    messenger.setMockMethodCallHandler(aiWindowChannel, (call) async {
+      switch (call.method) {
+        case 'open':
+        case 'hide':
+          return null;
+        case 'changed':
+          final payload = Map<Object?, Object?>.from(call.arguments as Map);
+          pushes.add(payload);
+          unawaited(deliver(payload));
+          return null;
+        default:
+          return host.handle(call);
+      }
+    });
+    addTearDown(() {
+      messenger.setMockMethodCallHandler(aiWindowChannel, null);
+      remote.dispose();
+      host.dispose();
+      task.dispose();
+    });
+    Future<void> settle() async {
+      for (var round = 0; round < 8; round++) {
+        await Future<void>.delayed(Duration.zero);
+      }
+      await remote.applied;
+    }
+
+    host.register('s1', task, '生产服务器', onDock: () {});
+    await host.open('s1');
+    await remote.initialize();
+    expect(remote.reasoningEffort, AiReasoningEffort.automatic);
+    expect(task.reasoningEffort, AiReasoningEffort.automatic);
+
+    // The detached window's slider forwards to the one main-engine task.
+    remote.setReasoningEffort(AiReasoningEffort.xhigh);
+    await settle();
+    expect(task.reasoningEffort, AiReasoningEffort.xhigh);
+    expect(remote.reasoningEffort, AiReasoningEffort.xhigh);
+    expect(
+      (pushes.last['settings'] as Map)['reasoningEffort'],
+      'xhigh',
+      reason: '快照回显下一次请求实际使用的档位',
+    );
+
+    // The forwarded choice really reaches the provider on the next turn.
+    await task.start('检查环境');
+    expect(task.failure, isNull, reason: '真实回环请求必须成功');
+    expect(executor.commands, ['pwd']);
+    expect(bodies, hasLength(2));
+    for (final body in bodies) {
+      expect(body['reasoning_effort'], 'xhigh');
+    }
+    expect(jsonEncode(pushes.last), isNot(contains('sk-window-secret')));
+
+    // Automatic is forwarded too and removes the field from the wire.
+    remote.setReasoningEffort(AiReasoningEffort.automatic);
+    await settle();
+    expect(task.reasoningEffort, AiReasoningEffort.automatic);
+    expect(remote.reasoningEffort, AiReasoningEffort.automatic);
+    await task.start('继续检查');
+    expect(bodies, hasLength(3));
+    expect(bodies.last.containsKey('reasoning_effort'), isFalse);
+    expect((pushes.last['settings'] as Map)['reasoningEffort'], 'automatic');
+  });
 }
 
 /// Test double for the main-engine controller: records what the detached
@@ -883,4 +1022,21 @@ class _Harness {
     TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
         .setMockMethodCallHandler(aiWindowChannel, null);
   }
+}
+
+class _RecordingExecutor implements AiCommandExecutor {
+  final commands = <String>[];
+
+  @override
+  Future<AiCommandResult> execute(
+    String command,
+    void Function(String) onOutput,
+  ) async {
+    commands.add(command);
+    onOutput('server output');
+    return const AiCommandResult('server output', 0);
+  }
+
+  @override
+  void cancel() {}
 }

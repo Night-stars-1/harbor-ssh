@@ -535,55 +535,82 @@ class _TerminalAiPanelState extends State<TerminalAiPanel> {
       task.activeModel,
       ..._models,
     }.where((model) => model.trim().isNotEmpty).toList()..sort();
+    // A 240 dp window (or 200% text on a narrow one) must still fit the menu,
+    // so the nominal 260..360 width yields to the space actually available
+    // instead of overflowing. Height stays capped and the whole menu body —
+    // effort slider first, then the model list — scrolls inside it, so at
+    // 200% text no control can be clipped out of reach.
+    final availableWidth = math.max(0.0, MediaQuery.sizeOf(context).width - 16);
+    final minWidth = math.min(260.0, availableWidth);
+    final maxWidth = math.max(minWidth, math.min(360.0, availableWidth));
     return ConstrainedBox(
-      constraints: const BoxConstraints(
-        minWidth: 260,
-        maxWidth: 360,
+      constraints: BoxConstraints(
+        minWidth: minWidth,
+        maxWidth: maxWidth,
         maxHeight: 360,
       ),
-      child: SingleChildScrollView(
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            if (_loadingModels)
-              const Padding(
-                padding: EdgeInsets.all(16),
-                child: Center(child: CircularProgressIndicator()),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Flexible(
+            child: SingleChildScrollView(
+              // The MenuAnchor panel already owns a PrimaryScrollController
+              // for its own scrollbar. Without this, this inner view attaches
+              // a second position to it and Scrollbar throws.
+              primary: false,
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  // The effort slider leads the menu; moving it never closes
+                  // the menu, switches the model or touches the draft.
+                  _ReasoningEffortSection(task: task),
+                  if (_loadingModels)
+                    const Padding(
+                      padding: EdgeInsets.all(16),
+                      child: Center(child: CircularProgressIndicator()),
+                    ),
+                  if (_modelsError != null)
+                    Padding(
+                      padding: const EdgeInsets.fromLTRB(16, 12, 16, 4),
+                      child: Text(
+                        _modelsError!,
+                        style: TextStyle(
+                          color: Theme.of(context).colorScheme.error,
+                        ),
+                      ),
+                    ),
+                  for (final model in models)
+                    MenuItemButton(
+                      style: _floatingMenuItemStyle(
+                        selected: model == task.activeModel,
+                      ),
+                      leadingIcon: Icon(
+                        model == task.activeModel
+                            ? Icons.check_rounded
+                            : Icons.circle_outlined,
+                        size: 18,
+                      ),
+                      onPressed: () {
+                        task.setModel(model);
+                        _modelMenu.close();
+                      },
+                      child: Text(model, overflow: TextOverflow.ellipsis),
+                    ),
+                ],
               ),
-            if (_modelsError != null)
-              Padding(
-                padding: const EdgeInsets.fromLTRB(16, 12, 16, 4),
-                child: Text(
-                  _modelsError!,
-                  style: TextStyle(color: Theme.of(context).colorScheme.error),
-                ),
-              ),
-            for (final model in models)
-              MenuItemButton(
-                style: _floatingMenuItemStyle(
-                  selected: model == task.activeModel,
-                ),
-                leadingIcon: Icon(
-                  model == task.activeModel
-                      ? Icons.check_rounded
-                      : Icons.circle_outlined,
-                  size: 18,
-                ),
-                onPressed: () {
-                  task.setModel(model);
-                  _modelMenu.close();
-                },
-                child: Text(model, overflow: TextOverflow.ellipsis),
-              ),
-            MenuItemButton(
-              style: _floatingMenuItemStyle(),
-              leadingIcon: const Icon(Icons.refresh_rounded, size: 18),
-              onPressed: () => _loadModels(task, force: true),
-              child: const Text('刷新模型列表'),
             ),
-          ],
-        ),
+          ),
+          // Refresh stays pinned below the scrolling body so a tall slide of
+          // models (or 200% text) can never push it out of the menu.
+          MenuItemButton(
+            style: _floatingMenuItemStyle(),
+            leadingIcon: const Icon(Icons.refresh_rounded, size: 18),
+            onPressed: () => _loadModels(task, force: true),
+            child: const Text('刷新模型列表'),
+          ),
+        ],
       ),
     );
   }
@@ -745,6 +772,7 @@ class _TerminalAiPanelState extends State<TerminalAiPanel> {
                 ),
               _approvalMode(task, compact: compact),
               if (model != null) ...[
+                if (compact) const Spacer(),
                 model,
                 if (!compact) const SizedBox(width: 4),
               ] else
@@ -973,7 +1001,7 @@ class _TerminalAiPanelState extends State<TerminalAiPanel> {
             // layout; the embedded panel keeps the in-pane layout.
             child: widget.onDock != null
                 ? _workspaceBody(context, task, configured)
-                : _embeddedBody(context, task, configured),
+                : _embeddedBody(task, configured),
           );
         },
       ),
@@ -983,11 +1011,25 @@ class _TerminalAiPanelState extends State<TerminalAiPanel> {
   /// The embedded in-pane panel. Its layout and behaviour are unchanged: one
   /// compact header row above a scrolling transcript, with the composer — or
   /// the approval prompt — at the end of the column.
-  Widget _embeddedBody(
+  ///
+  /// A drag handle can leave the panel far narrower than the window it sits in,
+  /// so both compact decisions below follow the panel's own width instead of
+  /// the window's.
+  Widget _embeddedBody(AiTaskController task, bool configured) => LayoutBuilder(
+    builder: (context, constraints) => _embeddedBodyContent(
+      context,
+      task,
+      configured,
+      compact: constraints.maxWidth < 360,
+    ),
+  );
+
+  Widget _embeddedBodyContent(
     BuildContext context,
     AiTaskController task,
-    bool configured,
-  ) {
+    bool configured, {
+    required bool compact,
+  }) {
     final colors = Theme.of(context).colorScheme;
     final messages = _messageGroups(task.entries);
     // A window-mode entry point costs one more title-bar action. On
@@ -995,8 +1037,7 @@ class _TerminalAiPanelState extends State<TerminalAiPanel> {
     // existing history/new/close actions keep their full-size layout and
     // the 240px/2x header still fits without overflow.
     final hasWindowAction = widget.onDetach != null || widget.onDock != null;
-    final compactHeader =
-        hasWindowAction && MediaQuery.sizeOf(context).width < 360;
+    final compactHeader = hasWindowAction && compact;
     return Padding(
       padding: const EdgeInsets.all(16),
       child: Column(
@@ -1153,10 +1194,7 @@ class _TerminalAiPanelState extends State<TerminalAiPanel> {
                           Row(
                             children: [
                               Expanded(child: Text(task.pending!.reason)),
-                              _approvalMode(
-                                task,
-                                compact: MediaQuery.sizeOf(context).width < 360,
-                              ),
+                              _approvalMode(task, compact: compact),
                             ],
                           ),
                           const SizedBox(height: 4),
@@ -1943,6 +1981,88 @@ class _TerminalAiPanelState extends State<TerminalAiPanel> {
     _input.value = TextEditingValue(
       text: text,
       selection: TextSelection.collapsed(offset: text.length),
+    );
+  }
+}
+
+/// Leading block of the model menu. The slider is a session-level override:
+/// every step calls [AiTaskController.setReasoningEffort] immediately, so the
+/// menu stays open while the model, the composer draft and the panel state are
+/// untouched. Dragged values are mirrored locally only for the duration of the
+/// gesture, so a controller rebuild cannot fight the thumb.
+class _ReasoningEffortSection extends StatefulWidget {
+  const _ReasoningEffortSection({required this.task});
+
+  final AiTaskController task;
+
+  @override
+  State<_ReasoningEffortSection> createState() =>
+      _ReasoningEffortSectionState();
+}
+
+class _ReasoningEffortSectionState extends State<_ReasoningEffortSection> {
+  AiReasoningEffort? _dragValue;
+
+  static AiReasoningEffort _at(double value) =>
+      AiReasoningEffort.values[value
+          .round()
+          .clamp(0, AiReasoningEffort.values.length - 1)
+          .toInt()];
+
+  void _select(double value) {
+    final next = _at(value);
+    setState(() => _dragValue = next);
+    widget.task.setReasoningEffort(next);
+  }
+
+  void _commit(double value) {
+    widget.task.setReasoningEffort(_at(value));
+    setState(() => _dragValue = null);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final colors = theme.colorScheme;
+    final effort = _dragValue ?? widget.task.reasoningEffort;
+    final enabled = !widget.task.running;
+    final last = AiReasoningEffort.values.length - 1;
+    final index = AiReasoningEffort.values.indexOf(effort);
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(8, 10, 8, 0),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Wrap(
+            alignment: WrapAlignment.spaceBetween,
+            crossAxisAlignment: WrapCrossAlignment.center,
+            spacing: 8,
+            runSpacing: 2,
+            children: [
+              Text('思考等级', style: theme.textTheme.labelLarge),
+              Text(
+                effort.label,
+                style: theme.textTheme.labelMedium?.copyWith(
+                  color: colors.primary,
+                ),
+              ),
+            ],
+          ),
+          Slider(
+            key: const ValueKey('ai-reasoning-effort-slider'),
+            padding: EdgeInsets.zero,
+            value: index.toDouble(),
+            max: last.toDouble(),
+            divisions: last,
+            label: effort.label,
+            semanticFormatterCallback: (value) => '思考等级 ${_at(value).label}',
+            onChanged: enabled ? _select : null,
+            onChangeEnd: enabled ? _commit : null,
+          ),
+          const Divider(height: 20),
+        ],
+      ),
     );
   }
 }
@@ -3038,28 +3158,76 @@ class _AiActivityState extends State<_AiActivity>
   }
 }
 
+/// Narrowest embedded panel that still leaves the composer its own compact
+/// layout; narrower than this the model and approval controls have no room.
+const _aiPanelMinWidth = 320.0;
+
+/// Widest embedded panel, so the transcript keeps a readable measure instead of
+/// spreading one chat bubble across the whole pane.
+const _aiPanelMaxWidth = 720.0;
+
+/// The terminal never gives up more than this, no matter where the handle lands.
+const _aiPanelMinTerminalWidth = 280.0;
+
+/// Width of the drag strip between terminal and panel; it also carries the
+/// divider, so the 8px gap doubles as the grab area.
+const _aiPanelHandleWidth = 8.0;
+
+/// One accessibility nudge, matching the sidebar's resize handle.
+const _aiPanelResizeStep = 16.0;
+
 /// Keeps terminal and composer state across desktop split and compact AI views.
-class TerminalAiLayout extends StatelessWidget {
+/// The split width lives here for the life of the element, so closing and
+/// re-opening the panel, docking it, or crossing the compact breakpoint keeps
+/// the width the user chose.
+class TerminalAiLayout extends StatefulWidget {
   const TerminalAiLayout({super.key, required this.terminal, this.panel});
 
   final Widget terminal;
   final Widget? panel;
 
   @override
+  State<TerminalAiLayout> createState() => _TerminalAiLayoutState();
+}
+
+class _TerminalAiLayoutState extends State<TerminalAiLayout> {
+  /// Width the user dragged to, or null while the panel keeps the automatic
+  /// share of the pane (40%, clamped to 320..440).
+  double? _width;
+
+  @override
   Widget build(BuildContext context) => LayoutBuilder(
     builder: (context, constraints) {
-      final horizontal = constraints.maxWidth >= 800;
-      final hidden = !horizontal && panel != null;
+      final maxWidth = constraints.maxWidth;
+      final horizontal = maxWidth >= 800;
+      final hidden = !horizontal && widget.panel != null;
+      // Boundaries hold at the breakpoint: 800px always leaves the panel at
+      // least 320 wide and the terminal at least 280.
+      final upper = math.min(
+        _aiPanelMaxWidth,
+        maxWidth - _aiPanelHandleWidth - _aiPanelMinTerminalWidth,
+      );
+      final lower = math.min(_aiPanelMinWidth, upper);
       final panelWidth = horizontal
-          ? (constraints.maxWidth * .4).clamp(320.0, 440.0)
-          : constraints.maxWidth;
-      final terminalWidth = horizontal && panel != null
-          ? constraints.maxWidth - panelWidth - 1
-          : constraints.maxWidth;
+          ? (_width ?? (maxWidth * .4).clamp(320.0, 440.0)).clamp(lower, upper)
+          : maxWidth;
+      final terminalWidth = horizontal && widget.panel != null
+          ? maxWidth - panelWidth - _aiPanelHandleWidth
+          : maxWidth;
+
+      // Clamping the stored width keeps a drag that overshoots a boundary from
+      // sticking there: dragging back moves the panel on the next delta.
+      void resize(double next) {
+        final clamped = next.clamp(lower, upper);
+        if (clamped == _width) return;
+        setState(() => _width = clamped);
+      }
+
       return Stack(
         fit: StackFit.expand,
         children: [
           Positioned(
+            key: const ValueKey('ai-layout-terminal'),
             left: 0,
             top: 0,
             bottom: 0,
@@ -3068,26 +3236,62 @@ class TerminalAiLayout extends StatelessWidget {
               offstage: hidden,
               child: TickerMode(
                 enabled: !hidden,
-                child: ExcludeFocus(excluding: hidden, child: terminal),
+                child: ExcludeFocus(excluding: hidden, child: widget.terminal),
               ),
             ),
           ),
-          if (panel != null) ...[
-            Positioned(
-              left: terminalWidth,
-              top: 0,
-              bottom: 0,
-              width: horizontal ? 1 : 0,
-              child: ColoredBox(
-                color: Theme.of(context).colorScheme.outlineVariant,
+          if (widget.panel != null) ...[
+            // Only the split view gets a handle; the compact view is a single
+            // full-width column, so there is nothing to size.
+            if (horizontal)
+              Positioned(
+                key: const ValueKey('ai-layout-resize'),
+                left: terminalWidth,
+                top: 0,
+                bottom: 0,
+                width: _aiPanelHandleWidth,
+                child: Semantics(
+                  label: '调整 AI 面板宽度',
+                  value: '${panelWidth.round()}',
+                  increasedValue:
+                      '${(panelWidth + _aiPanelResizeStep).clamp(lower, upper).round()}',
+                  decreasedValue:
+                      '${(panelWidth - _aiPanelResizeStep).clamp(lower, upper).round()}',
+                  onIncrease: () => resize(panelWidth + _aiPanelResizeStep),
+                  onDecrease: () => resize(panelWidth - _aiPanelResizeStep),
+                  child: MouseRegion(
+                    cursor: SystemMouseCursors.resizeLeftRight,
+                    child: GestureDetector(
+                      key: const ValueKey('ai-panel-resize-handle'),
+                      behavior: HitTestBehavior.opaque,
+                      // Anchor on the width actually on screen, so a drag that
+                      // starts after a clamp continues from the visible edge.
+                      onHorizontalDragStart: (_) => _width = panelWidth,
+                      // The panel is on the right: dragging left widens it.
+                      onHorizontalDragUpdate: (details) =>
+                          resize((_width ?? panelWidth) - details.delta.dx),
+                      onDoubleTap: () => setState(() => _width = null),
+                      child: Align(
+                        alignment: Alignment.centerRight,
+                        child: SizedBox(
+                          width: 1,
+                          height: double.infinity,
+                          child: ColoredBox(
+                            color: Theme.of(context).colorScheme.outlineVariant,
+                          ),
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
               ),
-            ),
             Positioned(
+              key: const ValueKey('ai-layout-panel'),
               right: 0,
               top: 0,
               bottom: 0,
               width: panelWidth,
-              child: panel!,
+              child: widget.panel!,
             ),
           ],
         ],

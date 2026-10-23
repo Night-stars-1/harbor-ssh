@@ -5,6 +5,7 @@ import 'dart:math';
 import 'package:cryptography/cryptography.dart';
 
 import 'host_repository.dart';
+import 'terminal_ai.dart';
 
 /// Raised when local conversation history cannot be read or written. The
 /// message is user-facing: storage problems are reported, never swallowed and
@@ -62,6 +63,7 @@ class AiConversation {
     required this.entries,
     required this.history,
     this.contextModel,
+    this.reasoningEffort = AiReasoningEffort.automatic,
   });
 
   final String id;
@@ -77,6 +79,9 @@ class AiConversation {
   /// Raw model messages replayed verbatim when the conversation continues.
   final List<Map<String, dynamic>> history;
   final String? contextModel;
+
+  /// Effort the conversation was last sent with, restored on reopen.
+  final AiReasoningEffort reasoningEffort;
 
   AiConversationSummary get summary => AiConversationSummary(
     id: id,
@@ -94,6 +99,7 @@ class AiConversation {
     'createdAt': createdAt.toIso8601String(),
     'updatedAt': updatedAt.toIso8601String(),
     'contextModel': contextModel,
+    'reasoningEffort': reasoningEffort.name,
     'entries': entries,
     'history': history,
   };
@@ -486,6 +492,11 @@ class AiConversationStore {
       contextModel: json['contextModel'] is String
           ? json['contextModel'] as String
           : null,
+      reasoningEffort:
+          AiReasoningEffort.values
+              .where((value) => value.name == json['reasoningEffort'])
+              .firstOrNull ??
+          AiReasoningEffort.automatic,
     );
   }
 }

@@ -67,6 +67,7 @@ class _AiSettingsPageState extends State<AiSettingsPage> {
         approvalModel: profile.approvalModel,
         protocol: profile.protocol,
         provider: profile.id,
+        reasoningEffort: widget.controller.aiSettings.reasoningEffort,
       );
     }
     _drafts[_provider] = AiSettings(
@@ -78,6 +79,7 @@ class _AiSettingsPageState extends State<AiSettingsPage> {
           : (_drafts[_provider]?.approvalModel ?? ''),
       protocol: widget.controller.aiSettings.protocol,
       provider: _provider,
+      reasoningEffort: widget.controller.aiSettings.reasoningEffort,
     );
   }
 
@@ -92,6 +94,7 @@ class _AiSettingsPageState extends State<AiSettingsPage> {
     approvalModel: approvalModel ?? draft.approvalModel,
     protocol: draft.protocol,
     provider: draft.provider,
+    reasoningEffort: draft.reasoningEffort,
   );
 
   AiSettings _editingCredentials() => AiSettings(
@@ -105,6 +108,9 @@ class _AiSettingsPageState extends State<AiSettingsPage> {
         : (_drafts[_provider]?.approvalModel ?? ''),
     protocol: _protocol,
     provider: _provider,
+    reasoningEffort:
+        _drafts[_provider]?.reasoningEffort ??
+        widget.controller.aiSettings.reasoningEffort,
   );
 
   AiSettings _credentialsOf(String providerId) {
@@ -118,6 +124,7 @@ class _AiSettingsPageState extends State<AiSettingsPage> {
       baseUrl: preset?.baseUrl ?? '',
       protocol: preset?.protocol ?? AiProtocol.openai,
       provider: providerId,
+      reasoningEffort: widget.controller.aiSettings.reasoningEffort,
     );
   }
 
@@ -302,7 +309,10 @@ class _AiSettingsPageState extends State<AiSettingsPage> {
     _storeEditing();
     final id = 'custom-${DateTime.now().microsecondsSinceEpoch}';
     _providerNames[id] = name;
-    _drafts[id] = AiSettings(provider: id);
+    _drafts[id] = AiSettings(
+      provider: id,
+      reasoningEffort: widget.controller.aiSettings.reasoningEffort,
+    );
     setState(() {
       _provider = id;
       _protocol = AiProtocol.openai;
@@ -428,6 +438,7 @@ class _AiSettingsPageState extends State<AiSettingsPage> {
           protocol: selected.protocol,
           provider: _modelProvider,
           profiles: _profilesForSave(),
+          reasoningEffort: selected.reasoningEffort,
         ),
       );
       if (mounted) showSettingsNotice(context, 'AI 设置已保存');

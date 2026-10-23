@@ -30,6 +30,7 @@ abstract final class AiWindowOp {
   static const stop = 'stop';
   static const approve = 'approve';
   static const setModel = 'setModel';
+  static const setReasoningEffort = 'setReasoningEffort';
   static const setApprovalMode = 'setApprovalMode';
   static const setAutoApprove = 'setAutoApprove';
   static const listModels = 'listModels';
@@ -564,6 +565,8 @@ class _DetachedSession {
           task.approve(arguments['allowed'] == true);
         case AiWindowOp.setModel:
           task.setModel(arguments['model'] as String?);
+        case AiWindowOp.setReasoningEffort:
+          task.setReasoningEffort(_reasoningFrom(arguments['effort']));
         case AiWindowOp.setApprovalMode:
           task.setApprovalMode(_modeFrom(arguments['mode']));
         case AiWindowOp.setAutoApprove:
@@ -685,7 +688,10 @@ class _DetachedSession {
             },
       'approvalMode': task.approvalMode.name,
       'turnStartedAt': task.turnStartedAt?.toIso8601String(),
-      'settings': _publicSettings(task.settings()),
+      'settings': _publicSettings(
+        task.settings(),
+        reasoningEffort: task.reasoningEffort,
+      ),
       'appearance': host.appearance().toJson(),
       'settingsAvailable': onSettings != null,
       'sessions': host._encodedSessions(),
@@ -770,9 +776,20 @@ AiApprovalMode _modeFrom(Object? value) {
   return AiApprovalMode.manual;
 }
 
+AiReasoningEffort _reasoningFrom(Object? value) {
+  if (value is! String) return AiReasoningEffort.automatic;
+  for (final effort in AiReasoningEffort.values) {
+    if (effort.name == value) return effort;
+  }
+  return AiReasoningEffort.automatic;
+}
+
 /// Values the detached window is allowed to know. The API key and the provider
 /// profiles (they embed keys) never leave the main engine.
-Map<String, Object?> _publicSettings(AiSettings settings) => <String, Object?>{
+Map<String, Object?> _publicSettings(
+  AiSettings settings, {
+  AiReasoningEffort? reasoningEffort,
+}) => <String, Object?>{
   'baseUrl': settings.baseUrl,
   'model': settings.model,
   'protocol': (settings.protocol ?? AiProtocol.openai).name,
@@ -780,6 +797,8 @@ Map<String, Object?> _publicSettings(AiSettings settings) => <String, Object?>{
   'approvalModel': settings.approvalModel,
   'approvalProvider': settings.approvalProvider,
   'defaultApprovalMode': settings.defaultApprovalMode.name,
+  // Session override first: the mirrored window must show what will be sent.
+  'reasoningEffort': (reasoningEffort ?? settings.reasoningEffort).name,
 };
 
 Map<String, Object?> _encodeEntry(AiTaskEntry entry, List<String> refs) =>
@@ -994,6 +1013,16 @@ class RemoteAiTaskController extends AiTaskController
   void setModel(String? model) {
     if (_disposed) return;
     unawaited(_forward(AiWindowOp.setModel, <String, Object?>{'model': model}));
+  }
+
+  @override
+  void setReasoningEffort(AiReasoningEffort effort) {
+    if (_disposed) return;
+    unawaited(
+      _forward(AiWindowOp.setReasoningEffort, <String, Object?>{
+        'effort': effort.name,
+      }),
+    );
   }
 
   @override

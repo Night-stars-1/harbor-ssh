@@ -23,6 +23,24 @@ enum AiApprovalMode {
   final String description;
 }
 
+/// Requested reasoning effort for one conversation.
+///
+/// [automatic] sends no parameter at all, so the provider keeps its own
+/// default. Any other value is sent verbatim as the protocol's effort name;
+/// whether a model supports it is decided by the provider, never guessed from
+/// the model string here.
+enum AiReasoningEffort {
+  automatic('自动'),
+  low('低'),
+  medium('中'),
+  high('高'),
+  xhigh('极高'),
+  max('最大');
+
+  const AiReasoningEffort(this.label);
+  final String label;
+}
+
 class AiProviderPreset {
   const AiProviderPreset(this.id, this.name, this.baseUrl, this.protocol);
   final String id, name, baseUrl;
@@ -136,6 +154,7 @@ class AiSettings {
     this.approvalProvider = '',
     this.profiles = const [],
     this.defaultApprovalMode = AiApprovalMode.manual,
+    this.reasoningEffort = AiReasoningEffort.automatic,
   });
   final String baseUrl, apiKey, model, approvalModel, approvalProvider;
   final List<AiProviderProfile> profiles;
@@ -143,6 +162,7 @@ class AiSettings {
   final AiProtocol? protocol;
   final String? provider;
   final AiApprovalMode defaultApprovalMode;
+  final AiReasoningEffort reasoningEffort;
   bool get configured => baseUrl.isNotEmpty && model.isNotEmpty;
 
   AiSettings withModel(String model) => AiSettings(
@@ -155,6 +175,20 @@ class AiSettings {
     approvalProvider: approvalProvider,
     profiles: profiles,
     defaultApprovalMode: defaultApprovalMode,
+    reasoningEffort: reasoningEffort,
+  );
+
+  AiSettings withReasoningEffort(AiReasoningEffort effort) => AiSettings(
+    baseUrl: baseUrl,
+    apiKey: apiKey,
+    model: model,
+    protocol: protocol,
+    provider: provider,
+    approvalModel: approvalModel,
+    approvalProvider: approvalProvider,
+    profiles: profiles,
+    defaultApprovalMode: defaultApprovalMode,
+    reasoningEffort: effort,
   );
 
   AiSettings settingsFor(String? providerId, {String? model}) {
@@ -180,6 +214,7 @@ class AiSettings {
       approvalProvider: approvalProvider,
       profiles: profiles,
       defaultApprovalMode: defaultApprovalMode,
+      reasoningEffort: reasoningEffort,
     );
   }
 
@@ -200,6 +235,7 @@ class AiSettings {
     'approvalModel': approvalModel,
     'approvalProvider': approvalProvider,
     'defaultApprovalMode': defaultApprovalMode.name,
+    'reasoningEffort': reasoningEffort.name,
     if (profiles.isNotEmpty)
       'profiles': [for (final profile in profiles) profile.toJson()],
   };
@@ -226,6 +262,11 @@ class AiSettings {
             .where((value) => value.name == json['defaultApprovalMode'])
             .firstOrNull ??
         AiApprovalMode.manual,
+    reasoningEffort:
+        AiReasoningEffort.values
+            .where((value) => value.name == json['reasoningEffort'])
+            .firstOrNull ??
+        AiReasoningEffort.automatic,
   );
 
   Uri get endpoint => _endpoint(
@@ -437,6 +478,9 @@ Map<String, dynamic> _requestBody(
       ],
       'tools': _toolDefinitions(toolMode),
       'tool_choice': 'auto',
+      // Automatic leaves the payload byte-identical to a provider default.
+      if (settings.reasoningEffort != AiReasoningEffort.automatic)
+        'reasoning_effort': settings.reasoningEffort.name,
     };
   }
   final system = <String>[];
@@ -492,6 +536,9 @@ Map<String, dynamic> _requestBody(
     'messages': converted,
     'tools': _anthropicToolDefinitions(toolMode),
     'tool_choice': {'type': 'auto'},
+    // Effort is independent of thinking mode: thinking stays untouched.
+    if (settings.reasoningEffort != AiReasoningEffort.automatic)
+      'output_config': {'effort': settings.reasoningEffort.name},
   };
 }
 

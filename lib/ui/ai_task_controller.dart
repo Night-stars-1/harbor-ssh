@@ -6,7 +6,7 @@ import 'package:flutter/foundation.dart';
 
 import '../data/ai_conversation_store.dart';
 import '../data/terminal_ai.dart';
-export '../data/terminal_ai.dart' show AiApprovalMode;
+export '../data/terminal_ai.dart' show AiApprovalMode, AiReasoningEffort;
 import '../data/ai_image.dart';
 
 class AiTaskEntry {
@@ -38,7 +38,6 @@ bool aiCommandNeedsApproval(AiToolCall call) =>
       r'(^|[\s;&|/])(sudo|su|rm|rmdir|mv|dd|mkfs\S*|wipefs|shred|truncate|chmod|chown|reboot|shutdown|poweroff|kill|killall|pkill|tee)(\s|$)|(^|[^>])>(?!>)|\b(apt|apt-get|yum|dnf|pip|npm)\s|\bsystemctl\s+(stop|restart|reload|disable|enable|mask)|\bgit\s+(push|reset|clean|checkout|restore|rebase)|\b(docker|kubectl)\s+(rm|rmi|stop|kill|restart|delete|apply|replace|rollout)|\bservice\s+\S+\s+(stop|restart|reload)',
       caseSensitive: false,
     ).hasMatch(call.command);
-
 
 class AiTaskController extends ChangeNotifier {
   AiTaskController({
@@ -75,6 +74,7 @@ class AiTaskController extends ChangeNotifier {
   final _unresolved = <String, AiTaskEntry?>{};
   String? _contextModel;
   String? _modelOverride;
+  AiReasoningEffort? _reasoningOverride;
   DateTime? turnStartedAt;
   AiApprovalMode approvalMode;
 
@@ -133,17 +133,35 @@ class AiTaskController extends ChangeNotifier {
 
   String get activeModel => _effectiveSettings().model;
 
+  /// Effort the next request of this conversation will ask for.
+  AiReasoningEffort get reasoningEffort => _effectiveSettings().reasoningEffort;
+
   AiSettings _effectiveSettings() {
     final base = settings();
     final model = _modelOverride?.trim();
-    if (model == null || model.isEmpty || model == base.model) return base;
-    return base.withModel(model);
+    final effort = _reasoningOverride;
+    var effective = base;
+    if (model != null && model.isNotEmpty && model != base.model) {
+      effective = effective.withModel(model);
+    }
+    if (effort != null && effort != base.reasoningEffort) {
+      effective = effective.withReasoningEffort(effort);
+    }
+    return effective;
   }
 
   void setModel(String? model) {
     if (running || _disposed) return;
     final next = model?.trim();
     _modelOverride = next == null || next.isEmpty ? null : next;
+    _notify();
+  }
+
+  /// Session-scoped, exactly like [setModel]: refused while a turn is running
+  /// and kept for the next conversation of this session.
+  void setReasoningEffort(AiReasoningEffort effort) {
+    if (running || _disposed) return;
+    _reasoningOverride = effort == settings().reasoningEffort ? null : effort;
     _notify();
   }
 
@@ -272,6 +290,7 @@ class AiTaskController extends ChangeNotifier {
       _unresolved.clear();
       _contextModel = conversation.contextModel;
       _modelOverride = _restoredModelOverride(conversation);
+      _reasoningOverride = _restoredReasoningOverride(conversation);
       _activeId = conversation.id;
       _activeCreatedAt = conversation.createdAt;
       status = '';
@@ -430,6 +449,7 @@ class AiTaskController extends ChangeNotifier {
         for (final message in _history) Map<String, dynamic>.from(message),
       ],
       contextModel: _contextModel,
+      reasoningEffort: _effectiveSettings().reasoningEffort,
     );
   }
 
@@ -494,6 +514,11 @@ class AiTaskController extends ChangeNotifier {
     if (model.isEmpty || model == settings().model) return null;
     return model;
   }
+
+  AiReasoningEffort? _restoredReasoningOverride(AiConversation conversation) =>
+      conversation.reasoningEffort == settings().reasoningEffort
+      ? null
+      : conversation.reasoningEffort;
 
   Map<String, dynamic> _entryJson(AiTaskEntry entry) => {
     'text': entry.text,

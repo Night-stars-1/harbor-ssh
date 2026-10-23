@@ -127,6 +127,37 @@ void main() {
     task.dispose();
   });
 
+  test('思考等级随会话归档并在重新打开时恢复，新对话沿用当前选择', () async {
+    final client = _Client([]);
+    final task = build(client);
+    expect(task.reasoningEffort, AiReasoningEffort.automatic);
+    task.setReasoningEffort(AiReasoningEffort.xhigh);
+    await task.start('第一轮');
+    final firstId = task.activeConversationId!;
+    expect(client.configs.last.reasoningEffort, AiReasoningEffort.xhigh);
+
+    await task.newConversation();
+    expect(
+      task.reasoningEffort,
+      AiReasoningEffort.xhigh,
+      reason: '新对话与模型选择一样沿用当前档位',
+    );
+    await task.start('第二轮');
+    expect(client.configs.last.reasoningEffort, AiReasoningEffort.xhigh);
+    expect(
+      (await store.load(_scope, firstId))!.reasoningEffort,
+      AiReasoningEffort.xhigh,
+    );
+
+    task.setReasoningEffort(AiReasoningEffort.medium);
+    expect(task.reasoningEffort, AiReasoningEffort.medium);
+    await task.openConversation(firstId);
+    expect(task.reasoningEffort, AiReasoningEffort.xhigh);
+    await task.start('继续第一轮');
+    expect(client.configs.last.reasoningEffort, AiReasoningEffort.xhigh);
+    task.dispose();
+  });
+
   test('新对话先归档当前会话再清空，历史仍可打开', () async {
     final task = build(_Client([]));
     await task.start('第一轮');
@@ -473,6 +504,7 @@ class _Client extends TerminalAiClient {
   _Client(this.replies);
   final List<AiReply> replies;
   final requests = <List<Map<String, dynamic>>>[];
+  final configs = <AiSettings>[];
   Completer<AiReply>? pending;
 
   @override
@@ -480,6 +512,7 @@ class _Client extends TerminalAiClient {
     AiSettings settings,
     List<Map<String, dynamic>> messages,
   ) async {
+    configs.add(settings);
     requests.add([
       for (final message in messages) Map<String, dynamic>.from(message),
     ]);

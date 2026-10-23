@@ -4,6 +4,7 @@ import 'dart:io';
 import 'package:cryptography/cryptography.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:harbor_ssh/data/ai_conversation_store.dart';
+import 'package:harbor_ssh/data/terminal_ai.dart';
 
 import 'support.dart';
 
@@ -16,6 +17,7 @@ AiConversation _conversation({
   String scope = _scope,
   String title = '检查磁盘',
   String model = 'test-model',
+  AiReasoningEffort effort = AiReasoningEffort.automatic,
   String text = _sentinel,
   DateTime? updatedAt,
 }) => AiConversation(
@@ -23,6 +25,7 @@ AiConversation _conversation({
   scope: scope,
   title: title,
   model: model,
+  reasoningEffort: effort,
   createdAt: DateTime(2024),
   updatedAt: updatedAt ?? DateTime(2024, 1, 2),
   entries: [
@@ -117,6 +120,62 @@ void main() {
       hasLength(2),
       reason: '删除后只剩索引与 b 的密文',
     );
+  });
+
+  test('思考等级随历史保存并恢复，旧文件缺字段回落到自动', () async {
+    await store.save(
+      _conversation(id: 'chosen', effort: AiReasoningEffort.xhigh),
+    );
+    final loaded = await store.load(_scope, 'chosen');
+    expect(loaded!.reasoningEffort, AiReasoningEffort.xhigh);
+
+    // Seed the key (the store generates it on first save) and craft a record
+    // written before the field existed, sealed exactly like the store does.
+    final key = SecretKey(
+      base64Decode(secrets.values[AiConversationStore.keyName]!),
+    );
+    const id = 'legacy';
+    final clear = utf8.encode(
+      jsonEncode({
+        'v': 1,
+        'id': id,
+        'scope': _scope,
+        'title': '旧对话',
+        'model': 'test-model',
+        'createdAt': DateTime(2023).toIso8601String(),
+        'updatedAt': DateTime(2023, 1, 2).toIso8601String(),
+        'contextModel': 'https://example.com/v1|openai|test-model',
+        'entries': [
+          {'text': '旧消息', 'user': true},
+        ],
+        'history': [
+          {'role': 'user', 'content': '旧消息'},
+        ],
+      }),
+    );
+    final box = await AesGcm.with256bits().encrypt(
+      clear,
+      secretKey: key,
+      aad: utf8.encode('Harbor SSH AI history v1|record|$_scope|$id'),
+    );
+    final file = await _contentFileFor(root, _scope, id);
+    await file.parent.create(recursive: true);
+    await file.writeAsBytes(
+      utf8.encode(
+        jsonEncode({
+          'format': 'Harbor SSH AI history v1',
+          'v': 1,
+          'nonce': base64Encode(box.nonce),
+          'mac': base64Encode(box.mac.bytes),
+          'data': base64Encode(box.cipherText),
+        }),
+      ),
+    );
+    final legacy = await store.load(_scope, id);
+    expect(legacy, isNotNull);
+    expect(legacy!.reasoningEffort, AiReasoningEffort.automatic);
+    expect(legacy.entries.single['text'], '旧消息');
+    expect(legacy.history.single['content'], '旧消息');
   });
 
   test('同一 id 重复保存以最后一次为准', () async {

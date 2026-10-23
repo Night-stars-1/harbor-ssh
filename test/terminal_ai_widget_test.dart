@@ -1,3 +1,4 @@
+import 'dart:convert';
 import 'dart:io';
 
 import 'package:flutter/services.dart';
@@ -325,10 +326,7 @@ void main() {
       MaterialApp(
         theme: harborTheme(),
         home: Scaffold(
-          body: AiSettingsPage(
-            key: UniqueKey(),
-            controller: controller,
-          ),
+          body: AiSettingsPage(key: UniqueKey(), controller: controller),
         ),
       ),
     );
@@ -590,13 +588,14 @@ void main() {
     session.dispose();
   });
 
-  testWidgets('AI 随 SSH 面板缩放，保留输入和终端状态', (tester) async {
+  testWidgets('AI 面板可拖动调整宽度，保留输入、终端与所选宽度', (tester) async {
     tester.view.devicePixelRatio = 1;
     tester.view.physicalSize = const Size(1000, 700);
     addTearDown(tester.view.resetPhysicalSize);
     addTearDown(tester.view.resetDevicePixelRatio);
     final session = SshConnection(id: 'resize', host: testHost)
       ..status = ConnectionStatus.connected;
+    session.terminal.write('resize-output\r\n');
     final controller = TerminalPaneController();
     await tester.pumpWidget(
       MaterialApp(
@@ -615,33 +614,181 @@ void main() {
       ),
     );
     final terminalState = tester.state(find.byType(TerminalView));
-    controller.selectOption('ai');
-    await tester.pumpAndSettle();
+    final handle = find.byKey(const ValueKey('ai-panel-resize-handle'));
+    final panel = find.byType(TerminalAiPanel);
     final input = find.byKey(const ValueKey('ai-task-input'));
-    await tester.enterText(input, '检查磁盘');
-    for (final size in [
-      const Size(390, 700),
-      const Size(240, 160),
-      const Size(1000, 700),
-    ]) {
-      tester.view.physicalSize = size;
-      await tester.pumpAndSettle();
+    double panelWidth() => tester.getSize(panel).width;
+    double handleLeft() => tester.getTopLeft(handle).dx;
+    void expectPreserved() {
       expect(tester.takeException(), isNull);
       expect(tester.widget<TextField>(input).controller!.text, '检查磁盘');
       expect(
         tester.state(find.byType(TerminalView, skipOffstage: false)),
         same(terminalState),
       );
-      if (size.width < 800) {
-        expect(find.byType(TerminalView), findsNothing);
-        expect(tester.getSize(find.byType(TerminalAiPanel)), size);
-      }
+      expect(session.terminal.buffer.getText(), contains('resize-output'));
     }
+
+    Future<void> dragBy(double dx) async {
+      await tester.drag(handle, Offset(dx, 0));
+      await tester.pumpAndSettle();
+      expectPreserved();
+    }
+
+    Future<void> resizeWindow(Size size) async {
+      tester.view.physicalSize = size;
+      await tester.pumpAndSettle();
+      expectPreserved();
+    }
+
+    // A closed panel has nothing to size: the terminal owns the whole pane.
+    expect(handle, findsNothing);
+    expect(panel, findsNothing);
     controller.selectOption('ai');
     await tester.pumpAndSettle();
-    expect(find.byType(TerminalAiPanel), findsNothing);
+    expect(handle, findsOneWidget);
+    expect(panelWidth(), 400, reason: '1000 宽的 40% 作为默认值');
+    await tester.enterText(input, '检查磁盘');
+    await tester.pumpAndSettle();
+    expectPreserved();
+
+    // Dragging right narrows the panel; it stops where the composer is still
+    // usable, not at zero.
+    await dragBy(400);
+    expect(panelWidth(), 320);
+    expect(handleLeft(), 672, reason: '终端仍占 672，面板占 320，手柄 8');
+
+    // Dragging left widens it; the terminal keeps its 280px minimum.
+    await dragBy(-500);
+    expect(panelWidth(), 712, reason: '1000 宽的上界是 712，不是 512');
+    expect(handleLeft(), 280);
+
+    // Double-clicking the handle returns to the automatic 40% share.
+    await tester.tap(handle);
+    await tester.pump(const Duration(milliseconds: 50));
+    await tester.tap(handle);
+    await tester.pumpAndSettle();
+    expectPreserved();
+    expect(panelWidth(), 400);
+
+    // A width the user picked survives the compact view and the breakpoint.
+    await dragBy(-100);
+    final picked = panelWidth();
+    expect(picked, greaterThan(400));
+    expect(picked, lessThan(512));
+    await resizeWindow(const Size(390, 700));
+    expect(handle, findsNothing);
+    expect(find.byType(TerminalView), findsNothing);
+    expect(tester.getSize(panel), const Size(390, 700));
+    await resizeWindow(const Size(240, 160));
+    expect(handle, findsNothing);
+    expect(find.byType(TerminalView), findsNothing);
+    expect(tester.getSize(panel), const Size(240, 160));
+    await resizeWindow(const Size(1000, 700));
+    expect(handle, findsOneWidget);
+    expect(panelWidth(), closeTo(picked, 0.01), reason: '放大后回到用户选择的宽度');
+
+    // 800 is the breakpoint where the handle appears; its upper bound is 512.
+    await resizeWindow(const Size(800, 700));
+    expect(handle, findsOneWidget);
+    expect(panelWidth(), closeTo(picked, 0.01));
+    await dragBy(-300);
+    expect(panelWidth(), 512);
+    expect(handleLeft(), 280);
+    await resizeWindow(const Size(1000, 700));
+    expect(panelWidth(), 512);
+    await dragBy(-300);
+    expect(panelWidth(), 712);
+
+    // Closing and re-opening keeps the width the user chose.
+    controller.selectOption('ai');
+    await tester.pumpAndSettle();
+    expect(panel, findsNothing);
+    expect(handle, findsNothing);
     expect(session.status, ConnectionStatus.connected);
+    controller.selectOption('ai');
+    await tester.pumpAndSettle();
+    expect(panelWidth(), 712);
+    expect(handleLeft(), 280);
+    expect(session.terminal.buffer.getText(), contains('resize-output'));
     await tester.pumpWidget(const SizedBox.shrink());
+    session.dispose();
+  });
+
+  testWidgets('窄 AI 面板在 200% 字号下保留独立窗口入口，审批流程不溢出', (tester) async {
+    tester.view.devicePixelRatio = 1;
+    tester.view.physicalSize = const Size(1000, 800);
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    final executor = _NeverExecute();
+    final task = AiTaskController(
+      settings: () => const AiSettings(
+        baseUrl: 'https://ai.example.com/v1',
+        model: 'model',
+      ),
+      executorFactory: () => executor,
+      connected: () => true,
+      clientFactory: _ApprovalClient.new,
+    );
+    final session = SshConnection(id: 'narrow-panel', host: testHost)
+      ..status = ConnectionStatus.connected;
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: harborTheme(),
+        builder: (context, child) => MediaQuery(
+          data: MediaQuery.of(context)
+              .copyWith(textScaler: const TextScaler.linear(2)),
+          child: child!,
+        ),
+        home: Scaffold(
+          body: TerminalAiLayout(
+            terminal: TerminalPane(session: session, onReconnect: () {}),
+            panel: TerminalAiPanel(
+              task: task,
+              hostName: '开发服务器',
+              onClose: () {},
+              onDetach: () {},
+            ),
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+    final panel = find.byType(TerminalAiPanel);
+    expect(tester.getSize(panel).width, 400);
+    await tester.drag(
+      find.byKey(const ValueKey('ai-panel-resize-handle')),
+      const Offset(400, 0),
+    );
+    await tester.pumpAndSettle();
+    expect(tester.getSize(panel).width, 320);
+    expect(find.byKey(const ValueKey('ai-popout')), findsOneWidget);
+    expect(
+      find.descendant(of: panel, matching: find.text('开发服务器')),
+      findsOneWidget,
+    );
+    expect(tester.takeException(), isNull);
+    await tester.ensureVisible(find.byKey(const ValueKey('ai-task-input')));
+    await tester.enterText(
+      find.byKey(const ValueKey('ai-task-input')),
+      '清理测试文件',
+    );
+    await tester.pump();
+    await tester.ensureVisible(find.byKey(const ValueKey('ai-send')));
+    await tester.tap(find.byKey(const ValueKey('ai-send')));
+    await tester.pumpAndSettle();
+    expect(find.text('批准并执行'), findsOneWidget);
+    expect(find.text('rm /tmp/test-file'), findsWidgets);
+    expect(executor.calls, 0);
+    expect(tester.takeException(), isNull);
+    await tester.ensureVisible(find.text('取消'));
+    await tester.tap(find.text('取消'));
+    await tester.pumpAndSettle();
+    expect(task.running, isFalse);
+    expect(executor.calls, 0);
+    expect(tester.takeException(), isNull);
+    await tester.pumpWidget(const SizedBox.shrink());
+    task.dispose();
     session.dispose();
   });
 
@@ -996,6 +1143,216 @@ void main() {
     expect(tester.takeException(), isNull);
     await tester.pumpWidget(const SizedBox.shrink());
   });
+
+  for (final (width, height, scale) in [
+    (1280.0, 900.0, 1.0),
+    (240.0, 900.0, 1.0),
+    (240.0, 900.0, 2.0),
+  ]) {
+    testWidgets('模型菜单思考等级滑到极高并按档位发送，切回自动后停止传参 $width × $scale', (tester) async {
+      tester.view.devicePixelRatio = 1;
+      tester.view.physicalSize = Size(width, height);
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+      final client = _EffortClient();
+      final executor = _RecordingExecutor();
+      final task = AiTaskController(
+        settings: () => const AiSettings(
+          baseUrl: 'https://ai.example.com/v1',
+          model: 'model-a',
+        ),
+        executorFactory: () => executor,
+        connected: () => true,
+        clientFactory: () => client,
+      );
+      await tester.pumpWidget(
+        MaterialApp(
+          theme: harborTheme(),
+          builder: (context, child) => MediaQuery(
+            data: MediaQuery.of(context)
+                .copyWith(textScaler: TextScaler.linear(scale)),
+            child: child!,
+          ),
+          home: Scaffold(
+            body: TerminalAiPanel(task: task, hostName: '开发服务器'),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+      final input = find.byKey(const ValueKey('ai-task-input'));
+      final slider = find.byKey(const ValueKey('ai-reasoning-effort-slider'));
+      final send = find.byKey(const ValueKey('ai-send'));
+      await tester.ensureVisible(input);
+      await tester.enterText(input, '检查目录');
+      await tester.pump();
+      expect(tester.widget<TextField>(input).controller!.text, '检查目录');
+
+      Future<void> openMenu() async {
+        await tester.ensureVisible(
+          find.byKey(const ValueKey('ai-model-picker')),
+        );
+        await tester.tap(find.byKey(const ValueKey('ai-model-picker')));
+        await tester.pumpAndSettle();
+        expect(find.text('思考等级'), findsOneWidget);
+        expect(find.text('刷新模型列表'), findsOneWidget);
+        expect(tester.takeException(), isNull);
+      }
+
+      Future<void> closeMenu() async {
+        await tester.tapAt(const Offset(2, 2));
+        await tester.pumpAndSettle();
+        expect(find.text('思考等级'), findsNothing);
+        expect(tester.takeException(), isNull);
+      }
+
+      // A drag starts at the slider centre (medium); the delta below lands on
+      // whatever fraction of the track the menu width allows.
+      Future<void> dragEffort(double delta) async {
+        final track = tester.getSize(slider).width - 48;
+        await tester.drag(slider, Offset(track * delta, 0));
+        await tester.pumpAndSettle();
+      }
+
+      await openMenu();
+      expect(task.reasoningEffort, AiReasoningEffort.automatic);
+      expect(find.text('自动'), findsOneWidget);
+
+      await dragEffort(2);
+      expect(task.reasoningEffort, AiReasoningEffort.max);
+      expect(find.text('最大'), findsOneWidget);
+      await dragEffort(0.3);
+      expect(task.reasoningEffort, AiReasoningEffort.xhigh);
+      expect(find.text('极高'), findsOneWidget);
+      expect(find.text('思考等级'), findsOneWidget, reason: '滑动不关闭菜单');
+      expect(find.text('刷新模型列表'), findsOneWidget);
+      expect(task.activeModel, 'model-a', reason: '选择档位不改模型');
+      expect(
+        tester.widget<TextField>(input).controller!.text,
+        '检查目录',
+        reason: '选择档位不丢草稿',
+      );
+      expect(task.running, isFalse);
+
+      await closeMenu();
+      await tester.ensureVisible(send);
+      await tester.tap(send);
+      await tester.pumpAndSettle();
+      expect(executor.commands, ['pwd'], reason: '工具回合在这轮里执行');
+      expect(task.entries.last.text, '检查完成');
+      expect(client.configs, hasLength(2), reason: '工具结果后再请求同一模型');
+      for (final config in client.configs) {
+        expect(
+          config.reasoningEffort,
+          AiReasoningEffort.xhigh,
+          reason: '工具回合沿用同一档位',
+        );
+      }
+      expect(client.requests[1].last['role'], 'tool');
+      expect(task.running, isFalse);
+      expect(tester.takeException(), isNull);
+
+      // Sliding back to the left end restores the provider default.
+      await openMenu();
+      await dragEffort(-2);
+      expect(task.reasoningEffort, AiReasoningEffort.automatic);
+      expect(find.text('自动'), findsOneWidget);
+      expect(find.text('思考等级'), findsOneWidget);
+      await closeMenu();
+      await tester.enterText(input, '再次检查');
+      await tester.pump();
+      await tester.ensureVisible(send);
+      await tester.tap(send);
+      await tester.pumpAndSettle();
+      expect(client.configs, hasLength(3));
+      expect(client.configs.last.reasoningEffort, AiReasoningEffort.automatic);
+
+      // The control itself is disabled while a turn is in flight.
+      await openMenu();
+      expect(tester.widget<Slider>(slider).onChanged, isNotNull);
+      task.running = true;
+      task.notifyListeners();
+      await tester.pump();
+      expect(tester.widget<Slider>(slider).onChanged, isNull);
+      final picker = tester.widget<Widget>(
+        find.byKey(const ValueKey('ai-model-picker')),
+      );
+      expect(
+        picker is IconButton
+            ? picker.onPressed
+            : (picker as TextButton).onPressed,
+        isNull,
+      );
+      task.running = false;
+      task.notifyListeners();
+      await tester.pump();
+      expect(tester.takeException(), isNull);
+      await tester.pumpWidget(const SizedBox.shrink());
+      task.dispose();
+    });
+  }
+}
+
+class _EffortClient extends TerminalAiClient {
+  final configs = <AiSettings>[];
+  final requests = <List<Map<String, dynamic>>>[];
+
+  @override
+  Future<List<String>> listModels(AiSettings settings) async => const [
+    'model-a',
+    'model-b',
+  ];
+
+  @override
+  Future<AiReply> complete(
+    AiSettings settings,
+    List<Map<String, dynamic>> messages,
+  ) async {
+    configs.add(settings);
+    requests.add([
+      for (final message in messages) Map<String, dynamic>.from(message),
+    ]);
+    if (requests.length == 1) {
+      return AiReply(
+        {
+          'role': 'assistant',
+          'content': null,
+          'tool_calls': [
+            {
+              'id': 'call-1',
+              'type': 'function',
+              'function': {
+                'name': 'run_command',
+                'arguments': jsonEncode({
+                  'command': 'pwd',
+                  'reason': '检查目录',
+                  'requires_approval': false,
+                }),
+              },
+            },
+          ],
+        },
+        [AiToolCall('call-1', 'pwd', '检查目录', false)],
+      );
+    }
+    return const AiReply({'role': 'assistant', 'content': '检查完成'}, []);
+  }
+}
+
+class _RecordingExecutor implements AiCommandExecutor {
+  final commands = <String>[];
+
+  @override
+  Future<AiCommandResult> execute(
+    String command,
+    void Function(String) onOutput,
+  ) async {
+    commands.add(command);
+    onOutput('server output');
+    return const AiCommandResult('server output', 0);
+  }
+
+  @override
+  void cancel() {}
 }
 
 class _ApprovalClient extends TerminalAiClient {

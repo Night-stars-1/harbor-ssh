@@ -352,9 +352,8 @@ void main() {
       AiApprovalMode.manual,
     );
     expect(
-      AiSettings.fromJson({
-        'defaultApprovalMode': 'unknown',
-      }).defaultApprovalMode,
+      AiSettings.fromJson({'defaultApprovalMode': 'unknown'})
+          .defaultApprovalMode,
       AiApprovalMode.manual,
     );
 
@@ -976,5 +975,193 @@ void main() {
         ),
       ),
     );
+  });
+
+  test('思考等级在回合运行中不可更改，下一回合才采用新档位', () async {
+    final client = _Client()..pending = Completer<AiReply>();
+    final task = AiTaskController(
+      settings: () => _settings,
+      executorFactory: _Executor.new,
+      connected: () => true,
+      clientFactory: () => client,
+    );
+    task.setReasoningEffort(AiReasoningEffort.medium);
+    final turn = task.start('检查目录');
+    await Future<void>.delayed(Duration.zero);
+    expect(task.running, isTrue);
+    task.setReasoningEffort(AiReasoningEffort.max);
+    expect(
+      task.reasoningEffort,
+      AiReasoningEffort.medium,
+      reason: '运行中的回合沿用开始时的档位',
+    );
+    client.pending!.complete(_done);
+    await turn;
+    expect(client.configs.single.reasoningEffort, AiReasoningEffort.medium);
+    task.setReasoningEffort(AiReasoningEffort.max);
+    expect(task.reasoningEffort, AiReasoningEffort.max);
+    task.dispose();
+  });
+
+  test('真实 OpenAI 请求携带所选思考等级，工具回合沿用，切回自动后不再带字段', () async {
+    final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+    addTearDown(() => server.close(force: true));
+    final bodies = <Map<String, dynamic>>[];
+    server.listen((request) async {
+      final body = jsonDecode(
+        await utf8.decoder.bind(request).join(),
+      ) as Map<String, dynamic>;
+      bodies.add(body);
+      request.response.headers.contentType = ContentType.json;
+      request.response.write(
+        jsonEncode({
+          'choices': [
+            {
+              'message': bodies.length == 1
+                  ? {
+                      'role': 'assistant',
+                      'content': null,
+                      'tool_calls': [
+                        {
+                          'id': 'call-1',
+                          'type': 'function',
+                          'function': {
+                            'name': 'run_command',
+                            'arguments': jsonEncode({
+                              'command': 'pwd',
+                              'reason': '检查目录',
+                              'requires_approval': false,
+                            }),
+                          },
+                        },
+                      ],
+                    }
+                  : {'role': 'assistant', 'content': '检查完成'},
+            },
+          ],
+        }),
+      );
+      await request.response.close();
+    });
+    final executor = _Executor();
+    final task = AiTaskController(
+      settings: () => AiSettings(
+        baseUrl: 'http://127.0.0.1:${server.port}/v1',
+        apiKey: 'test-key',
+        model: 'reasoning-model',
+      ),
+      executorFactory: () => executor,
+      connected: () => true,
+      clientFactory: TerminalAiClient.new,
+    );
+    expect(task.reasoningEffort, AiReasoningEffort.automatic);
+    task.setReasoningEffort(AiReasoningEffort.high);
+    await task.start('检查目录');
+
+    expect(task.failure, isNull);
+    expect(executor.commands, ['pwd']);
+    expect(bodies, hasLength(2), reason: '工具结果回传给同一模型');
+    for (final body in bodies) {
+      expect(body['reasoning_effort'], 'high');
+      expect(body['model'], 'reasoning-model');
+      expect(body.containsKey('output_config'), isFalse);
+    }
+    expect(bodies[1]['messages'].last['role'], 'tool');
+
+    task.setReasoningEffort(AiReasoningEffort.automatic);
+    await task.start('再检查一次');
+    expect(bodies, hasLength(3));
+    expect(
+      bodies[2].containsKey('reasoning_effort'),
+      isFalse,
+      reason: '自动档必须与未设置该字段的请求完全一致',
+    );
+    task.dispose();
+  });
+
+  test('真实 Anthropic 请求用 output_config.effort，保留签名思考与 4096 输出上限', () async {
+    final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+    addTearDown(() => server.close(force: true));
+    final bodies = <Map<String, dynamic>>[];
+    final content = <Map<String, dynamic>>[
+      {
+        'type': 'thinking',
+        'thinking': '先检查环境。',
+        'signature': 'fixture-signature',
+      },
+      {'type': 'text', 'text': '检查中。'},
+      {
+        'type': 'tool_use',
+        'id': 'tool-1',
+        'name': 'run_command',
+        'input': {
+          'command': 'pwd',
+          'reason': '检查环境',
+          'requires_approval': false,
+        },
+      },
+    ];
+    server.listen((request) async {
+      expect(request.uri.path, '/v1/messages');
+      expect(request.headers.value('x-api-key'), 'anthropic-test-key');
+      final body = jsonDecode(
+        await utf8.decoder.bind(request).join(),
+      ) as Map<String, dynamic>;
+      bodies.add(body);
+      request.response.headers.contentType = ContentType.json;
+      request.response.write(
+        jsonEncode({
+          'type': 'message',
+          'role': 'assistant',
+          'stop_reason': bodies.length == 1 ? 'tool_use' : 'end_turn',
+          'content': bodies.length == 1
+              ? content
+              : [
+                  {'type': 'text', 'text': '环境检查完成。'},
+                ],
+        }),
+      );
+      await request.response.close();
+    });
+    final executor = _Executor();
+    final task = AiTaskController(
+      settings: () => AiSettings(
+        baseUrl: 'http://127.0.0.1:${server.port}/v1',
+        apiKey: 'anthropic-test-key',
+        model: 'test-claude',
+        protocol: AiProtocol.anthropic,
+      ),
+      executorFactory: () => executor,
+      connected: () => true,
+      clientFactory: TerminalAiClient.new,
+    );
+    task.setReasoningEffort(AiReasoningEffort.xhigh);
+    await task.start('检查当前环境');
+
+    expect(task.failure, isNull);
+    expect(executor.commands, ['pwd']);
+    expect(bodies, hasLength(2));
+    for (final body in bodies) {
+      expect(body['output_config'], {'effort': 'xhigh'});
+      expect(body['max_tokens'], 4096, reason: '思考等级不改变既有输出上限');
+      expect(
+        body.containsKey('thinking'),
+        isFalse,
+        reason: '本功能只发 effort，不自行开启 thinking',
+      );
+      expect(body.containsKey('reasoning_effort'), isFalse);
+    }
+    expect(
+      (bodies[1]['messages'] as List)[1]['content'],
+      content,
+      reason: '同一模型后续回合原样回传带签名的思考块',
+    );
+
+    task.setReasoningEffort(AiReasoningEffort.automatic);
+    await task.start('继续');
+    expect(bodies, hasLength(3));
+    expect(bodies[2].containsKey('output_config'), isFalse);
+    expect(bodies[2]['max_tokens'], 4096);
+    task.dispose();
   });
 }
