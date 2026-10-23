@@ -3,12 +3,17 @@ import Darwin
 import FlutterMacOS
 import window_manager
 
+// The material is decoration only. It must never become a mouse-event target,
+// including while AppKit is updating the layer order during a material switch.
+private final class WindowBackdropView: NSVisualEffectView {
+  override func hitTest(_ point: NSPoint) -> NSView? { nil }
+}
 
 class MainFlutterWindow: NSWindow {
   private var localPathsChannel: FlutterMethodChannel?
   private var windowEffectChannel: FlutterMethodChannel?
   private weak var flutterViewController: FlutterViewController?
-  private let backdrop = NSVisualEffectView()
+  private let backdrop = WindowBackdropView()
   private var scopedDirectories: [String: (url: URL, started: Bool)] = [:]
   private var stagedBookmarks: [String: Data] = [:]
   private let bookmarkKey = "harbor.files.default-local-bookmark.v1"
@@ -16,23 +21,18 @@ class MainFlutterWindow: NSWindow {
   override func awakeFromNib() {
     let flutterViewController = FlutterViewController()
     let windowFrame = self.frame
-    // The acrylic backdrop sits under the Flutter view. Plugins look the
-    // Flutter controller up among the content controller's children.
-    let container = NSViewController()
-    container.view = NSView(frame: NSRect(origin: .zero, size: windowFrame.size))
-    backdrop.frame = container.view.bounds
+    // Keep Flutter's controller and responder chain as the window root. Its
+    // wrapper already hosts the Flutter render view; put decoration below it.
+    self.flutterViewController = flutterViewController
+    self.contentViewController = flutterViewController
+    let content = flutterViewController.view
+    backdrop.frame = content.bounds
     backdrop.autoresizingMask = [.width, .height]
     backdrop.blendingMode = .behindWindow
     backdrop.material = .underWindowBackground
     backdrop.state = .followsWindowActiveState
     backdrop.isHidden = true
-    container.view.addSubview(backdrop)
-    container.addChild(flutterViewController)
-    flutterViewController.view.frame = container.view.bounds
-    flutterViewController.view.autoresizingMask = [.width, .height]
-    container.view.addSubview(flutterViewController.view)
-    self.flutterViewController = flutterViewController
-    self.contentViewController = container
+    content.addSubview(backdrop, positioned: .below, relativeTo: nil)
     self.setFrame(windowFrame, display: true)
 
     RegisterGeneratedPlugins(registry: flutterViewController)
@@ -71,15 +71,20 @@ class MainFlutterWindow: NSWindow {
           code: "arguments", message: "Invalid window effect arguments", details: nil))
         return
       }
-      backdrop.isHidden = !enabled
-      // The tint follows the app theme, not the system appearance.
-      backdrop.appearance = NSAppearance(named: dark ? .darkAqua : .aqua)
-      // The Flutter view is black behind transparent pixels unless cleared.
-      flutterViewController?.backgroundColor = enabled ? .clear : nil
+      setWindowEffect(enabled: enabled, dark: dark)
       result(enabled)
     default:
       result(FlutterMethodNotImplemented)
     }
+  }
+
+  func setWindowEffect(enabled: Bool, dark: Bool) {
+    backdrop.isHidden = !enabled
+    // The native material and Flutter canvas must both expose the desktop.
+    // Restore an opaque canvas explicitly: nil clears the layer, too.
+    backgroundColor = enabled ? .clear : .windowBackgroundColor
+    backdrop.appearance = NSAppearance(named: dark ? .darkAqua : .aqua)
+    flutterViewController?.backgroundColor = enabled ? .clear : .black
   }
 
   private func handleLocalPathCall(_ call: FlutterMethodCall, result: @escaping FlutterResult) {
