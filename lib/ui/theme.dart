@@ -101,10 +101,11 @@ class HarborWindowBackdrop extends ThemeExtension<HarborWindowBackdrop> {
   Color sheet(Color color) =>
       acrylic ? color.withValues(alpha: sheetOpacity) : color;
 
-  /// Floating surfaces painted over a [HarborSurfaceBlur]. An opaque fill
-  /// would hide the blur entirely; without frosting they are fully opaque,
-  /// even when window acrylic made the scheme role translucent.
-  Color floating(Color color) => color.withValues(alpha: frosted ? .72 : 1);
+  /// Floating surfaces painted over a [HarborSurfaceBlur]. The blur already
+  /// flattens the backdrop's contrast, so a light tint keeps text legible; an
+  /// opaque fill would hide the blur entirely. Without frosting they are fully
+  /// opaque, even when window acrylic made the scheme role translucent.
+  Color floating(Color color) => color.withValues(alpha: frosted ? .5 : 1);
 
   @override
   HarborWindowBackdrop copyWith({
@@ -504,12 +505,64 @@ ThemeData harborTheme({
 class HarborSurfaceBlur extends StatelessWidget {
   const HarborSurfaceBlur({super.key, this.child = const SizedBox.shrink()});
   final Widget child;
-  static final _filter = ui.ImageFilter.blur(sigmaX: 16, sigmaY: 16);
+
+  static final _light = _material(target: .9);
+  static final _dark = _material(target: .14);
+
+  /// Acrylic-style material: a wide blur removes text-sized detail, then the
+  /// colours are re-saturated and their luminance pulled toward [target], so
+  /// whatever lies below reads as one even surface rather than a grey smear.
+  static ui.ImageFilter _material({required double target}) {
+    const saturation = 1.6, contrast = .55;
+    const lr = .2126, lg = .7152, lb = .0722;
+    const s = saturation, k = contrast;
+    final o = (1 - k) * target * 255;
+    List<double> row(double r, double g, double b) => [
+      r * k,
+      g * k,
+      b * k,
+      0,
+      o,
+    ];
+    return ui.ImageFilter.compose(
+      outer: ui.ColorFilter.matrix([
+        ...row(lr * (1 - s) + s, lg * (1 - s), lb * (1 - s)),
+        ...row(lr * (1 - s), lg * (1 - s) + s, lb * (1 - s)),
+        ...row(lr * (1 - s), lg * (1 - s), lb * (1 - s) + s),
+        0,
+        0,
+        0,
+        1,
+        0,
+      ]),
+      inner: ui.ImageFilter.blur(
+        sigmaX: 30,
+        sigmaY: 30,
+        tileMode: TileMode.mirror,
+      ),
+    );
+  }
+
+  /// The backdrop filter for [context]'s theme, or null without frosting.
+  static ui.ImageFilter? filterOf(BuildContext context) {
+    final theme = Theme.of(context);
+    if (!theme.windowBackdrop.frosted) return null;
+    return theme.brightness == Brightness.dark ? _dark : _light;
+  }
+
+  /// Replaces rather than covers the backdrop inside the clip. With window
+  /// acrylic the app paints over transparent pixels, so the blurred copy is
+  /// itself translucent; source-over would leave the sharp original showing
+  /// through it. Where the backdrop is opaque both modes paint the same.
+  static const blendMode = BlendMode.src;
 
   @override
-  Widget build(BuildContext context) => Theme.of(context).windowBackdrop.frosted
-      ? BackdropFilter(filter: _filter, child: child)
-      : child;
+  Widget build(BuildContext context) {
+    final filter = filterOf(context);
+    return filter == null
+        ? child
+        : BackdropFilter(filter: filter, blendMode: blendMode, child: child);
+  }
 }
 
 /// Frosts the first shaped [Material] below it, for dialog and bottom sheet
@@ -521,22 +574,24 @@ class HarborFrostedRoute extends SingleChildRenderObjectWidget {
 
   @override
   RenderObject createRenderObject(BuildContext context) =>
-      _RenderFrostedRoute(Theme.of(context).windowBackdrop.frosted);
+      _RenderFrostedRoute(HarborSurfaceBlur.filterOf(context));
 
   @override
   void updateRenderObject(BuildContext context, RenderObject renderObject) =>
-      (renderObject as _RenderFrostedRoute).enabled = Theme.of(context)
-          .windowBackdrop
-          .frosted;
+      (renderObject as _RenderFrostedRoute).filter = HarborSurfaceBlur.filterOf(
+        context,
+      );
 }
 
 class _RenderFrostedRoute extends RenderProxyBox {
-  _RenderFrostedRoute(this._enabled);
-  bool _enabled;
-  set enabled(bool value) {
-    if (value == _enabled) return;
-    _enabled = value;
-    markNeedsCompositingBitsUpdate();
+  _RenderFrostedRoute(this._filter);
+  ui.ImageFilter? _filter;
+  set filter(ui.ImageFilter? value) {
+    if (value == _filter) return;
+    final compositing = (value == null) != (_filter == null);
+    _filter = value;
+    _blur.layer?.filter = value;
+    if (compositing) markNeedsCompositingBitsUpdate();
     markNeedsPaint();
   }
 
@@ -544,7 +599,7 @@ class _RenderFrostedRoute extends RenderProxyBox {
   final _blur = LayerHandle<BackdropFilterLayer>();
 
   @override
-  bool get alwaysNeedsCompositing => _enabled && child != null;
+  bool get alwaysNeedsCompositing => _filter != null && child != null;
 
   static RenderPhysicalShape? _surface(RenderObject? node) {
     if (node is RenderPhysicalShape) return node;
@@ -555,7 +610,8 @@ class _RenderFrostedRoute extends RenderProxyBox {
 
   @override
   void paint(PaintingContext context, Offset offset) {
-    final surface = _enabled ? _surface(child) : null;
+    final filter = _filter;
+    final surface = filter != null ? _surface(child) : null;
     final outline = surface != null && surface.hasSize
         ? surface.clipper?.getClip(surface.size)
         : null;
@@ -571,7 +627,8 @@ class _RenderFrostedRoute extends RenderProxyBox {
         path,
         (context, offset) => context.pushLayer(
           _blur.layer ??= BackdropFilterLayer(
-            filter: HarborSurfaceBlur._filter,
+            filter: filter,
+            blendMode: HarborSurfaceBlur.blendMode,
           ),
           (_, _) {},
           offset,
@@ -620,7 +677,8 @@ List<DropdownMenuEntry<T>> harborDropdownEntries<T>(
   BuildContext context,
   List<DropdownMenuEntry<T>> entries,
 ) {
-  if (!Theme.of(context).windowBackdrop.frosted || entries.isEmpty) {
+  final filter = HarborSurfaceBlur.filterOf(context);
+  if (filter == null || entries.isEmpty) {
     return entries;
   }
   final key = BackdropKey();
@@ -651,7 +709,8 @@ List<DropdownMenuEntry<T>> harborDropdownEntries<T>(
                 child!;
             return ClipRect(
               child: BackdropFilter(
-                filter: HarborSurfaceBlur._filter,
+                filter: filter,
+                blendMode: HarborSurfaceBlur.blendMode,
                 backdropGroupKey: key,
                 child: fill == null
                     ? content
