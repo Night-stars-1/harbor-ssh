@@ -168,6 +168,20 @@ class _AppearanceSettingsState extends State<AppearanceSettings> {
                           ),
                   ),
                 ),
+                SettingsRow(
+                  title: '会话放到标题栏',
+                  description: '侧栏中的会话改为标题栏左侧的标签；与「导航放到标题栏」同时开启时不再显示侧栏',
+                  inline: true,
+                  control: Switch.adaptive(
+                    key: const ValueKey('title-bar-sessions'),
+                    value: appearance.titleBarSessions,
+                    onChanged: _saving
+                        ? null
+                        : (enabled) => _save(
+                            appearance.copyWith(titleBarSessions: enabled),
+                          ),
+                  ),
+                ),
               ],
             ),
           ],

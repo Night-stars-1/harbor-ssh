@@ -17,8 +17,13 @@ class Host {
     this.jumpHostId = '',
     this.sftpPath = '',
     this.sftpBookmarks = const [],
+    this.icon = '',
   });
   final String id, name, address, username, userId, jumpHostId;
+
+  /// 列表、会话和标签中显示的图标 id；为空或本版本不认识时显示默认服务器图标。
+  /// 原样保存不认识的 id，新版本同步来的图标不会被旧版本抹掉。
+  final String icon;
 
   /// SFTP 打开该主机时进入的目录；为空时进入登录用户的主目录。
   final String sftpPath;
@@ -48,6 +53,7 @@ class Host {
     jumpHostId: jumpHostId,
     sftpPath: sftpPath,
     sftpBookmarks: sftpBookmarks ?? this.sftpBookmarks,
+    icon: icon,
   );
   Map<String, Object> toJson() => {
     'id': id,
@@ -62,6 +68,7 @@ class Host {
     if (jumpHostId.isNotEmpty) 'jumpHostId': jumpHostId,
     if (sftpPath.isNotEmpty) 'sftpPath': sftpPath,
     if (sftpBookmarks.isNotEmpty) 'sftpBookmarks': sftpBookmarks,
+    if (icon.isNotEmpty) 'icon': icon,
   };
   factory Host.fromJson(Map<String, dynamic> json) => Host(
     id: json['id'] as String,
@@ -79,6 +86,7 @@ class Host {
       for (final path in json['sftpBookmarks'] as List? ?? const [])
         if (path is String && path.isNotEmpty) path,
     ],
+    icon: json['icon'] is String ? json['icon'] as String : '',
   );
 
   /// `tags` 数组优先；仅当字段缺失（或为 null）时才把旧数据的

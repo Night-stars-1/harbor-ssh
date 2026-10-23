@@ -338,6 +338,12 @@ abstract interface class AiCommandExecutor {
   void cancel();
 }
 
+/// Longest one AI request may take from connecting to the last byte.
+const aiRequestTimeout = Duration(minutes: 10);
+
+/// Largest raw AI response accepted, SSE envelopes included.
+const aiMaxResponseBytes = 30 * 1024 * 1024;
+
 const aiSystemPrompt = '''你是当前 SSH 服务器上的任务助手。用中文协助用户完成目标。
 用 run_command 发起工具调用；实际命令由客户端在 SSH 服务器执行并返回输出。根据实际输出继续处理，完成后简短总结；无法完成时如实说明。
 当请求只提供读取工具时，只能调用 list_directory、read_file、search_text、system_info，不要调用或假设存在 run_command。
@@ -822,25 +828,20 @@ class TerminalAiClient {
             _ => 'AI 请求失败（${response.statusCode}）',
           });
         }
-        final bytes = <int>[];
-        await for (final chunk in response) {
-          if (bytes.length + chunk.length > 262144) {
-            throw const AiFailure('AI 返回内容过大，请缩小请求范围');
-          }
-          bytes.addAll(chunk);
-        }
-        final data = jsonDecode(utf8.decode(bytes)) as Map;
+        final data = jsonDecode(
+          await utf8.decodeStream(_limitedResponse(response)),
+        ) as Map;
         final message = _responseMessage(
           settings.protocol ?? AiProtocol.openai,
           data,
         );
         if (_cancelled) throw const AiFailure('已取消生成');
         return _validatedReply(message);
-      })().timeout(const Duration(seconds: 60));
+      })().timeout(aiRequestTimeout);
     } on AiFailure {
       rethrow;
     } on TimeoutException {
-      throw const AiFailure('AI 响应超时，请重试');
+      throw const AiFailure('AI 响应超过 10 分钟未完成，请重试');
     } on FormatException {
       throw const AiFailure('AI 返回格式不正确，请检查接口兼容性');
     } on TypeError {
@@ -910,33 +911,27 @@ class TerminalAiClient {
         // regular JSON response. Accept it so the conversation still works,
         // while native SSE providers continue below.
         if (response.headers.contentType?.mimeType != 'text/event-stream') {
-          final bytes = <int>[];
-          await for (final chunk in response) {
-            if (bytes.length + chunk.length > 262144) {
-              throw const AiFailure('AI 返回内容过大，请缩小请求范围');
-            }
-            bytes.addAll(chunk);
-          }
           final message = _responseMessage(
             settings.protocol ?? AiProtocol.openai,
-            jsonDecode(utf8.decode(bytes)) as Map,
+            jsonDecode(await utf8.decodeStream(_limitedResponse(response)))
+                as Map,
           );
           final reply = _validatedReply(message);
           if (reply.text.isNotEmpty) onText(reply.text);
           return reply;
         }
         streaming = true;
-        final lines = response
+        final lines = _limitedResponse(response)
             .transform(utf8.decoder)
             .transform(const LineSplitter());
-        return settings.protocol == AiProtocol.anthropic
+        return await (settings.protocol == AiProtocol.anthropic
             ? _readAnthropicStream(lines, onText, toolMode)
-            : _readOpenAiStream(lines, onText, toolMode);
-      })().timeout(const Duration(seconds: 120));
+            : _readOpenAiStream(lines, onText, toolMode));
+      })().timeout(aiRequestTimeout);
     } on AiFailure {
       rethrow;
     } on TimeoutException {
-      throw const AiFailure('AI 响应超时，请重试');
+      throw const AiFailure('AI 响应超过 10 分钟未完成，请重试');
     } on FormatException {
       throw const AiFailure('AI 返回格式不正确，请检查接口兼容性');
     } on TypeError {
@@ -959,6 +954,19 @@ class TerminalAiClient {
     }
   }
 
+  /// Passes [response] through, failing once it exceeds
+  /// [aiMaxResponseBytes]. Counts raw bytes, SSE envelopes included.
+  static Stream<List<int>> _limitedResponse(Stream<List<int>> response) async* {
+    var total = 0;
+    await for (final chunk in response) {
+      total += chunk.length;
+      if (total > aiMaxResponseBytes) {
+        throw const AiFailure('AI 返回内容超过 30 MB，请缩小请求范围');
+      }
+      yield chunk;
+    }
+  }
+
   Future<AiReply> _readOpenAiStream(
     Stream<String> lines,
     void Function(String) onText,
@@ -966,10 +974,7 @@ class TerminalAiClient {
   ) async {
     final text = StringBuffer();
     final tools = <int, _StreamTool>{};
-    var total = 0;
     await for (final line in lines) {
-      total += line.length;
-      if (total > 262144) throw const AiFailure('AI 返回内容过大，请缩小请求范围');
       if (!line.startsWith('data:')) continue;
       final payload = line.substring(5).trimLeft();
       if (payload.isEmpty) continue;
@@ -1036,10 +1041,7 @@ class TerminalAiClient {
     final text = StringBuffer();
     final tools = <int, _StreamTool>{};
     final blocks = <int, Map<String, dynamic>>{};
-    var total = 0;
     await for (final line in lines) {
-      total += line.length;
-      if (total > 262144) throw const AiFailure('AI 返回内容过大，请缩小请求范围');
       if (!line.startsWith('data:')) continue;
       final payload = line.substring(5).trimLeft();
       if (payload.isEmpty) continue;

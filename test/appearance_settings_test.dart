@@ -199,6 +199,7 @@ void main() {
       'terminalWrap': true,
       'statusRefreshSeconds': 5,
       'titleBarNavigation': false,
+      'titleBarSessions': false,
       'windowAcrylic': false,
       'frostedSurfaces': false,
     });

@@ -101,6 +101,33 @@ void main() {
     await save();
     expect((await repository.loadHosts()).last.sftpPath, isEmpty);
 
+    // 图标随保存写入存储，重新打开保持选中，改别的字段不丢失。
+    await open((await repository.loadHosts()).last);
+    await tester.ensureVisible(find.byKey(const ValueKey('host-icon-cloud')));
+    await tester.tap(find.byKey(const ValueKey('host-icon-cloud')));
+    await tester.pumpAndSettle();
+    await save();
+    expect((await repository.loadHosts()).last.icon, 'cloud');
+    await open((await repository.loadHosts()).last);
+    expect(
+      tester
+          .widget<IconButton>(find.byKey(const ValueKey('host-icon-cloud')))
+          .isSelected,
+      isTrue,
+    );
+    await tester.enterText(pathField, '/srv');
+    await save();
+    expect((await repository.loadHosts()).last.icon, 'cloud');
+    await open((await repository.loadHosts()).last);
+    await tester.ensureVisible(find.byKey(const ValueKey('host-icon-')));
+    await tester.tap(find.byKey(const ValueKey('host-icon-')));
+    await tester.pumpAndSettle();
+    await tester.enterText(pathField, '');
+    await save();
+    final reset = (await repository.loadHosts()).last;
+    expect(reset.icon, isEmpty);
+    expect(reset.toJson().containsKey('icon'), isFalse);
+
     await open(saved);
     expect(find.text('公网堡垒机'), findsWidgets);
     await select('依赖目标的主机');

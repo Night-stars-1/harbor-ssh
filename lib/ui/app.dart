@@ -20,6 +20,7 @@ import 'reorderable_host_collection.dart';
 import 'terminal_pane.dart';
 import 'terminal_workspace.dart';
 import 'theme.dart';
+import 'host_icons.dart';
 import 'workspace_model.dart';
 import 'file_browser.dart';
 import 'file_workspace.dart';
@@ -49,6 +50,10 @@ class HarborApp extends StatefulWidget {
 }
 
 class _HarborAppState extends State<HarborApp> {
+  // The title bar lives above the navigator; closing a tab there still needs
+  // the workspace's confirmation dialog.
+  final _workspace = GlobalKey<_WorkspaceState>();
+
   @override
   void initState() {
     super.initState();
@@ -102,12 +107,23 @@ class _HarborAppState extends State<HarborApp> {
             ? ListenableBuilder(
                 listenable: widget.model,
                 builder: (context, _) {
-                  final navigation =
-                      appearance.titleBarNavigation &&
+                  final wide =
                       MediaQuery.sizeOf(context).width >= _wideLayoutWidth;
+                  final navigation = appearance.titleBarNavigation && wide;
+                  final sessionTabs = appearance.titleBarSessions && wide;
                   return WindowsWindowFrame(
-                    leading: navigation
+                    // With both in the bar there is no side panel to toggle.
+                    leading: navigation && !sessionTabs
                         ? _sidebarToggle(widget.model, compact: true)
+                        : null,
+                    tabs: sessionTabs && widget.model.sessions.isNotEmpty
+                        ? _TitleBarSessionTabs(
+                            model: widget.model,
+                            onPortForwards: (session) => _workspace.currentState
+                                ?._openPortForwards(session),
+                            onClose: (session) =>
+                                _workspace.currentState?._closeSession(session),
+                          )
                         : null,
                     actions: navigation
                         ? [
@@ -144,6 +160,7 @@ class _HarborAppState extends State<HarborApp> {
             : child!,
         home: Builder(
           builder: (context) => Workspace(
+            key: _workspace,
             model: widget.model,
             aiWindow: widget.aiWindow,
             updaterFactory: widget.updaterFactory,
@@ -318,6 +335,150 @@ Widget _settingsButton(
   icon: const Icon(Icons.settings_outlined, semanticLabel: '设置'),
 );
 
+/// Actions shared by a session's sidebar item and its title bar tab.
+List<Widget> _sessionMenuChildren(
+  BuildContext context,
+  SshConnection session, {
+  required ValueChanged<SshConnection> onPortForwards,
+  required ValueChanged<SshConnection> onClose,
+}) => [
+  if (Theme.of(context).windowBackdrop.frosted) const HarborSurfaceBlur(),
+  MenuItemButton(
+    onPressed: () => onPortForwards(session),
+    leadingIcon: const Icon(Icons.alt_route_rounded, size: 20),
+    child: const Text('端口转发'),
+  ),
+  MenuItemButton(
+    onPressed:
+        session.status == ConnectionStatus.connected ||
+            session.status == ConnectionStatus.connecting
+        ? session.close
+        : null,
+    leadingIcon: const Icon(Icons.link_off_rounded, size: 20),
+    child: const Text('断开连接'),
+  ),
+  MenuItemButton(
+    onPressed: () => onClose(session),
+    leadingIcon: const Icon(Icons.close_rounded, size: 20),
+    child: const Text('关闭会话'),
+  ),
+];
+
+/// Open sessions as tabs on the left of the custom title bar, replacing the
+/// sidebar's session section.
+class _TitleBarSessionTabs extends StatelessWidget {
+  const _TitleBarSessionTabs({
+    required this.model,
+    required this.onPortForwards,
+    required this.onClose,
+  });
+  final WorkspaceModel model;
+  final ValueChanged<SshConnection> onPortForwards, onClose;
+
+  @override
+  Widget build(BuildContext context) => SingleChildScrollView(
+    key: const ValueKey('title-bar-sessions'),
+    scrollDirection: Axis.horizontal,
+    child: Row(
+      children: [
+        for (final session in model.sessions)
+          Padding(
+            padding: const EdgeInsets.only(right: 4),
+            child: _tab(context, session),
+          ),
+      ],
+    ),
+  );
+
+  Widget _tab(BuildContext context, SshConnection session) {
+    final colors = Theme.of(context).colorScheme;
+    final selected = model.showsTerminal && model.activeSessionId == session.id;
+    final foreground = selected
+        ? colors.onSecondaryContainer
+        : colors.onSurfaceVariant;
+    return MenuAnchor(
+      key: ValueKey('title-bar-session-menu-${session.id}'),
+      menuChildren: _sessionMenuChildren(
+        context,
+        session,
+        onPortForwards: onPortForwards,
+        onClose: onClose,
+      ),
+      builder: (context, controller, _) => GestureDetector(
+        onSecondaryTapUp: (details) {
+          final box = context.findRenderObject()! as RenderBox;
+          controller.open(position: box.globalToLocal(details.globalPosition));
+        },
+        child: Tooltip(
+          message: '${session.host.name} · ${session.statusLabel}',
+          child: Semantics(
+            selected: selected,
+            button: true,
+            child: Material(
+              color: selected ? colors.secondaryContainer : Colors.transparent,
+              shape: HarborShapes.pill,
+              child: InkWell(
+                key: ValueKey('title-bar-session-${session.id}'),
+                customBorder: HarborShapes.pill,
+                onTap: () => model.selectSession(session.id),
+                child: SizedBox(
+                  height: 30,
+                  child: Padding(
+                    padding: const EdgeInsets.only(left: 10),
+                    child: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Icon(
+                          sessionIcon(session.host.icon),
+                          size: 16,
+                          color: session.status == ConnectionStatus.connected
+                              ? (selected
+                                    ? colors.onSecondaryContainer
+                                    : colors.primary)
+                              : foreground,
+                        ),
+                        const SizedBox(width: 6),
+                        ConstrainedBox(
+                          constraints: const BoxConstraints(maxWidth: 140),
+                          child: Text(
+                            session.host.name,
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: Theme.of(context).textTheme.labelMedium
+                                ?.copyWith(color: foreground),
+                          ),
+                        ),
+                        IconButton(
+                          key: ValueKey(
+                            'title-bar-session-close-${session.id}',
+                          ),
+                          onPressed: () => onClose(session),
+                          visualDensity: VisualDensity.compact,
+                          padding: EdgeInsets.zero,
+                          constraints: const BoxConstraints.tightFor(
+                            width: 28,
+                            height: 28,
+                          ),
+                          iconSize: 14,
+                          color: foreground,
+                          icon: Icon(
+                            Icons.close_rounded,
+                            semanticLabel: '关闭 ${session.host.name}',
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
 class Workspace extends StatefulWidget {
   const Workspace({
     super.key,
@@ -344,6 +505,8 @@ class _WorkspaceState extends State<Workspace> {
   bool get _sidebarCollapsed => model.sidebarCollapsed && !_titleBarNavigation;
   bool get _titleBarNavigation =>
       usesCustomTitleBar && model.appearance.value.titleBarNavigation;
+  bool get _titleBarSessions =>
+      usesCustomTitleBar && model.appearance.value.titleBarSessions;
   bool _hideAddresses = false;
   bool _settingsOpened = false;
   bool _portForwardsOpened = false;
@@ -1032,7 +1195,9 @@ class _WorkspaceState extends State<Workspace> {
       builder: (context, constraints) {
         final wide = constraints.maxWidth >= _wideLayoutWidth;
         final sessionsOnly = wide && _titleBarNavigation;
-        final sidebarHidden = sessionsOnly && model.sidebarCollapsed;
+        // Navigation and sessions both in the title bar leave nothing to show.
+        final sidebarHidden =
+            sessionsOnly && (model.sidebarCollapsed || _titleBarSessions);
         final maxSidebarWidth = (constraints.maxWidth - 540).clamp(
           220.0,
           400.0,
@@ -1571,8 +1736,10 @@ class _WorkspaceState extends State<Workspace> {
                           !model.showingUsers,
                       () => model.filter(tag: tag),
                     ),
-                  _sectionLabel('会话'),
-                  ..._sessionItems(),
+                  if (!_titleBarSessions) ...[
+                    _sectionLabel('会话'),
+                    ..._sessionItems(),
+                  ],
                 ],
               ),
             ),
@@ -1650,28 +1817,12 @@ class _WorkspaceState extends State<Workspace> {
     final select = onSelected ?? () => model.selectSession(session.id);
     return MenuAnchor(
       key: ValueKey('session-menu-${session.id}'),
-      menuChildren: [
-        if (Theme.of(context).windowBackdrop.frosted) const HarborSurfaceBlur(),
-        MenuItemButton(
-          onPressed: () => _openPortForwards(session),
-          leadingIcon: const Icon(Icons.alt_route_rounded, size: 20),
-          child: const Text('端口转发'),
-        ),
-        MenuItemButton(
-          onPressed:
-              session.status == ConnectionStatus.connected ||
-                  session.status == ConnectionStatus.connecting
-              ? session.close
-              : null,
-          leadingIcon: const Icon(Icons.link_off_rounded, size: 20),
-          child: const Text('断开连接'),
-        ),
-        MenuItemButton(
-          onPressed: () => _closeSession(session),
-          leadingIcon: const Icon(Icons.close_rounded, size: 20),
-          child: const Text('关闭会话'),
-        ),
-      ],
+      menuChildren: _sessionMenuChildren(
+        context,
+        session,
+        onPortForwards: _openPortForwards,
+        onClose: _closeSession,
+      ),
       builder: (context, controller, child) => GestureDetector(
         behavior: HitTestBehavior.opaque,
         onSecondaryTapUp: (details) {
@@ -1688,7 +1839,7 @@ class _WorkspaceState extends State<Workspace> {
                   borderRadius: BorderRadius.circular(12),
                 ),
                 leading: Icon(
-                  Icons.terminal_rounded,
+                  sessionIcon(session.host.icon),
                   color: session.status == ConnectionStatus.connected
                       ? colors.primary
                       : colors.onSurfaceVariant,
@@ -1709,7 +1860,7 @@ class _WorkspaceState extends State<Workspace> {
                 ),
               )
             : _navItem(
-                Icons.terminal_rounded,
+                sessionIcon(session.host.icon),
                 session.host.name,
                 '',
                 selected,

@@ -9,6 +9,7 @@ import '../data/ssh_connection.dart';
 import '../data/terminal_ai.dart';
 import '../domain/host.dart';
 import 'expressive_widgets.dart';
+import 'host_icons.dart';
 import 'terminal_pane.dart';
 import 'theme.dart';
 
@@ -389,7 +390,7 @@ class _TerminalWorkspaceState extends State<TerminalWorkspace> {
           value: session,
           child: Row(
             children: [
-              const Icon(Icons.terminal_rounded, size: 18),
+              Icon(sessionIcon(session.host.icon), size: 18),
               const SizedBox(width: 10),
               Flexible(
                 child: Text(

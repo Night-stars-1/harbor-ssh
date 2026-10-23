@@ -7,6 +7,7 @@ import '../data/key_file.dart';
 import '../data/ssh_keys.dart';
 import '../domain/host.dart';
 import 'expressive_widgets.dart';
+import 'host_icons.dart';
 import 'settings_widgets.dart';
 import 'theme.dart';
 
@@ -57,6 +58,7 @@ class _HostEditorState extends State<HostEditor> {
   );
   late final _sftpPath = TextEditingController(text: widget.host?.sftpPath);
   late AuthMethod _auth = widget.host?.authMethod ?? AuthMethod.password;
+  late String _icon = widget.host?.icon ?? '';
   bool _passwordVisible = false;
   late final _users = widget.users
       .where((user) => user.authMethod == AuthMethod.privateKey)
@@ -257,6 +259,7 @@ class _HostEditorState extends State<HostEditor> {
       jumpHostId: _jumpHostId,
       sftpPath: _sftpPath.text.trim(),
       sftpBookmarks: widget.host?.sftpBookmarks ?? const [],
+      icon: _icon,
     );
     try {
       if (test) {
@@ -283,6 +286,49 @@ class _HostEditorState extends State<HostEditor> {
         });
       }
     }
+  }
+
+  /// 连接图标：显示在连接列表、侧栏会话和标题栏会话标签中。
+  Widget _iconPicker() {
+    final colors = Theme.of(context).colorScheme;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(
+          '图标',
+          style: Theme.of(context).textTheme.labelLarge
+              ?.copyWith(color: colors.onSurfaceVariant),
+        ),
+        const SizedBox(height: 8),
+        Wrap(
+          spacing: 4,
+          runSpacing: 4,
+          children: [
+            for (final option in hostIconOptions)
+              IconButton(
+                key: ValueKey('host-icon-${option.id}'),
+                tooltip: option.label,
+                isSelected: option.id == _icon,
+                onPressed: _busy
+                    ? null
+                    : () => setState(() => _icon = option.id),
+                style: IconButton.styleFrom(
+                  shape: HarborShapes.superellipse(
+                    const BorderRadius.all(HarborShapes.sm),
+                  ),
+                  backgroundColor: option.id == _icon
+                      ? colors.secondaryContainer
+                      : null,
+                  foregroundColor: option.id == _icon
+                      ? colors.onSecondaryContainer
+                      : colors.onSurfaceVariant,
+                ),
+                icon: Icon(option.icon, semanticLabel: option.label),
+              ),
+          ],
+        ),
+      ],
+    );
   }
 
   @override
@@ -313,7 +359,7 @@ class _HostEditorState extends State<HostEditor> {
                   children: [
                     ExpressiveMark(
                       size: 44,
-                      icon: Icons.dns_outlined,
+                      icon: hostIcon(_icon),
                       flower: true,
                     ),
                     const SizedBox(width: 12),
@@ -341,6 +387,8 @@ class _HostEditorState extends State<HostEditor> {
                   validator: _required,
                   autofocus: true,
                 ),
+                const SizedBox(height: 16),
+                _iconPicker(),
                 const SizedBox(height: 16),
                 LayoutBuilder(
                   builder: (context, constraints) {

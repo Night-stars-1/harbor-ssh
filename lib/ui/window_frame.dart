@@ -77,6 +77,7 @@ class WindowsWindowFrame extends StatefulWidget {
     required this.child,
     this.title = 'Harbor SSH',
     this.leading,
+    this.tabs,
     this.actions = const [],
   });
   final Widget child;
@@ -84,6 +85,10 @@ class WindowsWindowFrame extends StatefulWidget {
 
   /// Shown before the app mark, e.g. a side panel toggle.
   final Widget? leading;
+
+  /// Shown after the app mark in place of the title, e.g. session tabs. The
+  /// empty space after them still drags the window.
+  final Widget? tabs;
 
   /// Shown before the window buttons, e.g. workspace navigation.
   final List<Widget> actions;
@@ -232,7 +237,11 @@ class _WindowsWindowFrameState extends State<WindowsWindowFrame>
   Widget build(BuildContext context) {
     final colors = Theme.of(context).colorScheme;
     // Navigation hosted in the bar must stay reachable in full screen.
-    final hostsNavigation = widget.leading != null || widget.actions.isNotEmpty;
+    final hostsNavigation =
+        widget.leading != null ||
+        widget.tabs != null ||
+        widget.actions.isNotEmpty;
+    final titleInset = usesMacosTitleBar || widget.leading != null ? 0.0 : 14.0;
     final frame = Column(
       children: [
         if (!_fullScreen || hostsNavigation)
@@ -255,41 +264,56 @@ class _WindowsWindowFrameState extends State<WindowsWindowFrame>
                       child: widget.leading,
                     ),
                   Expanded(
-                    child: GestureDetector(
-                      key: const ValueKey('window-drag-area'),
-                      behavior: HitTestBehavior.opaque,
-                      onPanStart: (_) => windowManager.startDragging(),
-                      onDoubleTap: _toggleMaximize,
-                      onSecondaryTap: usesMacosTitleBar
-                          ? null
-                          : windowManager.popUpWindowMenu,
-                      child: Padding(
-                        padding: EdgeInsets.only(
-                          left: usesMacosTitleBar || widget.leading != null
-                              ? 0
-                              : 14,
-                        ),
-                        child: Row(
-                          children: [
-                            const ExpressiveMark(size: 24, flower: true),
-                            const SizedBox(width: 8),
-                            Expanded(
-                              child: Text(
-                                widget.title,
-                                maxLines: 1,
-                                overflow: TextOverflow.ellipsis,
-                                style: Theme.of(context).textTheme.labelMedium
-                                    ?.copyWith(
-                                      color: _focused
-                                          ? colors.onSurface
-                                          : colors.onSurfaceVariant,
-                                      fontWeight: FontWeight.w600,
+                    child: Stack(
+                      children: [
+                        Positioned.fill(
+                          child: GestureDetector(
+                            key: const ValueKey('window-drag-area'),
+                            behavior: HitTestBehavior.opaque,
+                            onPanStart: (_) => windowManager.startDragging(),
+                            onDoubleTap: _toggleMaximize,
+                            onSecondaryTap: usesMacosTitleBar
+                                ? null
+                                : windowManager.popUpWindowMenu,
+                            child: Padding(
+                              padding: EdgeInsets.only(left: titleInset),
+                              child: Row(
+                                children: [
+                                  const ExpressiveMark(size: 24, flower: true),
+                                  const SizedBox(width: 8),
+                                  if (widget.tabs == null)
+                                    Expanded(
+                                      child: Text(
+                                        widget.title,
+                                        maxLines: 1,
+                                        overflow: TextOverflow.ellipsis,
+                                        style: Theme.of(context)
+                                            .textTheme
+                                            .labelMedium
+                                            ?.copyWith(
+                                              color: _focused
+                                                  ? colors.onSurface
+                                                  : colors.onSurfaceVariant,
+                                              fontWeight: FontWeight.w600,
+                                            ),
+                                      ),
                                     ),
+                                ],
                               ),
                             ),
-                          ],
+                          ),
                         ),
-                      ),
+                        // Above the drag area: the tabs take their own clicks
+                        // while the bar around them keeps dragging the window.
+                        if (widget.tabs != null)
+                          Padding(
+                            padding: EdgeInsets.only(left: titleInset + 32),
+                            child: Align(
+                              alignment: Alignment.centerLeft,
+                              child: widget.tabs,
+                            ),
+                          ),
+                      ],
                     ),
                   ),
                   ...widget.actions,

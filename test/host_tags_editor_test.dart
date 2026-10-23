@@ -62,6 +62,7 @@ void main() {
   }
 
   Future<void> removeTag(WidgetTester tester, String tag) async {
+    await tester.ensureVisible(deleteButton(tag));
     await tester.tap(deleteButton(tag));
     await tester.pumpAndSettle();
   }

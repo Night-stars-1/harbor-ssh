@@ -25,6 +25,7 @@ class AppearancePreferences {
     this.terminalWrap = true,
     this.statusRefreshSeconds = 5,
     this.titleBarNavigation = false,
+    this.titleBarSessions = false,
     this.windowAcrylic = false,
     this.frostedSurfaces = false,
   });
@@ -43,6 +44,10 @@ class AppearancePreferences {
   /// panel lists sessions only. Stored only on this device.
   final bool titleBarNavigation;
 
+  /// Desktop only: open sessions are tabs on the left of the custom title bar
+  /// instead of a side panel section. Stored only on this device.
+  final bool titleBarSessions;
+
   /// Desktop only: the window shows the native system backdrop through
   /// translucent app surfaces. Windows uses acrylic material, macOS uses
   /// vibrancy, and Linux uses KDE/KWin background blur when available.
@@ -60,6 +65,7 @@ class AppearancePreferences {
     bool? terminalWrap,
     int? statusRefreshSeconds,
     bool? titleBarNavigation,
+    bool? titleBarSessions,
     bool? windowAcrylic,
     bool? frostedSurfaces,
   }) => AppearancePreferences(
@@ -69,6 +75,7 @@ class AppearancePreferences {
     terminalWrap: terminalWrap ?? this.terminalWrap,
     statusRefreshSeconds: statusRefreshSeconds ?? this.statusRefreshSeconds,
     titleBarNavigation: titleBarNavigation ?? this.titleBarNavigation,
+    titleBarSessions: titleBarSessions ?? this.titleBarSessions,
     windowAcrylic: windowAcrylic ?? this.windowAcrylic,
     frostedSurfaces: frostedSurfaces ?? this.frostedSurfaces,
   );
@@ -80,6 +87,7 @@ class AppearancePreferences {
     'terminalWrap': terminalWrap,
     'statusRefreshSeconds': statusRefreshSeconds,
     'titleBarNavigation': titleBarNavigation,
+    'titleBarSessions': titleBarSessions,
     'windowAcrylic': windowAcrylic,
     'frostedSurfaces': frostedSurfaces,
   };
@@ -99,6 +107,7 @@ class AppearancePreferences {
     terminalWrap: json['terminalWrap'] != false,
     statusRefreshSeconds: _statusRefreshSeconds(json['statusRefreshSeconds']),
     titleBarNavigation: json['titleBarNavigation'] == true,
+    titleBarSessions: json['titleBarSessions'] == true,
     windowAcrylic: json['windowAcrylic'] == true,
     frostedSurfaces: json['frostedSurfaces'] == true,
   );

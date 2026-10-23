@@ -671,6 +671,121 @@ void main() {
     debugDefaultTargetPlatformOverride = null;
   });
 
+  testWidgets('会话放到标题栏：标签切换与关闭会话，侧栏不再列出会话，终端不重建', (tester) async {
+    tester.view.physicalSize = const Size(1280, 800);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    debugDefaultTargetPlatformOverride = TargetPlatform.windows;
+    addTearDown(() => debugDefaultTargetPlatformOverride = null);
+    const channel = MethodChannel('window_manager');
+    tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+      channel,
+      (call) async => call.method == 'isFocused' ? true : false,
+    );
+    addTearDown(
+      () => tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+        channel,
+        null,
+      ),
+    );
+    final first = SshConnection(id: 'first', host: testHost)
+      ..status = ConnectionStatus.connected;
+    first.terminal.write('first output');
+    final second = SshConnection(
+      id: 'second',
+      host: const Host(
+        id: 'host-2',
+        name: '数据库',
+        address: 'db.example.com',
+        username: 'root',
+        icon: 'database',
+      ),
+    )..status = ConnectionStatus.connected;
+    final model = _SidebarWorkspaceModel([first, second]);
+    await tester.pumpWidget(HarborApp(model: model));
+    await tester.pumpAndSettle();
+    final bar = find.byKey(const ValueKey('windows-title-bar'));
+    final sidebar = find.byKey(const ValueKey('workspace-sidebar'));
+    Finder tab(String id) => find.descendant(
+      of: bar,
+      matching: find.byKey(ValueKey('title-bar-session-$id')),
+    );
+    final terminalState = tester.state(find.byType(TerminalView));
+    expect(tab('first'), findsNothing);
+
+    await model.saveAppearance(
+      const AppearancePreferences(titleBarSessions: true),
+    );
+    await tester.pumpAndSettle();
+    // 侧栏保留导航与标签，会话只出现在标题栏。
+    expect(find.descendant(of: sidebar, matching: find.text('标签')), findsOne);
+    expect(
+      find.descendant(of: sidebar, matching: find.text(testHost.name)),
+      findsNothing,
+    );
+    expect(tab('first'), findsOneWidget);
+    // 自定义图标显示在标签上；未设置图标的会话沿用终端图标。
+    expect(
+      find.descendant(
+        of: tab('second'),
+        matching: find.byIcon(Icons.storage_rounded),
+      ),
+      findsOneWidget,
+    );
+    expect(
+      find.descendant(
+        of: tab('first'),
+        matching: find.byIcon(Icons.terminal_rounded),
+      ),
+      findsOneWidget,
+    );
+    expect(tester.state(find.byType(TerminalView)), same(terminalState));
+
+    await tester.tap(tab('second'));
+    await tester.pumpAndSettle();
+    expect(model.activeSessionId, 'second');
+
+    // 关闭已连接会话沿用确认弹窗；取消时会话保留。
+    await tester.tap(
+      find.byKey(const ValueKey('title-bar-session-close-first')),
+    );
+    await tester.pumpAndSettle();
+    expect(find.text('关闭终端？'), findsOneWidget);
+    await tester.tap(find.text('取消'));
+    await tester.pumpAndSettle();
+    expect(model.sessions, [first, second]);
+    await tester.tap(
+      find.byKey(const ValueKey('title-bar-session-close-first')),
+    );
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('断开并关闭'));
+    await tester.pumpAndSettle();
+    expect(model.sessions, [second]);
+    expect(tab('first'), findsNothing);
+
+    // 导航也放到标题栏后没有可显示的侧栏，折叠按钮随之隐藏。
+    await model.saveAppearance(
+      const AppearancePreferences(
+        titleBarNavigation: true,
+        titleBarSessions: true,
+      ),
+    );
+    await tester.pumpAndSettle();
+    expect(sidebar, findsNothing);
+    expect(find.byKey(const ValueKey('sidebar-toggle')), findsNothing);
+    expect(tab('second'), findsOneWidget);
+    expect(find.byKey(const ValueKey('title-bar-users')), findsOneWidget);
+
+    // 窄屏回到移动端布局，标题栏不再放会话标签。
+    tester.view.physicalSize = const Size(390, 844);
+    await tester.pumpAndSettle();
+    expect(tab('second'), findsNothing);
+    expect(tester.takeException(), isNull);
+    await tester.pumpWidget(const SizedBox.shrink());
+    debugDefaultTargetPlatformOverride = null;
+  });
+
   testWidgets('侧边栏右键仅操作目标会话，断开保留记录，关闭沿用确认', (tester) async {
     tester.view.physicalSize = const Size(1280, 800);
     tester.view.devicePixelRatio = 1;
@@ -1414,10 +1529,8 @@ class _TerminalWorkspaceModel extends WorkspaceModel {
 }
 
 class _SidebarWorkspaceModel extends WorkspaceModel {
-  _SidebarWorkspaceModel(
-    this.items, {
-    super.localDocumentsDirectory,
-  }) : super(memoryRepository()) {
+  _SidebarWorkspaceModel(this.items, {super.localDocumentsDirectory})
+    : super(memoryRepository()) {
     activeSessionId = items.first.id;
     for (final session in items) {
       session.addListener(notifyListeners);

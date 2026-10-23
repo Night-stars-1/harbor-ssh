@@ -10,6 +10,7 @@ import '../domain/host.dart';
 import '../domain/remote_file.dart';
 import 'expressive_widgets.dart';
 import 'file_workspace_model.dart';
+import 'host_icons.dart';
 import 'remote_text_editor_dialog.dart';
 import 'theme.dart';
 
@@ -125,7 +126,7 @@ class _FileWorkspaceState extends State<FileWorkspace> {
                               Icon(
                                 item.isLocal
                                     ? Icons.computer_rounded
-                                    : Icons.dns_outlined,
+                                    : hostIcon(item.session?.host.icon ?? ''),
                                 size: 18,
                               ),
                               const SizedBox(width: 8),
@@ -216,7 +217,7 @@ class _FileWorkspaceState extends State<FileWorkspace> {
             value: connected[host.id] ?? host,
             child: Row(
               children: [
-                const Icon(Icons.dns_outlined, size: 20),
+                Icon(hostIcon(host.icon), size: 20),
                 const SizedBox(width: 12),
                 Expanded(
                   child: Padding(

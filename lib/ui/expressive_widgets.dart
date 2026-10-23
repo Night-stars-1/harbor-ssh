@@ -5,6 +5,7 @@ import 'package:flutter/physics.dart';
 import 'package:flutter/services.dart';
 
 import '../domain/host.dart';
+import 'host_icons.dart';
 import 'theme.dart';
 
 class ExpressiveMark extends StatelessWidget {
@@ -418,7 +419,7 @@ class ExpressiveHostCard extends StatelessWidget {
         : host.destination,
     badges: _hostBadges(host),
     favorite: host.favorite,
-    icon: Icons.dns_rounded,
+    icon: hostIcon(host.icon),
     actionLabel: '连接',
     menuLabel: '管理连接',
     showMenuButton: false,
