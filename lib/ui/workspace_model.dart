@@ -223,6 +223,7 @@ class WorkspaceModel extends ChangeNotifier {
   String? portForwardSessionId;
   int portForwardRequest = 0;
   bool showingSettings = false;
+  bool sidebarCollapsed = false;
   late final fileWorkspace = FileWorkspaceModel();
   static const _localPathKey = 'harbor.files.default-local-path.v1';
   String get defaultLocalPath => fileWorkspace.defaultLocalPath;
@@ -751,6 +752,11 @@ class WorkspaceModel extends ChangeNotifier {
 
   void closeSettings() {
     showingSettings = false;
+    _notify();
+  }
+
+  void toggleSidebar() {
+    sidebarCollapsed = !sidebarCollapsed;
     _notify();
   }
 

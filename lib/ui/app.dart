@@ -80,49 +80,231 @@ class _HarborAppState extends State<HarborApp> {
           dynamicScheme: SystemColorScope.of(context)?.light,
           color: appearance.color,
           reduceMotion: MediaQuery.maybeOf(context)?.disableAnimations ?? false,
+          acrylic: appearance.windowAcrylic && windowAcrylicSupported,
+          frosted: appearance.frostedSurfaces,
         ),
         darkTheme: harborTheme(
           dynamicScheme: SystemColorScope.of(context)?.dark,
           color: appearance.color,
           brightness: Brightness.dark,
           reduceMotion: MediaQuery.maybeOf(context)?.disableAnimations ?? false,
+          acrylic: appearance.windowAcrylic && windowAcrylicSupported,
+          frosted: appearance.frostedSurfaces,
         ),
         themeAnimationDuration:
             MediaQuery.maybeOf(context)?.disableAnimations == true
             ? Duration.zero
             : HarborMotion.effectsDuration,
         themeMode: flutterThemeMode(appearance.mode),
-        builder: (context, child) =>
-            usesCustomTitleBar ? WindowsWindowFrame(child: child!) : child!,
+        // The frame sits above the navigator, so its shape must stay stable:
+        // a changing ancestor would remount every page and terminal below it.
+        builder: (context, child) => usesCustomTitleBar
+            ? ListenableBuilder(
+                listenable: widget.model,
+                builder: (context, _) {
+                  final navigation =
+                      appearance.titleBarNavigation &&
+                      MediaQuery.sizeOf(context).width >= _wideLayoutWidth;
+                  return WindowsWindowFrame(
+                    leading: navigation
+                        ? _sidebarToggle(widget.model, compact: true)
+                        : null,
+                    actions: navigation
+                        ? [
+                            for (final destination in _primaryDestinations(
+                              widget.model,
+                            ))
+                              IconButton(
+                                key: ValueKey('title-bar-${destination.id}'),
+                                tooltip: destination.title,
+                                visualDensity: VisualDensity.compact,
+                                iconSize: 20,
+                                isSelected: destination.selected,
+                                onPressed: destination.open,
+                                icon: Icon(destination.icon),
+                              ),
+                            _settingsButton(
+                              context,
+                              widget.model,
+                              _openSettingsWindow,
+                              compact: true,
+                            ),
+                            _themeButton(
+                              context,
+                              () => _toggleTheme(context),
+                              compact: true,
+                            ),
+                          ]
+                        : const [],
+                    child: child!,
+                  );
+                },
+              )
+            : child!,
         home: Builder(
           builder: (context) => Workspace(
             model: widget.model,
             aiWindow: widget.aiWindow,
             updaterFactory: widget.updaterFactory,
-            onOpenSettings: widget.settingsWindow == null
-                ? null
-                : () => widget.settingsWindow!.open(),
-            onToggleTheme: () async {
-              try {
-                await widget.model.saveAppearance(
-                  widget.model.appearance.value.copyWith(
-                    mode: Theme.of(context).brightness == Brightness.dark
-                        ? AppThemeMode.light
-                        : AppThemeMode.dark,
-                  ),
-                );
-              } catch (_) {
-                if (context.mounted) {
-                  showSettingsNotice(context, '主题设置保存失败，请重试', error: true);
-                }
-              }
-            },
+            onOpenSettings: _openSettingsWindow,
+            onToggleTheme: () => _toggleTheme(context),
           ),
         ),
       ),
     ),
   );
+
+  Future<void> Function()? get _openSettingsWindow =>
+      widget.settingsWindow?.open;
+
+  Future<void> _toggleTheme(BuildContext context) async {
+    try {
+      await widget.model.saveAppearance(
+        widget.model.appearance.value.copyWith(
+          mode: Theme.of(context).brightness == Brightness.dark
+              ? AppThemeMode.light
+              : AppThemeMode.dark,
+        ),
+      );
+    } catch (_) {
+      if (context.mounted) {
+        showSettingsNotice(context, '主题设置保存失败，请重试', error: true);
+      }
+    }
+  }
 }
+
+/// Width at which the workspace switches from the mobile layout to the
+/// desktop sidebar layout.
+const _wideLayoutWidth = 900.0;
+
+/// A primary workspace page, shown in the sidebar or the title bar.
+typedef _Destination = ({
+  String id,
+  IconData icon,
+  String title,
+  String count,
+  bool selected,
+  VoidCallback open,
+});
+
+List<_Destination> _primaryDestinations(WorkspaceModel model) {
+  final home =
+      model.activeSessionId == null &&
+      !model.showingSettings &&
+      !model.showingFiles &&
+      !model.showingPortForwards;
+  return [
+    (
+      id: 'all-hosts',
+      icon: Icons.dns_rounded,
+      title: '所有连接',
+      count: '${model.hosts.length}',
+      selected:
+          home &&
+          !model.showingUsers &&
+          !model.favoritesOnly &&
+          !model.ungroupedOnly &&
+          model.selectedTag == null,
+      open: () => model.filter(),
+    ),
+    (
+      id: 'favorites',
+      icon: Icons.star_rounded,
+      title: '收藏',
+      count: '${model.hosts.where((h) => h.favorite).length}',
+      selected: home && !model.showingUsers && model.favoritesOnly,
+      open: () => model.filter(favorites: true),
+    ),
+    (
+      id: 'users',
+      icon: Icons.vpn_key_rounded,
+      title: '凭证',
+      count: '${model.users.length}',
+      selected: home && model.showingUsers,
+      open: () => model.filter(users: true),
+    ),
+    (
+      id: 'files',
+      icon: Icons.folder_copy_rounded,
+      title: 'SFTP',
+      count: '',
+      selected: model.showingFiles && !model.showingSettings,
+      open: model.showFiles,
+    ),
+    (
+      id: 'port-forwards',
+      icon: Icons.alt_route_rounded,
+      title: '端口转发',
+      count: '',
+      selected: model.showingPortForwards && !model.showingSettings,
+      open: () => model.showPortForwards(),
+    ),
+  ];
+}
+
+Widget _sidebarToggle(WorkspaceModel model, {bool compact = false}) =>
+    IconButton(
+      key: const ValueKey('sidebar-toggle'),
+      visualDensity: compact ? VisualDensity.compact : null,
+      iconSize: compact ? 20 : null,
+      onPressed: model.toggleSidebar,
+      icon: Icon(
+        model.sidebarCollapsed
+            ? Icons.keyboard_double_arrow_right_rounded
+            : Icons.keyboard_double_arrow_left_rounded,
+        semanticLabel: model.sidebarCollapsed ? '展开侧栏' : '折叠侧栏',
+      ),
+    );
+
+Widget _themeButton(
+  BuildContext context,
+  VoidCallback onToggle, {
+  bool compact = false,
+}) => IconButton(
+  onPressed: onToggle,
+  tooltip: '切换浅色/深色主题',
+  visualDensity: compact ? VisualDensity.compact : null,
+  iconSize: compact ? 20 : null,
+  icon: Icon(
+    Theme.of(context).brightness == Brightness.dark
+        ? Icons.light_mode_rounded
+        : Icons.dark_mode_rounded,
+  ),
+);
+
+/// Opens the separate settings window when there is one, otherwise the
+/// in-workspace settings page.
+Widget _settingsButton(
+  BuildContext context,
+  WorkspaceModel model,
+  Future<void> Function()? openWindow, {
+  bool compact = false,
+}) => IconButton(
+  key: const ValueKey('settings-button'),
+  visualDensity: compact ? VisualDensity.compact : null,
+  iconSize: compact ? 20 : null,
+  onPressed: model.loading
+      ? null
+      : () async {
+          if (openWindow == null) {
+            model.showSettings();
+            return;
+          }
+          try {
+            await openWindow();
+          } catch (_) {
+            if (context.mounted) {
+              ScaffoldMessenger.of(context).showSnackBar(
+                const SnackBar(content: Text('无法打开设置窗口，请重新启动应用后重试')),
+              );
+            }
+          }
+        },
+  isSelected: model.showingSettings,
+  selectedIcon: const Icon(Icons.settings_rounded, semanticLabel: '设置'),
+  icon: const Icon(Icons.settings_outlined, semanticLabel: '设置'),
+);
 
 class Workspace extends StatefulWidget {
   const Workspace({
@@ -146,7 +328,10 @@ class _WorkspaceState extends State<Workspace> {
   WorkspaceModel get model => widget.model;
   late final _search = TextEditingController(text: model.query);
   final _terminalController = TerminalPaneController();
-  bool _sidebarCollapsed = false;
+  // Title bar navigation has no icon rail: collapsing hides the session list.
+  bool get _sidebarCollapsed => model.sidebarCollapsed && !_titleBarNavigation;
+  bool get _titleBarNavigation =>
+      usesCustomTitleBar && model.appearance.value.titleBarNavigation;
   bool _hideAddresses = false;
   bool _settingsOpened = false;
   bool _portForwardsOpened = false;
@@ -768,11 +953,8 @@ class _WorkspaceState extends State<Workspace> {
     if (_sessionsOpen) return;
     _sessionsOpen = true;
     try {
-      await showModalBottomSheet<void>(
+      await showExpressiveBottomSheet<void>(
         context: context,
-        isScrollControlled: true,
-        useSafeArea: true,
-        showDragHandle: true,
         builder: (sheetContext) => FractionallySizedBox(
           heightFactor: 0.7,
           child: SafeArea(
@@ -836,7 +1018,9 @@ class _WorkspaceState extends State<Workspace> {
     listenable: Listenable.merge([model, _settingsNavigation]),
     builder: (context, _) => LayoutBuilder(
       builder: (context, constraints) {
-        final wide = constraints.maxWidth >= 900;
+        final wide = constraints.maxWidth >= _wideLayoutWidth;
+        final sessionsOnly = wide && _titleBarNavigation;
+        final sidebarHidden = sessionsOnly && model.sidebarCollapsed;
         final maxSidebarWidth = (constraints.maxWidth - 540).clamp(
           220.0,
           400.0,
@@ -948,9 +1132,9 @@ class _WorkspaceState extends State<Workspace> {
                       ),
                     ),
                     actions: [
-                      _themeButton(),
+                      _themeButton(context, widget.onToggleTheme),
                       if (terminalSession == null && !model.showingSettings)
-                        _settingsButton(),
+                        _settingsButton(context, model, widget.onOpenSettings),
                       if (terminalSession != null)
                         FileBrowserButton(
                           session: model.activeSession!,
@@ -1048,11 +1232,11 @@ class _WorkspaceState extends State<Workspace> {
               top: wide,
               child: Row(
                 children: [
-                  if (wide) ...[
+                  if (wide && !sidebarHidden) ...[
                     SizedBox(
                       key: const ValueKey('workspace-sidebar'),
                       width: _sidebarCollapsed ? 80 : sidebarWidth,
-                      child: _sidebar(),
+                      child: sessionsOnly ? _sessionSidebar() : _sidebar(),
                     ),
                     if (!_sidebarCollapsed)
                       _sidebarResizeHandle(sidebarWidth, maxSidebarWidth),
@@ -1060,13 +1244,18 @@ class _WorkspaceState extends State<Workspace> {
                   Expanded(
                     child: Padding(
                       padding: EdgeInsets.fromLTRB(
-                        wide && _sidebarCollapsed ? 8 : 0,
+                        sidebarHidden
+                            ? 12
+                            : wide && _sidebarCollapsed
+                            ? 8
+                            : 0,
                         wide ? 12 : 0,
                         wide ? 12 : 0,
                         wide ? 12 : 0,
                       ),
                       child: Material(
-                        color: colors.surface,
+                        color: Theme.of(context).windowBackdrop
+                            .sheet(colors.surface),
                         borderRadius: wide
                             ? BorderRadius.circular(32)
                             : BorderRadius.zero,
@@ -1245,36 +1434,6 @@ class _WorkspaceState extends State<Workspace> {
     ),
   );
 
-  Widget _themeButton() => IconButton(
-    onPressed: widget.onToggleTheme,
-    tooltip: '切换浅色/深色主题',
-    icon: Icon(
-      Theme.of(context).brightness == Brightness.dark
-          ? Icons.light_mode_rounded
-          : Icons.dark_mode_rounded,
-    ),
-  );
-
-  Widget _settingsButton() => IconButton(
-    key: const ValueKey('settings-button'),
-    onPressed: model.loading
-        ? null
-        : () async {
-            if (widget.onOpenSettings == null) {
-              model.showSettings();
-              return;
-            }
-            try {
-              await widget.onOpenSettings!();
-            } catch (_) {
-              if (mounted) _message('无法打开设置窗口，请重新启动应用后重试');
-            }
-          },
-    isSelected: model.showingSettings,
-    selectedIcon: const Icon(Icons.settings_rounded, semanticLabel: '设置'),
-    icon: const Icon(Icons.settings_outlined, semanticLabel: '设置'),
-  );
-
   Widget _sidebarResizeHandle(double width, double maxWidth) {
     void resize(double next) => setState(() {
       _sidebarWidth = next.clamp(220.0, maxWidth);
@@ -1319,7 +1478,8 @@ class _WorkspaceState extends State<Workspace> {
     final type = Theme.of(context).textTheme;
     return SafeArea(
       child: ColoredBox(
-        color: colors.surfaceContainerLow,
+        color: Theme.of(context).windowBackdrop
+            .chrome(colors.surfaceContainerLow),
         child: Column(
           children: [
             Expanded(
@@ -1362,61 +1522,18 @@ class _WorkspaceState extends State<Workspace> {
                         ],
                       ),
                     ),
-                  _navItem(
-                    Icons.dns_rounded,
-                    '所有连接',
-                    '${model.hosts.length}',
-                    model.activeSessionId == null &&
-                        !model.showingSettings &&
-                        !model.showingFiles &&
-                        !model.showingPortForwards &&
-                        !model.showingUsers &&
-                        !model.favoritesOnly &&
-                        !model.ungroupedOnly &&
-                        model.selectedTag == null,
-                    () => model.filter(),
-                    bottomSpacing: 0,
-                  ),
-                  _navItem(
-                    Icons.star_rounded,
-                    '收藏',
-                    '${model.hosts.where((h) => h.favorite).length}',
-                    model.activeSessionId == null &&
-                        !model.showingSettings &&
-                        !model.showingFiles &&
-                        !model.showingPortForwards &&
-                        !model.showingUsers &&
-                        model.favoritesOnly,
-                    () => model.filter(favorites: true),
-                    bottomSpacing: 0,
-                  ),
-                  _navItem(
-                    Icons.vpn_key_rounded,
-                    '凭证',
-                    '${model.users.length}',
-                    model.activeSessionId == null &&
-                        model.showingUsers &&
-                        !model.showingSettings &&
-                        !model.showingFiles &&
-                        !model.showingPortForwards,
-                    () => model.filter(users: true),
-                    bottomSpacing: 0,
-                  ),
-                  _navItem(
-                    Icons.folder_copy_rounded,
-                    'SFTP',
-                    '',
-                    model.showingFiles && !model.showingSettings,
-                    model.showFiles,
-                  ),
-                  _navItem(
-                    Icons.alt_route_rounded,
-                    '端口转发',
-                    '',
-                    model.showingPortForwards && !model.showingSettings,
-                    () => model.showPortForwards(),
-                    key: const ValueKey('sidebar-port-forwards'),
-                  ),
+                  for (final destination in _primaryDestinations(model))
+                    _navItem(
+                      destination.icon,
+                      destination.title,
+                      destination.count,
+                      destination.selected,
+                      destination.open,
+                      key: destination.id == 'port-forwards'
+                          ? const ValueKey('sidebar-port-forwards')
+                          : null,
+                      bottomSpacing: destination.count.isEmpty ? 4 : 0,
+                    ),
                   _sectionLabel('标签'),
                   _navItem(
                     Icons.sell_outlined,
@@ -1450,18 +1567,7 @@ class _WorkspaceState extends State<Workspace> {
                       () => model.filter(tag: tag),
                     ),
                   _sectionLabel('会话'),
-                  if (model.sessions.isEmpty && !_sidebarCollapsed)
-                    Padding(
-                      padding: const EdgeInsets.symmetric(horizontal: 16),
-                      child: Text(
-                        '连接主机后，会话会显示在这里。',
-                        style: type.bodySmall?.copyWith(
-                          color: colors.onSurfaceVariant,
-                        ),
-                      ),
-                    ),
-                  for (final session in model.sessions)
-                    _sessionNavItem(session),
+                  ..._sessionItems(),
                 ],
               ),
             ),
@@ -1471,21 +1577,10 @@ class _WorkspaceState extends State<Workspace> {
                 direction: _sidebarCollapsed ? Axis.vertical : Axis.horizontal,
                 mainAxisSize: MainAxisSize.min,
                 children: [
-                  IconButton(
-                    key: const ValueKey('sidebar-toggle'),
-                    onPressed: () => setState(() {
-                      _sidebarCollapsed = !_sidebarCollapsed;
-                    }),
-                    icon: Icon(
-                      _sidebarCollapsed
-                          ? Icons.keyboard_double_arrow_right_rounded
-                          : Icons.keyboard_double_arrow_left_rounded,
-                      semanticLabel: _sidebarCollapsed ? '展开侧栏' : '折叠侧栏',
-                    ),
-                  ),
+                  _sidebarToggle(model),
                   if (!_sidebarCollapsed) const Spacer(),
-                  _settingsButton(),
-                  _themeButton(),
+                  _settingsButton(context, model, widget.onOpenSettings),
+                  _themeButton(context, widget.onToggleTheme),
                 ],
               ),
             ),
@@ -1494,6 +1589,32 @@ class _WorkspaceState extends State<Workspace> {
       ),
     );
   }
+
+  /// Title bar navigation mode: pages and window actions live in the title
+  /// bar, so the panel lists open sessions only.
+  Widget _sessionSidebar() => SafeArea(
+    child: ColoredBox(
+      color: Theme.of(context).windowBackdrop
+          .chrome(Theme.of(context).colorScheme.surfaceContainerLow),
+      child: ListView(
+        padding: const EdgeInsets.fromLTRB(12, 0, 12, 16),
+        children: [_sectionLabel('会话'), ..._sessionItems()],
+      ),
+    ),
+  );
+
+  List<Widget> _sessionItems() => [
+    if (model.sessions.isEmpty && !_sidebarCollapsed)
+      Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 16),
+        child: Text(
+          '连接主机后，会话会显示在这里。',
+          style: Theme.of(context).textTheme.bodySmall
+              ?.copyWith(color: Theme.of(context).colorScheme.onSurfaceVariant),
+        ),
+      ),
+    for (final session in model.sessions) _sessionNavItem(session),
+  ];
 
   Widget _sectionLabel(String label) => _sidebarCollapsed
       ? const Padding(
@@ -1525,6 +1646,7 @@ class _WorkspaceState extends State<Workspace> {
     return MenuAnchor(
       key: ValueKey('session-menu-${session.id}'),
       menuChildren: [
+        if (Theme.of(context).windowBackdrop.frosted) const HarborSurfaceBlur(),
         MenuItemButton(
           onPressed: () => _openPortForwards(session),
           leadingIcon: const Icon(Icons.alt_route_rounded, size: 20),

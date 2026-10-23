@@ -1,4 +1,5 @@
 #include "flutter_window.h"
+#include <dwmapi.h>
 #include <algorithm>
 #include <filesystem>
 
@@ -7,6 +8,33 @@
 #include <flutter/method_result_functions.h>
 
 #include "flutter/generated_plugin_registrant.h"
+
+namespace {
+
+// Redefined for Windows SDKs older than 10.0.22621.0.
+constexpr DWORD kDwmUseImmersiveDarkMode = 20;
+constexpr DWORD kDwmSystemBackdropType = 38;
+constexpr int kDwmBackdropNone = 1;
+constexpr int kDwmBackdropAcrylic = 3;
+
+// DWMWA_SYSTEMBACKDROP_TYPE is honoured from Windows 11 22H2 (build 22621).
+// Older systems only offer the undocumented accent policy, which lags while
+// the window is dragged, so they report the effect as unsupported.
+bool SupportsSystemBackdrop() {
+  using RtlGetVersion = LONG(WINAPI*)(PRTL_OSVERSIONINFOW);
+  static const bool supported = [] {
+    const auto ntdll = ::GetModuleHandleW(L"ntdll.dll");
+    const auto get_version = ntdll ? reinterpret_cast<RtlGetVersion>(
+                                         ::GetProcAddress(ntdll, "RtlGetVersion"))
+                                   : nullptr;
+    RTL_OSVERSIONINFOW info{sizeof(info)};
+    return get_version && get_version(&info) == 0 &&
+           info.dwBuildNumber >= 22621;
+  }();
+  return supported;
+}
+
+}  // namespace
 
 FlutterWindow::FlutterWindow(const flutter::DartProject& project, FlutterWindow* owner)
     : project_(project), owner_(owner) {}
@@ -112,6 +140,39 @@ bool FlutterWindow::OnCreate() {
                 [reply]() { reply->NotImplemented(); }));
       });
 
+  window_effect_channel_ = std::make_unique<flutter::MethodChannel<Value>>(
+      flutter_controller_->engine()->messenger(), "harbor/window_effect",
+      &flutter::StandardMethodCodec::GetInstance());
+  window_effect_channel_->SetMethodCallHandler(
+      [this](const flutter::MethodCall<Value>& call,
+             std::unique_ptr<flutter::MethodResult<Value>> result) {
+        if (call.method_name() == "supported") {
+          result->Success(Value(SupportsSystemBackdrop()));
+          return;
+        }
+        if (call.method_name() != "setAcrylic") {
+          result->NotImplemented();
+          return;
+        }
+        const auto* arguments = std::get_if<flutter::EncodableMap>(call.arguments());
+        const auto flag = [arguments](const char* key) -> const bool* {
+          if (!arguments) return nullptr;
+          const auto entry = arguments->find(Value(key));
+          return entry == arguments->end() ? nullptr
+                                           : std::get_if<bool>(&entry->second);
+        };
+        const bool* enabled = flag("enabled");
+        const bool* dark = flag("dark");
+        if (!enabled || !dark) {
+          result->Error("arguments", "Invalid window effect arguments");
+          return;
+        }
+        acrylic_ = *enabled && SupportsSystemBackdrop();
+        acrylic_dark_ = *dark;
+        ApplyWindowEffect();
+        result->Success(Value(acrylic_));
+      });
+
   ai_channel_ = std::make_unique<flutter::MethodChannel<Value>>(
       flutter_controller_->engine()->messenger(), "harbor/ai_window",
       &flutter::StandardMethodCodec::GetInstance());
@@ -205,6 +266,25 @@ bool FlutterWindow::OnCreate() {
   return true;
 }
 
+void FlutterWindow::ApplyWindowEffect() {
+  const HWND hwnd = GetHandle();
+  if (!hwnd || !SupportsSystemBackdrop()) {
+    return;
+  }
+  // The backdrop only shows through client pixels Flutter leaves transparent
+  // once the DWM frame covers the whole client area ("sheet of glass").
+  const MARGINS margins = acrylic_ ? MARGINS{-1, -1, -1, -1} : MARGINS{0, 0, 0, 0};
+  ::DwmExtendFrameIntoClientArea(hwnd, &margins);
+  if (acrylic_) {
+    // The acrylic tint follows the app theme, not the system theme.
+    const BOOL dark = acrylic_dark_;
+    ::DwmSetWindowAttribute(hwnd, kDwmUseImmersiveDarkMode, &dark, sizeof(dark));
+  }
+  const int backdrop = acrylic_ ? kDwmBackdropAcrylic : kDwmBackdropNone;
+  ::DwmSetWindowAttribute(hwnd, kDwmSystemBackdropType, &backdrop,
+                          sizeof(backdrop));
+}
+
 void FlutterWindow::OnDestroy() {
   ai_window_.reset();
   ai_channel_.reset();
@@ -212,6 +292,7 @@ void FlutterWindow::OnDestroy() {
   settings_channel_.reset();
   system_color_channel_.reset();
   local_paths_channel_.reset();
+  window_effect_channel_.reset();
   if (flutter_controller_) {
     flutter_controller_ = nullptr;
   }
@@ -294,6 +375,13 @@ FlutterWindow::MessageHandler(HWND hwnd, UINT const message,
     case WM_FONTCHANGE:
       flutter_controller_->engine()->ReloadSystemFonts();
       break;
+    case WM_DWMCOLORIZATIONCOLORCHANGED: {
+      // The base handler resets dark mode to the system theme.
+      const LRESULT handled =
+          Win32Window::MessageHandler(hwnd, message, wparam, lparam);
+      if (acrylic_) ApplyWindowEffect();
+      return handled;
+    }
   }
 
   return Win32Window::MessageHandler(hwnd, message, wparam, lparam);

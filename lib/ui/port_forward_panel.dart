@@ -996,7 +996,7 @@ class _PortForwardEditorState extends State<PortForwardEditor> {
         trailingIcon: const Icon(Icons.expand_more_rounded),
         selectedTrailingIcon: const Icon(Icons.expand_less_rounded),
         alignmentOffset: const Offset(0, 4),
-        dropdownMenuEntries: [
+        dropdownMenuEntries: harborDropdownEntries(context, [
           for (final entry in options.entries)
             DropdownMenuEntry<T>(
               value: entry.key,
@@ -1025,7 +1025,7 @@ class _PortForwardEditorState extends State<PortForwardEditor> {
                 textStyle: theme.textTheme.bodyLarge,
               ),
             ),
-        ],
+        ]),
         onSelected: (next) {
           if (next != null) onSelected(next);
         },

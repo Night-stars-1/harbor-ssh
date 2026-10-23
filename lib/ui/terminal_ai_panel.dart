@@ -433,11 +433,8 @@ class _TerminalAiPanelState extends State<TerminalAiPanel> {
       unawaited(task.loadHistory());
       final size = MediaQuery.sizeOf(context);
       if (size.width < 600) {
-        await showModalBottomSheet<void>(
+        await showExpressiveBottomSheet<void>(
           context: context,
-          isScrollControlled: true,
-          useSafeArea: true,
-          showDragHandle: true,
           builder: (_) => FractionallySizedBox(
             heightFactor: 0.85,
             child: SafeArea(
@@ -596,7 +593,10 @@ class _TerminalAiPanelState extends State<TerminalAiPanel> {
     return MenuAnchor(
       controller: _modelMenu,
       alignmentOffset: const Offset(0, 4),
-      menuChildren: [_modelMenuContent(task)],
+      menuChildren: [
+        if (Theme.of(context).windowBackdrop.frosted) const HarborSurfaceBlur(),
+        _modelMenuContent(task),
+      ],
       builder: (context, controller, child) => Tooltip(
         message: '切换模型（${task.activeModel}）',
         child: compact
@@ -949,7 +949,7 @@ class _TerminalAiPanelState extends State<TerminalAiPanel> {
   Widget build(BuildContext context) {
     final colors = Theme.of(context).colorScheme;
     return Material(
-      color: colors.surfaceContainer,
+      color: Theme.of(context).windowBackdrop.chrome(colors.surfaceContainer),
       child: ListenableBuilder(
         listenable: widget.task,
         builder: (context, _) {
@@ -1640,6 +1640,7 @@ class _TerminalAiPanelState extends State<TerminalAiPanel> {
         ),
       ),
       menuChildren: [
+        if (Theme.of(context).windowBackdrop.frosted) const HarborSurfaceBlur(),
         for (final session in selection.sessions)
           MenuItemButton(
             key: ValueKey('ai-session-menu-${session.id}'),
@@ -1745,7 +1746,7 @@ class _TerminalAiPanelState extends State<TerminalAiPanel> {
   ) {
     final colors = Theme.of(context).colorScheme;
     return Material(
-      color: colors.surfaceContainerLow,
+      color: Theme.of(context).windowBackdrop.sheet(colors.surfaceContainerLow),
       shape: HarborShapes.superellipse(const BorderRadius.all(HarborShapes.xl)),
       clipBehavior: Clip.antiAlias,
       child: _workspaceSurfaceContent(context, task, configured),

@@ -1,4 +1,7 @@
+import 'dart:ui' as ui;
+
 import 'package:flutter/material.dart';
+import 'package:flutter/rendering.dart';
 
 import '../domain/appearance.dart';
 
@@ -75,15 +78,92 @@ abstract final class HarborShapes {
       RoundedSuperellipseBorder(borderRadius: radius);
 }
 
+/// How surfaces that sit directly on the window are painted. With window
+/// acrylic the system backdrop shows through the window chrome, and content
+/// sheets keep a translucent tint so text stays legible. [frosted] floating
+/// surfaces (menus, dialogs, sheets) are translucent and blur the app content
+/// below them; it is independent of window acrylic.
+@immutable
+class HarborWindowBackdrop extends ThemeExtension<HarborWindowBackdrop> {
+  const HarborWindowBackdrop({
+    this.acrylic = false,
+    this.frosted = false,
+    this.sheetOpacity = 1,
+  });
+  final bool acrylic;
+  final bool frosted;
+  final double sheetOpacity;
+
+  /// Title bar, side panels and page backgrounds.
+  Color chrome(Color color) => acrylic ? Colors.transparent : color;
+
+  /// Content sheets laid on the window backdrop.
+  Color sheet(Color color) =>
+      acrylic ? color.withValues(alpha: sheetOpacity) : color;
+
+  /// Floating surfaces painted over a [HarborSurfaceBlur]. An opaque fill
+  /// would hide the blur entirely; without frosting they are fully opaque,
+  /// even when window acrylic made the scheme role translucent.
+  Color floating(Color color) => color.withValues(alpha: frosted ? .72 : 1);
+
+  @override
+  HarborWindowBackdrop copyWith({
+    bool? acrylic,
+    bool? frosted,
+    double? sheetOpacity,
+  }) => HarborWindowBackdrop(
+    acrylic: acrylic ?? this.acrylic,
+    frosted: frosted ?? this.frosted,
+    sheetOpacity: sheetOpacity ?? this.sheetOpacity,
+  );
+
+  @override
+  HarborWindowBackdrop lerp(HarborWindowBackdrop? other, double t) =>
+      other == null || t < 0.5 ? this : other;
+}
+
+extension HarborWindowTheme on ThemeData {
+  HarborWindowBackdrop get windowBackdrop =>
+      extension<HarborWindowBackdrop>() ?? const HarborWindowBackdrop();
+}
+
 ThemeData harborTheme({
   Brightness brightness = Brightness.light,
   bool reduceMotion = false,
   AppThemeColor color = AppThemeColor.defaultColor,
   ColorScheme? dynamicScheme,
+  bool acrylic = false,
+  bool frosted = false,
 }) {
-  final colors = color == AppThemeColor.dynamic && dynamicScheme != null
+  final opaque = color == AppThemeColor.dynamic && dynamicScheme != null
       ? dynamicScheme
       : harborColorScheme(brightness: brightness, color: color);
+  final backdrop = HarborWindowBackdrop(
+    acrylic: acrylic,
+    frosted: frosted,
+    sheetOpacity: brightness == Brightness.dark ? .5 : .6,
+  );
+  final floating = backdrop.floating(opaque.surfaceContainerHigh);
+  // Surface roles also reach custom panels, editor popups and nested cards.
+  // Keep foreground/ANSI/accent roles opaque: transparency belongs to the
+  // background, never the text or the entire widget subtree.
+  final colors = acrylic
+      ? opaque.copyWith(
+          surface: backdrop.sheet(opaque.surface),
+          surfaceDim: backdrop.sheet(opaque.surfaceDim),
+          surfaceBright: backdrop.sheet(opaque.surfaceBright),
+          surfaceContainerLowest: backdrop.sheet(opaque.surfaceContainerLowest),
+          surfaceContainerLow: backdrop.sheet(opaque.surfaceContainerLow),
+          surfaceContainer: backdrop.sheet(opaque.surfaceContainer),
+          surfaceContainerHigh: opaque.surfaceContainerHigh.withValues(
+            alpha: .72,
+          ),
+          surfaceContainerHighest: opaque.surfaceContainerHighest.withValues(
+            alpha: .8,
+          ),
+          inverseSurface: opaque.inverseSurface.withValues(alpha: .9),
+        )
+      : opaque;
   const fallbacks = [
     'Roboto',
     'PingFang SC',
@@ -114,13 +194,14 @@ ThemeData harborTheme({
     ),
   );
   return base.copyWith(
-    scaffoldBackgroundColor: colors.surfaceContainerLow,
+    extensions: [backdrop],
+    scaffoldBackgroundColor: backdrop.chrome(colors.surfaceContainerLow),
     // Pushed pages share the M3 fade-forward motion on every platform.
     pageTransitionsTheme: PageTransitionsTheme(
       builders: {
         for (final platform in TargetPlatform.values)
           platform: FadeForwardsPageTransitionsBuilder(
-            backgroundColor: colors.surface,
+            backgroundColor: backdrop.chrome(colors.surface),
           ),
       },
     ),
@@ -150,7 +231,7 @@ ThemeData harborTheme({
       ),
     ),
     appBarTheme: AppBarTheme(
-      backgroundColor: colors.surface,
+      backgroundColor: backdrop.chrome(colors.surface),
       foregroundColor: colors.onSurface,
       scrolledUnderElevation: 0,
       titleTextStyle: TextStyle(
@@ -168,7 +249,7 @@ ThemeData harborTheme({
       tileHeight: 56,
     ),
     navigationBarTheme: NavigationBarThemeData(
-      backgroundColor: colors.surfaceContainer,
+      backgroundColor: backdrop.chrome(colors.surfaceContainer),
       indicatorColor: colors.secondaryContainer,
       indicatorShape: HarborShapes.pill,
       labelTextStyle: WidgetStatePropertyAll(
@@ -339,11 +420,33 @@ ThemeData harborTheme({
       padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
     ),
     dialogTheme: DialogThemeData(
-      backgroundColor: colors.surfaceContainerHigh,
+      backgroundColor: floating,
+      surfaceTintColor: backdrop.frosted ? Colors.transparent : null,
       shape: HarborShapes.superellipse(HarborShapes.dialog),
     ),
+    // Under window acrylic the default sheet colour is a translucent scheme
+    // role, so sheets need the explicit floating fill either way.
+    bottomSheetTheme: acrylic || backdrop.frosted
+        ? BottomSheetThemeData(
+            backgroundColor: floating,
+            modalBackgroundColor: floating,
+            surfaceTintColor: Colors.transparent,
+            clipBehavior: Clip.antiAlias,
+          )
+        : null,
+    tooltipTheme: acrylic
+        ? TooltipThemeData(
+            decoration: ShapeDecoration(
+              color: colors.inverseSurface.withValues(alpha: frosted ? .9 : 1),
+              shape: HarborShapes.superellipse(BorderRadius.circular(8)),
+            ),
+            textStyle: base.textTheme.bodySmall?.copyWith(
+              color: colors.onInverseSurface,
+            ),
+          )
+        : null,
     popupMenuTheme: PopupMenuThemeData(
-      color: colors.surfaceContainerHigh,
+      color: floating,
       surfaceTintColor: Colors.transparent,
       elevation: 2,
       shape: HarborShapes.superellipse(HarborShapes.tile),
@@ -351,7 +454,7 @@ ThemeData harborTheme({
     ),
     menuTheme: MenuThemeData(
       style: MenuStyle(
-        backgroundColor: WidgetStatePropertyAll(colors.surfaceContainerHigh),
+        backgroundColor: WidgetStatePropertyAll(floating),
         surfaceTintColor: const WidgetStatePropertyAll(Colors.transparent),
         shape: WidgetStatePropertyAll(
           HarborShapes.superellipse(HarborShapes.tile),
@@ -373,7 +476,7 @@ ThemeData harborTheme({
               states.contains(WidgetState.pressed)) {
             return Color.alphaBlend(
               colors.primary.withValues(alpha: .12),
-              colors.surfaceContainerHigh,
+              floating,
             );
           }
           return null;
@@ -392,6 +495,179 @@ ThemeData harborTheme({
     ),
     dividerTheme: DividerThemeData(color: colors.outlineVariant, space: 1),
   );
+}
+
+/// Blurs the already painted background up to the nearest ancestor clip.
+/// Floating surfaces must clip their Material to its outline, not this child:
+/// that lets a zero-height first menu entry frost the whole menu (including
+/// its padding) once, before any text or hover highlight is painted.
+class HarborSurfaceBlur extends StatelessWidget {
+  const HarborSurfaceBlur({super.key, this.child = const SizedBox.shrink()});
+  final Widget child;
+  static final _filter = ui.ImageFilter.blur(sigmaX: 16, sigmaY: 16);
+
+  @override
+  Widget build(BuildContext context) => Theme.of(context).windowBackdrop.frosted
+      ? BackdropFilter(filter: _filter, child: child)
+      : child;
+}
+
+/// Frosts the first shaped [Material] below it, for dialog and bottom sheet
+/// routes. Those widgets build their Material internally, so a blur cannot sit
+/// inside it; this paints one clipped to the surface outline (following route
+/// transforms) and then the route on top, leaving the scrim around it sharp.
+class HarborFrostedRoute extends SingleChildRenderObjectWidget {
+  const HarborFrostedRoute({super.key, required super.child});
+
+  @override
+  RenderObject createRenderObject(BuildContext context) =>
+      _RenderFrostedRoute(Theme.of(context).windowBackdrop.frosted);
+
+  @override
+  void updateRenderObject(BuildContext context, RenderObject renderObject) =>
+      (renderObject as _RenderFrostedRoute).enabled = Theme.of(context)
+          .windowBackdrop
+          .frosted;
+}
+
+class _RenderFrostedRoute extends RenderProxyBox {
+  _RenderFrostedRoute(this._enabled);
+  bool _enabled;
+  set enabled(bool value) {
+    if (value == _enabled) return;
+    _enabled = value;
+    markNeedsCompositingBitsUpdate();
+    markNeedsPaint();
+  }
+
+  final _clip = LayerHandle<ClipPathLayer>();
+  final _blur = LayerHandle<BackdropFilterLayer>();
+
+  @override
+  bool get alwaysNeedsCompositing => _enabled && child != null;
+
+  static RenderPhysicalShape? _surface(RenderObject? node) {
+    if (node is RenderPhysicalShape) return node;
+    RenderPhysicalShape? found;
+    node?.visitChildren((child) => found ??= _surface(child));
+    return found;
+  }
+
+  @override
+  void paint(PaintingContext context, Offset offset) {
+    final surface = _enabled ? _surface(child) : null;
+    final outline = surface != null && surface.hasSize
+        ? surface.clipper?.getClip(surface.size)
+        : null;
+    if (outline == null) {
+      _clip.layer = null;
+      _blur.layer = null;
+    } else {
+      final path = outline.transform(surface!.getTransformTo(this).storage);
+      _clip.layer = context.pushClipPath(
+        true,
+        offset,
+        path.getBounds(),
+        path,
+        (context, offset) => context.pushLayer(
+          _blur.layer ??= BackdropFilterLayer(
+            filter: HarborSurfaceBlur._filter,
+          ),
+          (_, _) {},
+          offset,
+        ),
+        oldLayer: _clip.layer,
+      );
+    }
+    super.paint(context, offset);
+  }
+
+  @override
+  void dispose() {
+    _clip.layer = null;
+    _blur.layer = null;
+    super.dispose();
+  }
+}
+
+/// Non-interactive first entry for legacy popup menus. Height zero preserves
+/// keyboard navigation, selected-item positioning and all action hit targets.
+class HarborPopupMenuBackdrop<T> extends PopupMenuEntry<T> {
+  const HarborPopupMenuBackdrop({super.key});
+
+  @override
+  double get height => 0;
+  @override
+  bool represents(T? value) => false;
+  @override
+  State<HarborPopupMenuBackdrop<T>> createState() =>
+      _HarborPopupMenuBackdropState<T>();
+}
+
+class _HarborPopupMenuBackdropState<T>
+    extends State<HarborPopupMenuBackdrop<T>> {
+  @override
+  Widget build(BuildContext context) => const HarborSurfaceBlur();
+}
+
+/// DropdownMenu owns its MenuAnchor. Use each button's public backgroundBuilder
+/// so filtering or scrolling out the first entry cannot remove the blur. Row
+/// clips never overlap; one shared backdrop key samples before any row text.
+/// The button Material paints its fill before the builder, so the shared
+/// sample would capture (and smear) a highlighted row: row fills are painted
+/// above the blur instead, resolved the way DropdownMenu would.
+List<DropdownMenuEntry<T>> harborDropdownEntries<T>(
+  BuildContext context,
+  List<DropdownMenuEntry<T>> entries,
+) {
+  if (!Theme.of(context).windowBackdrop.frosted || entries.isEmpty) {
+    return entries;
+  }
+  final key = BackdropKey();
+  final themeStyle = MenuButtonTheme.of(context).style;
+  final focusedFill = Theme.of(context).colorScheme.onSurface
+      .withValues(alpha: .12);
+  return [
+    for (final entry in entries)
+      DropdownMenuEntry<T>(
+        value: entry.value,
+        label: entry.label,
+        labelWidget: entry.labelWidget,
+        leadingIcon: entry.leadingIcon,
+        trailingIcon: entry.trailingIcon,
+        enabled: entry.enabled,
+        style: (entry.style ?? const ButtonStyle()).copyWith(
+          backgroundColor: const WidgetStatePropertyAll(Colors.transparent),
+          backgroundBuilder: (context, states, child) {
+            final fill =
+                (entry.style?.backgroundColor ?? themeStyle?.backgroundColor)
+                    ?.resolve(states) ??
+                (states.contains(WidgetState.focused) ? focusedFill : null);
+            final shape = (entry.style?.shape ?? themeStyle?.shape)?.resolve(
+              states,
+            );
+            final content =
+                entry.style?.backgroundBuilder?.call(context, states, child) ??
+                child!;
+            return ClipRect(
+              child: BackdropFilter(
+                filter: HarborSurfaceBlur._filter,
+                backdropGroupKey: key,
+                child: fill == null
+                    ? content
+                    : DecoratedBox(
+                        decoration: ShapeDecoration(
+                          color: fill,
+                          shape: shape ?? const RoundedRectangleBorder(),
+                        ),
+                        child: content,
+                      ),
+              ),
+            );
+          },
+        ),
+      ),
+  ];
 }
 
 /// A popup item with the same inset, rounded hover and focus treatment as
@@ -434,7 +710,7 @@ class _HarborPopupMenuItemState<T>
             color: highlighted
                 ? Color.alphaBlend(
                     colors.primary.withValues(alpha: .12),
-                    colors.surfaceContainerHigh,
+                    theme.windowBackdrop.floating(colors.surfaceContainerHigh),
                   )
                 : Colors.transparent,
             shape: HarborShapes.superellipse(

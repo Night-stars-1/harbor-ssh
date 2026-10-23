@@ -1,3 +1,4 @@
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -8,8 +9,27 @@ import 'package:harbor_ssh/ui/settings_window_bridge.dart';
 import 'package:harbor_ssh/ui/sync_settings_controller.dart';
 import 'package:harbor_ssh/ui/theme.dart';
 import 'package:harbor_ssh/ui/workspace_model.dart';
+import 'package:harbor_ssh/ui/window_frame.dart';
 
 import 'support.dart';
+
+void mockDesktopWindow(WidgetTester tester) {
+  const channel = MethodChannel('window_manager');
+  tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+    channel,
+    (call) async => switch (call.method) {
+      'isMaximized' || 'isFullScreen' || 'isMinimized' => false,
+      'isFocused' => true,
+      _ => null,
+    },
+  );
+  addTearDown(
+    () => tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+      channel,
+      null,
+    ),
+  );
+}
 
 void main() {
   test('主题偏好持久化，重新加载保留模式和颜色', () async {
@@ -120,6 +140,27 @@ void main() {
     restored.dispose();
   });
 
+  test('亚克力背景默认关闭并本地保存，只有显式 true 才开启且不进云同步', () async {
+    final repository = memoryRepository();
+    final model = WorkspaceModel(repository);
+    await model.initialize();
+    expect(model.appearance.value.windowAcrylic, isFalse);
+    expect(
+      AppearancePreferences.fromJson({'windowAcrylic': 'true'}).windowAcrylic,
+      isFalse,
+    );
+    await model.saveAppearance(
+      const AppearancePreferences(windowAcrylic: true),
+    );
+    final restored = WorkspaceModel(repository);
+    await restored.initialize();
+    expect(restored.appearance.value.windowAcrylic, isTrue);
+    final snapshot = await SyncStorage(repository).capture();
+    expect(snapshot.encode(), isNot(contains('windowAcrylic')));
+    model.dispose();
+    restored.dispose();
+  });
+
   testWidgets('设置窗口修改主题同步到主窗口，主窗口设置可回读', (tester) async {
     final model = WorkspaceModel(memoryRepository());
     await model.initialize();
@@ -157,6 +198,9 @@ void main() {
       'terminalFontSize': 14,
       'terminalWrap': true,
       'statusRefreshSeconds': 5,
+      'titleBarNavigation': false,
+      'windowAcrylic': false,
+      'frostedSurfaces': false,
     });
     await remote.saveAppearance(
       const AppearancePreferences(
@@ -234,35 +278,130 @@ void main() {
     });
   }
 
-  testWidgets('外观设置可修改自动换行和状态刷新间隔', (tester) async {
+  for (final acrylicEnabled in [false, true]) {
+    testWidgets('外观设置可修改自动换行、状态刷新和 KDE 原生模糊，模糊 $acrylicEnabled', (
+      tester,
+    ) async {
+      tester.view.physicalSize = const Size(1280, 900);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+      debugDefaultTargetPlatformOverride = TargetPlatform.linux;
+      addTearDown(() => debugDefaultTargetPlatformOverride = null);
+      mockDesktopWindow(tester);
+      final supported = windowAcrylicSupported;
+      windowAcrylicSupported = true;
+      addTearDown(() => windowAcrylicSupported = supported);
+      final model = WorkspaceModel(memoryRepository());
+      await model.saveAppearance(
+        AppearancePreferences(windowAcrylic: acrylicEnabled),
+      );
+      await tester.pumpWidget(HarborApp(model: model));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const ValueKey('settings-button')));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const ValueKey('settings-category-2')));
+      await tester.pumpAndSettle();
+      final acrylic = find.byKey(const ValueKey('window-acrylic'));
+      await tester.ensureVisible(acrylic);
+      await tester.pumpAndSettle();
+      expect(tester.widget<Switch>(acrylic).value, acrylicEnabled);
+      await tester.tap(acrylic);
+      await tester.pumpAndSettle();
+      expect(model.appearance.value.windowAcrylic, !acrylicEnabled);
+      expect(tester.widget<Switch>(acrylic).value, !acrylicEnabled);
+      ThemeData currentTheme() =>
+          Theme.of(tester.element(find.byType(Workspace)));
+      final frosted = find.byKey(const ValueKey('frosted-surfaces'));
+      await tester.ensureVisible(frosted);
+      for (final enabled in [true, false]) {
+        await tester.tap(frosted);
+        await tester.pumpAndSettle();
+        expect(model.appearance.value.frostedSurfaces, enabled);
+        expect(currentTheme().windowBackdrop.frosted, enabled);
+        expect(currentTheme().windowBackdrop.acrylic, !acrylicEnabled);
+        expect(
+          currentTheme().menuTheme.style?.backgroundColor?.resolve({})?.a,
+          enabled ? lessThan(1) : 1,
+        );
+        expect(
+          currentTheme().dialogTheme.backgroundColor?.a,
+          enabled ? lessThan(1) : 1,
+        );
+        if (!acrylicEnabled) {
+          expect(
+            currentTheme().bottomSheetTheme.modalBackgroundColor?.a,
+            enabled ? lessThan(1) : 1,
+          );
+        }
+      }
+      final restored = WorkspaceModel(model.repository);
+      await restored.initialize();
+      expect(restored.appearance.value.windowAcrylic, !acrylicEnabled);
+      expect(restored.appearance.value.frostedSurfaces, isFalse);
+      restored.dispose();
+      final wrap = find.byKey(const ValueKey('terminal-wrap'));
+      await tester.ensureVisible(wrap);
+      await tester.pumpAndSettle();
+      expect(tester.widget<Switch>(wrap).value, isTrue);
+      await tester.tap(wrap);
+      await tester.pumpAndSettle();
+      expect(model.appearance.value.terminalWrap, isFalse);
+      expect(tester.widget<Switch>(wrap).value, isFalse);
+      final refresh = find.byKey(const ValueKey('status-refresh-interval'));
+      await tester.ensureVisible(refresh);
+      await tester.tap(refresh);
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('10 秒').last);
+      await tester.pumpAndSettle();
+      expect(model.appearance.value.statusRefreshSeconds, 10);
+      expect(tester.takeException(), isNull);
+      await tester.pumpWidget(const SizedBox.shrink());
+      debugDefaultTargetPlatformOverride = null;
+    });
+  }
+
+  testWidgets('Linux 原生模糊不可用时隐藏开关并保持窗口不透明，浮层毛玻璃仍可单独开启', (tester) async {
     tester.view.physicalSize = const Size(1280, 900);
     tester.view.devicePixelRatio = 1;
     addTearDown(tester.view.resetPhysicalSize);
     addTearDown(tester.view.resetDevicePixelRatio);
+    debugDefaultTargetPlatformOverride = TargetPlatform.linux;
+    addTearDown(() => debugDefaultTargetPlatformOverride = null);
+    mockDesktopWindow(tester);
+    final supported = windowAcrylicSupported;
+    windowAcrylicSupported = false;
+    addTearDown(() => windowAcrylicSupported = supported);
     final model = WorkspaceModel(memoryRepository());
+    await model.saveAppearance(
+      const AppearancePreferences(windowAcrylic: true),
+    );
     await tester.pumpWidget(HarborApp(model: model));
     await tester.pumpAndSettle();
+    ThemeData currentTheme() =>
+        Theme.of(tester.element(find.byType(Workspace)));
+    expect(currentTheme().windowBackdrop.acrylic, isFalse);
+    expect(currentTheme().windowBackdrop.frosted, isFalse);
+    expect(currentTheme().menuTheme.style?.backgroundColor?.resolve({})?.a, 1);
     await tester.tap(find.byKey(const ValueKey('settings-button')));
     await tester.pumpAndSettle();
     await tester.tap(find.byKey(const ValueKey('settings-category-2')));
     await tester.pumpAndSettle();
-    final wrap = find.byKey(const ValueKey('terminal-wrap'));
-    await tester.ensureVisible(wrap);
+    expect(find.byKey(const ValueKey('window-acrylic')), findsNothing);
+    final frosted = find.byKey(const ValueKey('frosted-surfaces'));
+    await tester.ensureVisible(frosted);
+    await tester.tap(frosted);
     await tester.pumpAndSettle();
-    expect(tester.widget<Switch>(wrap).value, isTrue);
-    await tester.tap(wrap);
-    await tester.pumpAndSettle();
-    expect(model.appearance.value.terminalWrap, isFalse);
-    expect(tester.widget<Switch>(wrap).value, isFalse);
-    final refresh = find.byKey(const ValueKey('status-refresh-interval'));
-    await tester.ensureVisible(refresh);
-    await tester.tap(refresh);
-    await tester.pumpAndSettle();
-    await tester.tap(find.text('10 秒').last);
-    await tester.pumpAndSettle();
-    expect(model.appearance.value.statusRefreshSeconds, 10);
-    expect(tester.widget<DropdownButton<int>>(refresh).value, 10);
+    expect(model.appearance.value.frostedSurfaces, isTrue);
+    expect(currentTheme().windowBackdrop.acrylic, isFalse);
+    expect(currentTheme().windowBackdrop.frosted, isTrue);
+    expect(
+      currentTheme().menuTheme.style?.backgroundColor?.resolve({})?.a,
+      lessThan(1),
+    );
+    expect(currentTheme().scaffoldBackgroundColor.a, 1);
     expect(tester.takeException(), isNull);
     await tester.pumpWidget(const SizedBox.shrink());
+    debugDefaultTargetPlatformOverride = null;
   });
 }

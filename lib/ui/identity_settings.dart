@@ -204,9 +204,14 @@ class _IdentitySettingsState extends State<IdentitySettings> {
     );
     final action = await showMenu<String>(
       context: context,
+      clipBehavior: Theme.of(context).windowBackdrop.frosted
+          ? Clip.antiAlias
+          : Clip.none,
       popUpAnimationStyle: HarborMotion.popup(context),
       position: RelativeRect.fromLTRB(anchorX, point.dy, anchorX, 0),
       items: [
+        if (Theme.of(context).windowBackdrop.frosted)
+          const HarborPopupMenuBackdrop<String>(),
         HarborPopupMenuItem(
           key: const ValueKey('identity-rename'),
           value: 'rename',
@@ -555,7 +560,7 @@ class _IdentityRuleEditorState extends State<IdentityRuleEditor> {
                     label: const Text('SSH 连接'),
                     hintText: '搜索名称或地址',
                     alignmentOffset: const Offset(0, 4),
-                    dropdownMenuEntries: [
+                    dropdownMenuEntries: harborDropdownEntries(context, [
                       for (final host in widget.hosts)
                         DropdownMenuEntry(
                           value: host.id,
@@ -582,7 +587,7 @@ class _IdentityRuleEditorState extends State<IdentityRuleEditor> {
                             ],
                           ),
                         ),
-                    ],
+                    ]),
                     onSelected: (id) => setState(() => _hostId = id),
                     validator: (_) => _host == null ? '请选择连接' : null,
                   ),

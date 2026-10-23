@@ -5,6 +5,7 @@ import 'settings_widgets.dart';
 import 'sync_settings_controller.dart';
 import 'theme.dart';
 import 'system_color_scope.dart';
+import 'window_frame.dart';
 
 class AppearanceSettings extends StatefulWidget {
   const AppearanceSettings({super.key, required this.controller});
@@ -113,6 +114,65 @@ class _AppearanceSettingsState extends State<AppearanceSettings> {
           ),
           const SizedBox(height: 24),
           SettingsGroup(
+            title: '效果',
+            children: [
+              if (windowAcrylicSupported)
+                SettingsRow(
+                  title: usesLinuxTitleBar ? 'KDE 原生背景模糊' : '背景透明效果',
+                  description: usesLinuxTitleBar
+                      ? '窗口透出桌面并由 KWin 模糊，需要开启 KWin 模糊效果；所有窗口生效。只保存在本机'
+                      : '窗口透出桌面并模糊',
+                  inline: true,
+                  control: Switch.adaptive(
+                    key: const ValueKey('window-acrylic'),
+                    value: appearance.windowAcrylic,
+                    onChanged: _saving
+                        ? null
+                        : (enabled) => _save(
+                            appearance.copyWith(windowAcrylic: enabled),
+                          ),
+                  ),
+                ),
+              SettingsRow(
+                title: '浮层透明效果',
+                description: '浮层背景高斯模糊',
+                inline: true,
+                control: Switch.adaptive(
+                  key: const ValueKey('frosted-surfaces'),
+                  value: appearance.frostedSurfaces,
+                  onChanged: _saving
+                      ? null
+                      : (enabled) => _save(
+                          appearance.copyWith(frostedSurfaces: enabled),
+                        ),
+                ),
+              ),
+            ],
+          ),
+          if (usesCustomTitleBar) ...[
+            const SizedBox(height: 24),
+            SettingsGroup(
+              title: '布局',
+              children: [
+                SettingsRow(
+                  title: '导航放到标题栏',
+                  description: '侧栏导航图标移到标题栏右侧，侧栏只显示会话，并可从标题栏左侧折叠',
+                  inline: true,
+                  control: Switch.adaptive(
+                    key: const ValueKey('title-bar-navigation'),
+                    value: appearance.titleBarNavigation,
+                    onChanged: _saving
+                        ? null
+                        : (enabled) => _save(
+                            appearance.copyWith(titleBarNavigation: enabled),
+                          ),
+                  ),
+                ),
+              ],
+            ),
+          ],
+          const SizedBox(height: 24),
+          SettingsGroup(
             title: '终端',
             children: [
               SettingsRow(
@@ -176,31 +236,23 @@ class _AppearanceSettingsState extends State<AppearanceSettings> {
                 title: '状态刷新间隔',
                 description: 'CPU、内存、存储和网络状态。只保存在本机',
                 inline: true,
-                control: DropdownButtonHideUnderline(
-                  child: DropdownButton<int>(
-                    key: const ValueKey('status-refresh-interval'),
-                    value: appearance.statusRefreshSeconds,
-                    borderRadius: HarborShapes.tile,
-                    onChanged: _saving
-                        ? null
-                        : (seconds) {
-                            if (seconds != null &&
-                                seconds != appearance.statusRefreshSeconds) {
-                              _save(
-                                appearance.copyWith(
-                                  statusRefreshSeconds: seconds,
-                                ),
-                              );
-                            }
-                          },
-                    items: [
-                      for (final seconds in statusRefreshIntervalOptions)
-                        DropdownMenuItem(
-                          value: seconds,
-                          child: Text('$seconds 秒'),
-                        ),
-                    ],
-                  ),
+                control: DropdownMenu<int>(
+                  key: const ValueKey('status-refresh-interval'),
+                  initialSelection: appearance.statusRefreshSeconds,
+                  width: 104,
+                  selectOnly: true,
+                  enableSearch: false,
+                  enabled: !_saving,
+                  onSelected: (seconds) {
+                    if (seconds != null &&
+                        seconds != appearance.statusRefreshSeconds) {
+                      _save(appearance.copyWith(statusRefreshSeconds: seconds));
+                    }
+                  },
+                  dropdownMenuEntries: harborDropdownEntries(context, [
+                    for (final seconds in statusRefreshIntervalOptions)
+                      DropdownMenuEntry(value: seconds, label: '$seconds 秒'),
+                  ]),
                 ),
               ),
             ],

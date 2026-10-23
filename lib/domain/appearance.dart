@@ -24,6 +24,9 @@ class AppearancePreferences {
     this.terminalFontSize = 14,
     this.terminalWrap = true,
     this.statusRefreshSeconds = 5,
+    this.titleBarNavigation = false,
+    this.windowAcrylic = false,
+    this.frostedSurfaces = false,
   });
   final AppThemeMode mode;
   final AppThemeColor color;
@@ -36,18 +39,38 @@ class AppearancePreferences {
   /// Remote status sampling cadence. Stored only on this device.
   final int statusRefreshSeconds;
 
+  /// Desktop only: navigation icons live in the custom title bar and the side
+  /// panel lists sessions only. Stored only on this device.
+  final bool titleBarNavigation;
+
+  /// Desktop only: the window shows the native system backdrop through
+  /// translucent app surfaces. Windows uses acrylic material, macOS uses
+  /// vibrancy, and Linux uses KDE/KWin background blur when available.
+  /// Stored only on this device.
+  final bool windowAcrylic;
+
+  /// Menus, dialogs and sheets are translucent and blur the app content
+  /// below them. Independent of [windowAcrylic]. Stored only on this device.
+  final bool frostedSurfaces;
+
   AppearancePreferences copyWith({
     AppThemeMode? mode,
     AppThemeColor? color,
     int? terminalFontSize,
     bool? terminalWrap,
     int? statusRefreshSeconds,
+    bool? titleBarNavigation,
+    bool? windowAcrylic,
+    bool? frostedSurfaces,
   }) => AppearancePreferences(
     mode: mode ?? this.mode,
     color: color ?? this.color,
     terminalFontSize: terminalFontSize ?? this.terminalFontSize,
     terminalWrap: terminalWrap ?? this.terminalWrap,
     statusRefreshSeconds: statusRefreshSeconds ?? this.statusRefreshSeconds,
+    titleBarNavigation: titleBarNavigation ?? this.titleBarNavigation,
+    windowAcrylic: windowAcrylic ?? this.windowAcrylic,
+    frostedSurfaces: frostedSurfaces ?? this.frostedSurfaces,
   );
 
   Map<String, Object> toJson() => {
@@ -56,6 +79,9 @@ class AppearancePreferences {
     'terminalFontSize': terminalFontSize,
     'terminalWrap': terminalWrap,
     'statusRefreshSeconds': statusRefreshSeconds,
+    'titleBarNavigation': titleBarNavigation,
+    'windowAcrylic': windowAcrylic,
+    'frostedSurfaces': frostedSurfaces,
   };
 
   factory AppearancePreferences.fromJson(
@@ -72,6 +98,9 @@ class AppearancePreferences {
     terminalFontSize: _fontSize(json['terminalFontSize']),
     terminalWrap: json['terminalWrap'] != false,
     statusRefreshSeconds: _statusRefreshSeconds(json['statusRefreshSeconds']),
+    titleBarNavigation: json['titleBarNavigation'] == true,
+    windowAcrylic: json['windowAcrylic'] == true,
+    frostedSurfaces: json['frostedSurfaces'] == true,
   );
   static int _fontSize(Object? value) {
     final size = value is num ? value.round() : int.tryParse('$value');

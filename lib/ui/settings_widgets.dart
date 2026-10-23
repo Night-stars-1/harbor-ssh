@@ -44,32 +44,36 @@ class SettingsNotice extends StatelessWidget {
     return Center(
       heightFactor: 1,
       child: Material(
-        color: error ? colors.errorContainer : colors.primaryContainer,
+        color: (error ? colors.errorContainer : colors.primaryContainer)
+            .withValues(alpha: theme.windowBackdrop.frosted ? .82 : 1),
         shape: HarborShapes.superellipse(BorderRadius.circular(24)),
-        child: Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 14),
-          child: Row(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              Icon(
-                error
-                    ? Icons.error_outline_rounded
-                    : Icons.check_circle_outline_rounded,
-                size: 22,
-                color: foreground,
-                semanticLabel: error ? '错误' : '成功',
-              ),
-              const SizedBox(width: 10),
-              Flexible(
-                child: Text(
-                  message,
-                  style: theme.textTheme.bodyMedium?.copyWith(
-                    color: foreground,
-                    fontWeight: FontWeight.w500,
+        clipBehavior: Clip.antiAlias,
+        child: HarborSurfaceBlur(
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 14),
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Icon(
+                  error
+                      ? Icons.error_outline_rounded
+                      : Icons.check_circle_outline_rounded,
+                  size: 22,
+                  color: foreground,
+                  semanticLabel: error ? '错误' : '成功',
+                ),
+                const SizedBox(width: 10),
+                Flexible(
+                  child: Text(
+                    message,
+                    style: theme.textTheme.bodyMedium?.copyWith(
+                      color: foreground,
+                      fontWeight: FontWeight.w500,
+                    ),
                   ),
                 ),
-              ),
-            ],
+              ],
+            ),
           ),
         ),
       ),

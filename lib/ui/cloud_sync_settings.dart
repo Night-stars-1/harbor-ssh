@@ -254,7 +254,7 @@ class _CloudSyncSettingsState extends State<CloudSyncSettings> {
                     trailingIcon: const Icon(Icons.expand_more_rounded),
                     selectedTrailingIcon: const Icon(Icons.expand_less_rounded),
                     alignmentOffset: const Offset(0, 4),
-                    dropdownMenuEntries: [
+                    dropdownMenuEntries: harborDropdownEntries(context, [
                       for (final provider
                           in preferGitHubSync
                               ? const [SyncProvider.gist, SyncProvider.webdav]
@@ -285,7 +285,7 @@ class _CloudSyncSettingsState extends State<CloudSyncSettings> {
                             textStyle: theme.textTheme.bodyLarge,
                           ),
                         ),
-                    ],
+                    ]),
                     onSelected: (value) {
                       if (value != null) setState(() => _provider = value);
                     },

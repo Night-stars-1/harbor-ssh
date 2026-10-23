@@ -1,7 +1,9 @@
 import 'dart:async';
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/gestures.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:harbor_ssh/ui/app.dart';
 import 'package:harbor_ssh/ui/terminal_pane.dart';
@@ -10,6 +12,7 @@ import 'package:harbor_ssh/data/public_key_install.dart';
 import 'package:harbor_ssh/data/ssh_connection.dart';
 import 'package:harbor_ssh/data/ssh_keys.dart';
 import 'package:xterm/xterm.dart';
+import 'package:harbor_ssh/domain/appearance.dart';
 import 'package:harbor_ssh/domain/host.dart';
 import 'package:harbor_ssh/ui/workspace_model.dart';
 
@@ -372,6 +375,112 @@ void main() {
     expect(tester.getSize(sidebar).width, 220);
     expect(tester.takeException(), isNull);
     await tester.pumpWidget(const SizedBox.shrink());
+  });
+
+  testWidgets('导航放到标题栏：侧栏只剩会话，可从标题栏折叠，切换不重建终端', (tester) async {
+    tester.view.physicalSize = const Size(1280, 800);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    debugDefaultTargetPlatformOverride = TargetPlatform.windows;
+    addTearDown(() => debugDefaultTargetPlatformOverride = null);
+    const channel = MethodChannel('window_manager');
+    tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+      channel,
+      (call) async => call.method == 'isFocused' ? true : false,
+    );
+    addTearDown(
+      () => tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+        channel,
+        null,
+      ),
+    );
+    final session = SshConnection(id: 'title-bar', host: testHost)
+      ..status = ConnectionStatus.connected;
+    session.terminal.write('retained output');
+    final model = _SidebarWorkspaceModel([session]);
+    await tester.pumpWidget(HarborApp(model: model));
+    await tester.pumpAndSettle();
+    final sidebar = find.byKey(const ValueKey('workspace-sidebar'));
+    final bar = find.byKey(const ValueKey('windows-title-bar'));
+    final toggle = find.byKey(const ValueKey('sidebar-toggle'));
+    final terminalState = tester.state(find.byType(TerminalView));
+    expect(find.descendant(of: sidebar, matching: find.text('标签')), findsOne);
+
+    await model.saveAppearance(
+      const AppearancePreferences(titleBarNavigation: true),
+    );
+    await tester.pumpAndSettle();
+    expect(tester.state(find.byType(TerminalView)), same(terminalState));
+    for (final id in ['all-hosts', 'favorites', 'users', 'files']) {
+      expect(
+        find.descendant(
+          of: bar,
+          matching: find.byKey(ValueKey('title-bar-$id')),
+        ),
+        findsOneWidget,
+      );
+    }
+    expect(
+      find.descendant(
+        of: bar,
+        matching: find.byKey(const ValueKey('settings-button')),
+      ),
+      findsOneWidget,
+    );
+    expect(find.descendant(of: bar, matching: toggle), findsOneWidget);
+    expect(
+      find.descendant(of: sidebar, matching: find.text('标签')),
+      findsNothing,
+    );
+    expect(
+      find.descendant(of: sidebar, matching: find.text('所有连接')),
+      findsNothing,
+    );
+    expect(
+      find.descendant(of: sidebar, matching: find.text(testHost.name)),
+      findsOneWidget,
+    );
+    // The bar sits above the navigator; its tooltips need their own overlay.
+    await tester.longPress(find.byKey(const ValueKey('title-bar-users')));
+    await tester.pumpAndSettle();
+    expect(tester.takeException(), isNull);
+
+    await tester.tap(toggle);
+    await tester.pumpAndSettle();
+    expect(sidebar, findsNothing);
+    expect(tester.state(find.byType(TerminalView)), same(terminalState));
+    await tester.tap(toggle);
+    await tester.pumpAndSettle();
+    expect(tester.getSize(sidebar).width, 264);
+
+    await tester.tap(find.byKey(const ValueKey('title-bar-users')));
+    await tester.pumpAndSettle();
+    expect(model.showingUsers, isTrue);
+    await tester.tap(
+      find.descendant(of: sidebar, matching: find.text(testHost.name)),
+    );
+    await tester.pumpAndSettle();
+    expect(model.activeSessionId, session.id);
+    expect(tester.state(find.byType(TerminalView)), same(terminalState));
+
+    // Narrow windows fall back to the mobile layout and its own navigation.
+    tester.view.physicalSize = const Size(390, 844);
+    await tester.pumpAndSettle();
+    expect(find.byKey(const ValueKey('title-bar-users')), findsNothing);
+    expect(find.byKey(const ValueKey('sidebar-toggle')), findsNothing);
+    tester.view.physicalSize = const Size(1280, 800);
+    await tester.pumpAndSettle();
+
+    await model.saveAppearance(const AppearancePreferences());
+    await tester.pumpAndSettle();
+    expect(find.byKey(const ValueKey('title-bar-users')), findsNothing);
+    expect(find.descendant(of: sidebar, matching: find.text('标签')), findsOne);
+    expect(find.descendant(of: sidebar, matching: toggle), findsOneWidget);
+    expect(session.terminal.buffer.lines[0].getText(), 'retained output');
+    expect(tester.takeException(), isNull);
+    await tester.pumpWidget(const SizedBox.shrink());
+    debugDefaultTargetPlatformOverride = null;
   });
 
   testWidgets('侧边栏右键仅操作目标会话，断开保留记录，关闭沿用确认', (tester) async {

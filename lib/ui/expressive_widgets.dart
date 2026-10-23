@@ -283,8 +283,60 @@ Future<T?> showExpressiveDialog<T>({
     duration: expressiveDuration(context, emphasized: true),
     reverseDuration: expressiveDuration(context),
   ),
-  builder: (context) => _DialogEntrance(child: Builder(builder: builder)),
+  builder: (context) => HarborFrostedRoute(
+    child: _DialogEntrance(child: Builder(builder: builder)),
+  ),
 );
+
+/// [showModalBottomSheet] whose sheet frosts what lies behind it when floating
+/// surfaces are frosted. The sheet's Material is built by the route, so the blur is
+/// added around the route page rather than inside [builder].
+Future<T?> showExpressiveBottomSheet<T>({
+  required BuildContext context,
+  required WidgetBuilder builder,
+}) {
+  final navigator = Navigator.of(context);
+  final localizations = MaterialLocalizations.of(context);
+  return navigator.push(
+    _FrostedSheetRoute<T>(
+      builder: builder,
+      capturedThemes: InheritedTheme.capture(
+        from: context,
+        to: navigator.context,
+      ),
+      isScrollControlled: true,
+      useSafeArea: true,
+      showDragHandle: true,
+      barrierLabel: localizations.scrimLabel,
+      barrierOnTapHint: localizations.scrimOnTapHint(
+        localizations.bottomSheetLabel,
+      ),
+      modalBarrierColor: Theme.of(context).bottomSheetTheme.modalBarrierColor,
+    ),
+  );
+}
+
+class _FrostedSheetRoute<T> extends ModalBottomSheetRoute<T> {
+  _FrostedSheetRoute({
+    required super.builder,
+    super.capturedThemes,
+    super.barrierLabel,
+    super.barrierOnTapHint,
+    super.modalBarrierColor,
+    super.showDragHandle,
+    required super.isScrollControlled,
+    super.useSafeArea,
+  });
+
+  @override
+  Widget buildPage(
+    BuildContext context,
+    Animation<double> animation,
+    Animation<double> secondaryAnimation,
+  ) => HarborFrostedRoute(
+    child: super.buildPage(context, animation, secondaryAnimation),
+  );
+}
 
 class _DialogEntrance extends StatefulWidget {
   const _DialogEntrance({required this.child});
@@ -716,13 +768,20 @@ class _ConnectionTileState extends State<_ConnectionTile>
     try {
       final action = await showMenu<String>(
         context: context,
+        clipBehavior: Theme.of(context).windowBackdrop.frosted
+            ? Clip.antiAlias
+            : Clip.none,
         semanticLabel: widget.menuLabel,
         popUpAnimationStyle: HarborMotion.popup(context),
         position: RelativeRect.fromRect(
           Rect.fromLTWH(anchor.dx, anchor.dy, 0, 0),
           Offset.zero & overlay.size,
         ),
-        items: widget.menuItems,
+        items: [
+          if (Theme.of(context).windowBackdrop.frosted)
+            const HarborPopupMenuBackdrop<String>(),
+          ...widget.menuItems,
+        ],
       );
       if (!mounted) return;
       _focus.requestFocus();

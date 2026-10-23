@@ -6,10 +6,13 @@
 #endif
 
 #include "flutter/generated_plugin_registrant.h"
+#include "window_effect.h"
 
 struct _MyApplication {
   GtkApplication parent_instance;
   char** dart_entrypoint_arguments;
+  harbor::WindowEffect* window_effect;
+  FlMethodChannel* window_effect_channel;
 };
 
 G_DEFINE_TYPE(MyApplication, my_application, GTK_TYPE_APPLICATION)
@@ -19,9 +22,90 @@ static void first_frame_cb(MyApplication* self, FlView* view) {
   gtk_widget_show(gtk_widget_get_toplevel(GTK_WIDGET(view)));
 }
 
+// Implements the harbor/window_effect channel shared with the Flutter side.
+// `supported` reports whether the compositor can apply native blur, and
+// `setAcrylic` enables it; both never make the window translucent unless the
+// native effect was actually applied.
+static void window_effect_method_call(FlMethodChannel* /*channel*/,
+                                      FlMethodCall* method_call,
+                                      gpointer user_data) {
+  MyApplication* self = MY_APPLICATION(user_data);
+  const gchar* method = fl_method_call_get_name(method_call);
+
+  g_autoptr(FlMethodResponse) response = nullptr;
+  if (g_strcmp0(method, "supported") == 0) {
+    const bool supported =
+        self->window_effect != nullptr && self->window_effect->IsSupported();
+    g_autoptr(FlValue) result = fl_value_new_bool(supported);
+    response =
+        FL_METHOD_RESPONSE(fl_method_success_response_new(result));
+  } else if (g_strcmp0(method, "setAcrylic") == 0) {
+    bool enabled = false;
+    bool dark = false;
+    FlValue* args = fl_method_call_get_args(method_call);
+    if (args != nullptr && fl_value_get_type(args) == FL_VALUE_TYPE_MAP) {
+      FlValue* value = fl_value_lookup_string(args, "enabled");
+      if (value != nullptr && fl_value_get_type(value) == FL_VALUE_TYPE_BOOL) {
+        enabled = fl_value_get_bool(value);
+      }
+      value = fl_value_lookup_string(args, "dark");
+      if (value != nullptr && fl_value_get_type(value) == FL_VALUE_TYPE_BOOL) {
+        dark = fl_value_get_bool(value);
+      }
+    }
+    const bool applied = self->window_effect != nullptr &&
+                         self->window_effect->SetEnabled(enabled, dark);
+    g_autoptr(FlValue) result = fl_value_new_bool(applied);
+    response =
+        FL_METHOD_RESPONSE(fl_method_success_response_new(result));
+  } else {
+    response = FL_METHOD_RESPONSE(fl_method_not_implemented_response_new());
+  }
+
+  g_autoptr(GError) error = nullptr;
+  if (!fl_method_call_respond(method_call, response, &error)) {
+    g_warning("Failed to respond to window effect method: %s",
+              error->message);
+  }
+}
+
+static void setup_window_effect_channel(MyApplication* self, FlView* view) {
+  FlEngine* engine = fl_view_get_engine(view);
+  if (engine == nullptr) {
+    return;
+  }
+  FlBinaryMessenger* messenger = fl_engine_get_binary_messenger(engine);
+  if (messenger == nullptr) {
+    return;
+  }
+  g_autoptr(FlStandardMethodCodec) codec = fl_standard_method_codec_new();
+  self->window_effect_channel = fl_method_channel_new(
+      messenger, "harbor/window_effect", FL_METHOD_CODEC(codec));
+  fl_method_channel_set_method_call_handler(
+      self->window_effect_channel, window_effect_method_call, self, nullptr);
+}
+
 // Implements GApplication::activate.
 static void my_application_activate(GApplication* application) {
   MyApplication* self = MY_APPLICATION(application);
+  // The runner hosts exactly one Flutter engine on Linux; a repeated activate
+  // must not build a second window whose channels would outlive the old state.
+  GtkWindow* existing_window =
+      gtk_application_get_active_window(GTK_APPLICATION(application));
+  if (existing_window == nullptr) {
+    // The window may exist but not be "active" yet (created just before its
+    // first frame). Any existing window means the engine already owns the
+    // channel state, so present instead of building a second window.
+    GList* windows = gtk_application_get_windows(GTK_APPLICATION(application));
+    if (windows != nullptr) {
+      existing_window = GTK_WINDOW(windows->data);
+    }
+  }
+  if (existing_window != nullptr) {
+    gtk_window_present(existing_window);
+    return;
+  }
+
   GtkWindow* window =
       GTK_WINDOW(gtk_application_window_new(GTK_APPLICATION(application)));
 
@@ -64,6 +148,11 @@ static void my_application_activate(GApplication* application) {
   // for transparent.
   gdk_rgba_parse(&background_color, "#000000");
   fl_view_set_background_color(view, &background_color);
+
+  // Prepare the alpha-capable visual before realize. The effect only makes the
+  // window translucent once the compositor accepted the native blur request.
+  self->window_effect = new harbor::WindowEffect(window, view);
+  self->window_effect->PrepareBeforeRealize();
   gtk_widget_show(GTK_WIDGET(view));
   gtk_container_add(GTK_CONTAINER(window), GTK_WIDGET(view));
 
@@ -74,6 +163,7 @@ static void my_application_activate(GApplication* application) {
   gtk_widget_realize(GTK_WIDGET(view));
 
   fl_register_plugins(FL_PLUGIN_REGISTRY(view));
+  setup_window_effect_channel(self, view);
 
   gtk_widget_grab_focus(GTK_WIDGET(view));
 }
@@ -120,6 +210,9 @@ static void my_application_shutdown(GApplication* application) {
 // Implements GObject::dispose.
 static void my_application_dispose(GObject* object) {
   MyApplication* self = MY_APPLICATION(object);
+  g_clear_pointer(&self->window_effect_channel, g_object_unref);
+  delete self->window_effect;
+  self->window_effect = nullptr;
   g_clear_pointer(&self->dart_entrypoint_arguments, g_strfreev);
   G_OBJECT_CLASS(my_application_parent_class)->dispose(object);
 }

@@ -420,7 +420,8 @@ class _TerminalCompletionListState extends State<TerminalCompletionList> {
     final colors = Theme.of(context).colorScheme;
     return Material(
       key: const ValueKey('completion-details'),
-      color: colors.surfaceContainerHigh,
+      color: Theme.of(context).windowBackdrop
+          .floating(colors.surfaceContainerHigh),
       shape: HarborShapes.superellipse(
         const BorderRadius.only(
           topLeft: HarborShapes.xl,
@@ -430,67 +431,69 @@ class _TerminalCompletionListState extends State<TerminalCompletionList> {
         ),
       ),
       clipBehavior: Clip.antiAlias,
-      child: SingleChildScrollView(
-        padding: const EdgeInsets.all(14),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Row(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Flexible(
-                  child: Text(
-                    entry.label,
-                    softWrap: true,
-                    style: Theme.of(context).textTheme.titleSmall,
-                  ),
-                ),
-                const SizedBox(width: 8),
-                DecoratedBox(
-                  decoration: BoxDecoration(
-                    color: colors.tertiaryContainer,
-                    borderRadius: BorderRadius.circular(100),
-                  ),
-                  child: Padding(
-                    padding: const EdgeInsets.symmetric(
-                      horizontal: 8,
-                      vertical: 2,
-                    ),
+      child: HarborSurfaceBlur(
+        child: SingleChildScrollView(
+          padding: const EdgeInsets.all(14),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Flexible(
                     child: Text(
-                      entry.typeLabel,
-                      style: Theme.of(context).textTheme.labelSmall
-                          ?.copyWith(color: colors.onTertiaryContainer),
+                      entry.label,
+                      softWrap: true,
+                      style: Theme.of(context).textTheme.titleSmall,
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  DecoratedBox(
+                    decoration: BoxDecoration(
+                      color: colors.tertiaryContainer,
+                      borderRadius: BorderRadius.circular(100),
+                    ),
+                    child: Padding(
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 8,
+                        vertical: 2,
+                      ),
+                      child: Text(
+                        entry.typeLabel,
+                        style: Theme.of(context).textTheme.labelSmall
+                            ?.copyWith(color: colors.onTertiaryContainer),
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+              if (entry.description.isNotEmpty) ...[
+                const SizedBox(height: 8),
+                Text(
+                  entry.description,
+                  style: Theme.of(context).textTheme.bodySmall,
+                ),
+              ],
+              if (entry.usage.isNotEmpty) ...[
+                const SizedBox(height: 10),
+                Container(
+                  width: double.infinity,
+                  padding: const EdgeInsets.all(8),
+                  decoration: BoxDecoration(
+                    color: colors.surfaceContainerHighest,
+                    borderRadius: const BorderRadius.all(HarborShapes.sm),
+                  ),
+                  child: Text(
+                    entry.usage,
+                    style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                      fontFamily: 'monospace',
+                      color: colors.onSurfaceVariant,
                     ),
                   ),
                 ),
               ],
-            ),
-            if (entry.description.isNotEmpty) ...[
-              const SizedBox(height: 8),
-              Text(
-                entry.description,
-                style: Theme.of(context).textTheme.bodySmall,
-              ),
             ],
-            if (entry.usage.isNotEmpty) ...[
-              const SizedBox(height: 10),
-              Container(
-                width: double.infinity,
-                padding: const EdgeInsets.all(8),
-                decoration: BoxDecoration(
-                  color: colors.surfaceContainerHighest,
-                  borderRadius: const BorderRadius.all(HarborShapes.sm),
-                ),
-                child: Text(
-                  entry.usage,
-                  style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                    fontFamily: 'monospace',
-                    color: colors.onSurfaceVariant,
-                  ),
-                ),
-              ),
-            ],
-          ],
+          ),
         ),
       ),
     );
@@ -500,140 +503,149 @@ class _TerminalCompletionListState extends State<TerminalCompletionList> {
     final colors = Theme.of(context).colorScheme;
     final completion = widget.completion;
     return Material(
-      color: colors.surfaceContainerHigh,
+      color: Theme.of(context).windowBackdrop
+          .floating(colors.surfaceContainerHigh),
       shape: HarborShapes.superellipse(),
       clipBehavior: Clip.antiAlias,
-      child: LayoutBuilder(
-        builder: (context, constraints) => Column(
-          children: [
-            Expanded(
-              child: ListView.builder(
-                controller: _scroll,
-                padding: EdgeInsets.zero,
-                itemExtent: 48,
-                itemCount: completion.entries.length,
-                itemBuilder: (context, index) {
-                  final entry = completion.entries[index];
-                  final described = entry.description.isNotEmpty;
-                  final selected = completion.selected == index;
-                  final foreground = colors.onSurface;
-                  return MouseRegion(
-                    onHover: (_) => completion.select(index),
-                    child: Semantics(
-                      selected: completion.selected == index,
-                      button: true,
-                      child: InkWell(
-                        borderRadius: const BorderRadius.all(HarborShapes.sm),
-                        canRequestFocus: false,
-                        onTap: () => widget.onAccept(index),
-                        child: Container(
-                          margin: const EdgeInsets.symmetric(
-                            horizontal: 4,
-                            vertical: 2,
-                          ),
-                          decoration: BoxDecoration(
-                            color: selected
-                                ? Color.alphaBlend(
-                                    colors.primary.withValues(alpha: 0.12),
-                                    colors.surfaceContainerHigh,
-                                  )
-                                : Colors.transparent,
-                            borderRadius: const BorderRadius.all(
-                              HarborShapes.sm,
+      child: HarborSurfaceBlur(
+        child: LayoutBuilder(
+          builder: (context, constraints) => Column(
+            children: [
+              Expanded(
+                child: ListView.builder(
+                  controller: _scroll,
+                  padding: EdgeInsets.zero,
+                  itemExtent: 48,
+                  itemCount: completion.entries.length,
+                  itemBuilder: (context, index) {
+                    final entry = completion.entries[index];
+                    final described = entry.description.isNotEmpty;
+                    final selected = completion.selected == index;
+                    final foreground = colors.onSurface;
+                    return MouseRegion(
+                      onHover: (_) => completion.select(index),
+                      child: Semantics(
+                        selected: completion.selected == index,
+                        button: true,
+                        child: InkWell(
+                          borderRadius: const BorderRadius.all(HarborShapes.sm),
+                          canRequestFocus: false,
+                          onTap: () => widget.onAccept(index),
+                          child: Container(
+                            margin: const EdgeInsets.symmetric(
+                              horizontal: 4,
+                              vertical: 2,
                             ),
-                          ),
-                          padding: const EdgeInsets.symmetric(horizontal: 8),
-                          child: Row(
-                            children: [
-                              Icon(
-                                entry.isHistory
-                                    ? Icons.history_rounded
-                                    : entry.kind == '选项'
-                                    ? Icons.tune_rounded
-                                    : entry.isCommand
-                                    ? Icons.terminal_rounded
-                                    : entry.isDirectory
-                                    ? Icons.folder_outlined
-                                    : Icons.insert_drive_file_outlined,
-                                size: 18,
-                                color: selected
-                                    ? colors.primary
-                                    : colors.onSurfaceVariant,
+                            decoration: BoxDecoration(
+                              color: selected
+                                  ? Color.alphaBlend(
+                                      colors.primary.withValues(alpha: 0.12),
+                                      colors.surfaceContainerHigh,
+                                    )
+                                  : Colors.transparent,
+                              borderRadius: const BorderRadius.all(
+                                HarborShapes.sm,
                               ),
-                              const SizedBox(width: 10),
-                              Expanded(
-                                flex: described ? 4 : 1,
-                                child: Text(
-                                  entry.label,
-                                  style: Theme.of(context).textTheme.bodyMedium
-                                      ?.copyWith(
-                                        color: foreground,
-                                        fontWeight: FontWeight.w500,
-                                      ),
-                                  maxLines: 1,
-                                  overflow: TextOverflow.ellipsis,
+                            ),
+                            padding: const EdgeInsets.symmetric(horizontal: 8),
+                            child: Row(
+                              children: [
+                                Icon(
+                                  entry.isHistory
+                                      ? Icons.history_rounded
+                                      : entry.kind == '选项'
+                                      ? Icons.tune_rounded
+                                      : entry.isCommand
+                                      ? Icons.terminal_rounded
+                                      : entry.isDirectory
+                                      ? Icons.folder_outlined
+                                      : Icons.insert_drive_file_outlined,
+                                  size: 18,
+                                  color: selected
+                                      ? colors.primary
+                                      : colors.onSurfaceVariant,
                                 ),
-                              ),
-                              if (described) ...[
                                 const SizedBox(width: 10),
                                 Expanded(
-                                  flex: 5,
+                                  flex: described ? 4 : 1,
                                   child: Text(
-                                    entry.description,
+                                    entry.label,
+                                    style: Theme.of(context)
+                                        .textTheme
+                                        .bodyMedium
+                                        ?.copyWith(
+                                          color: foreground,
+                                          fontWeight: FontWeight.w500,
+                                        ),
                                     maxLines: 1,
                                     overflow: TextOverflow.ellipsis,
-                                    style: Theme.of(context).textTheme.bodySmall
+                                  ),
+                                ),
+                                if (described) ...[
+                                  const SizedBox(width: 10),
+                                  Expanded(
+                                    flex: 5,
+                                    child: Text(
+                                      entry.description,
+                                      maxLines: 1,
+                                      overflow: TextOverflow.ellipsis,
+                                      style: Theme.of(context)
+                                          .textTheme
+                                          .bodySmall
+                                          ?.copyWith(
+                                            color: colors.onSurfaceVariant,
+                                          ),
+                                    ),
+                                  ),
+                                ] else if (entry.isCommand) ...[
+                                  const SizedBox(width: 8),
+                                  Text(
+                                    entry.typeLabel,
+                                    style: Theme.of(context)
+                                        .textTheme
+                                        .labelSmall
                                         ?.copyWith(
                                           color: colors.onSurfaceVariant,
                                         ),
                                   ),
-                                ),
-                              ] else if (entry.isCommand) ...[
-                                const SizedBox(width: 8),
-                                Text(
-                                  entry.typeLabel,
-                                  style: Theme.of(context).textTheme.labelSmall
-                                      ?.copyWith(
-                                        color: colors.onSurfaceVariant,
-                                      ),
-                                ),
+                                ],
                               ],
-                            ],
+                            ),
                           ),
                         ),
                       ),
-                    ),
-                  );
-                },
-              ),
-            ),
-            if (constraints.maxHeight >= 76)
-              SizedBox(
-                height: 28,
-                child: Padding(
-                  padding: const EdgeInsets.symmetric(horizontal: 12),
-                  child: Row(
-                    children: [
-                      Expanded(
-                        child: Text(
-                          Theme.of(context).platform == TargetPlatform.macOS
-                              ? '⌥↑↓ 选择 · Tab 补全 · Esc 收起'
-                              : 'Alt↑↓ 选择 · Tab 补全 · Esc 收起',
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                          style: Theme.of(context).textTheme.labelSmall
-                              ?.copyWith(color: colors.onSurfaceVariant),
-                        ),
-                      ),
-                      Text(
-                        '${completion.selected + 1}/${completion.entries.length}',
-                        style: Theme.of(context).textTheme.labelSmall,
-                      ),
-                    ],
-                  ),
+                    );
+                  },
                 ),
               ),
-          ],
+              if (constraints.maxHeight >= 76)
+                SizedBox(
+                  height: 28,
+                  child: Padding(
+                    padding: const EdgeInsets.symmetric(horizontal: 12),
+                    child: Row(
+                      children: [
+                        Expanded(
+                          child: Text(
+                            Theme.of(context).platform == TargetPlatform.macOS
+                                ? '⌥↑↓ 选择 · Tab 补全 · Esc 收起'
+                                : 'Alt↑↓ 选择 · Tab 补全 · Esc 收起',
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: Theme.of(context).textTheme.labelSmall
+                                ?.copyWith(color: colors.onSurfaceVariant),
+                          ),
+                        ),
+                        Text(
+                          '${completion.selected + 1}/${completion.entries.length}',
+                          style: Theme.of(context).textTheme.labelSmall,
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+            ],
+          ),
         ),
       ),
     );

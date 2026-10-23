@@ -520,3 +520,149 @@ Widget harborRemoteStatusUnavailablePreview() => _remoteStatusPreview(
   metrics: null,
   connected: false,
 );
+
+@Preview(
+  name: 'Acrylic floating surfaces · light',
+  group: 'Harbor SSH · MD3E',
+  size: Size(760, 520),
+)
+Widget harborAcrylicLightPreview() =>
+    const _AcrylicPreview(brightness: Brightness.light);
+
+@Preview(
+  name: 'Acrylic floating surfaces · dark',
+  group: 'Harbor SSH · MD3E',
+  size: Size(760, 520),
+)
+Widget harborAcrylicDarkPreview() =>
+    const _AcrylicPreview(brightness: Brightness.dark);
+
+class _AcrylicPreview extends StatefulWidget {
+  const _AcrylicPreview({required this.brightness});
+  final Brightness brightness;
+
+  @override
+  State<_AcrylicPreview> createState() => _AcrylicPreviewState();
+}
+
+class _AcrylicPreviewState extends State<_AcrylicPreview> {
+  bool _acrylic = true;
+  bool _frosted = true;
+  String _choice = '开发服务器';
+
+  @override
+  Widget build(BuildContext context) => MaterialApp(
+    theme: harborTheme(
+      brightness: widget.brightness,
+      acrylic: _acrylic,
+      frosted: _frosted,
+    ),
+    home: Builder(
+      builder: (context) {
+        final colors = Theme.of(context).colorScheme;
+        return Scaffold(
+          body: Stack(
+            fit: StackFit.expand,
+            children: [
+              DecoratedBox(
+                decoration: BoxDecoration(
+                  gradient: LinearGradient(
+                    colors: [colors.primaryContainer, colors.tertiaryContainer],
+                  ),
+                ),
+                child: Center(
+                  child: Text(
+                    'Harbor SSH\nWorkspace',
+                    textAlign: TextAlign.center,
+                    style: Theme.of(context).textTheme.displayLarge,
+                  ),
+                ),
+              ),
+              Padding(
+                padding: const EdgeInsets.all(24),
+                child: Wrap(
+                  spacing: 16,
+                  runSpacing: 16,
+                  crossAxisAlignment: WrapCrossAlignment.center,
+                  children: [
+                    Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        const Text('背景透明效果'),
+                        Switch(
+                          value: _acrylic,
+                          onChanged: (value) =>
+                              setState(() => _acrylic = value),
+                        ),
+                      ],
+                    ),
+                    Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        const Text('浮层透明效果'),
+                        Switch(
+                          value: _frosted,
+                          onChanged: (value) =>
+                              setState(() => _frosted = value),
+                        ),
+                      ],
+                    ),
+                    const SizedBox(
+                      width: 380,
+                      child: RemoteStatusBar(
+                        metrics: _remoteMetricsSample,
+                        connected: true,
+                        loading: false,
+                      ),
+                    ),
+                    FilledButton(
+                      onPressed: () => showExpressiveDialog<void>(
+                        context: context,
+                        builder: (context) => AlertDialog(
+                          title: const Text('亚克力弹窗'),
+                          content: const Text('背景模糊，文字和按钮保持清晰。'),
+                          actions: [
+                            TextButton(
+                              onPressed: () => Navigator.pop(context),
+                              child: const Text('关闭'),
+                            ),
+                          ],
+                        ),
+                      ),
+                      child: const Text('打开弹窗'),
+                    ),
+                    PopupMenuButton<String>(
+                      clipBehavior: _frosted ? Clip.antiAlias : Clip.none,
+                      itemBuilder: (_) => [
+                        if (_frosted) const HarborPopupMenuBackdrop<String>(),
+                        const HarborPopupMenuItem(
+                          value: 'edit',
+                          child: Text('编辑连接'),
+                        ),
+                        const HarborPopupMenuItem(
+                          value: 'delete',
+                          child: Text('删除连接'),
+                        ),
+                      ],
+                    ),
+                    DropdownMenu<String>(
+                      initialSelection: _choice,
+                      enableFilter: true,
+                      dropdownMenuEntries: harborDropdownEntries(context, [
+                        for (final label in ['开发服务器', '测试服务器', '生产服务器'])
+                          DropdownMenuEntry(value: label, label: label),
+                      ]),
+                      onSelected: (value) {
+                        if (value != null) setState(() => _choice = value);
+                      },
+                    ),
+                  ],
+                ),
+              ),
+            ],
+          ),
+        );
+      },
+    ),
+  );
+}

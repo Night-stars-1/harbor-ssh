@@ -9,6 +9,14 @@ import 'package:harbor_ssh/ui/window_frame.dart';
 import 'package:window_manager/window_manager.dart';
 
 void main() {
+  // Startup asks the native runner whether acrylic is available.
+  setUp(
+    () => TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(
+          const MethodChannel('harbor/window_effect'),
+          (_) async => false,
+        ),
+  );
   testWidgets('macOS 启动配置完成后显示被原生层隐藏的窗口', (tester) async {
     debugDefaultTargetPlatformOverride = TargetPlatform.macOS;
     addTearDown(() => debugDefaultTargetPlatformOverride = null);

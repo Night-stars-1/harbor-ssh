@@ -40,6 +40,7 @@ class AiApprovalModeMenu extends StatelessWidget {
     controller: controller,
     alignmentOffset: const Offset(0, 4),
     menuChildren: [
+      if (Theme.of(context).windowBackdrop.frosted) const HarborSurfaceBlur(),
       for (final item in AiApprovalMode.values)
         MenuItemButton(
           style: aiMenuItemStyle(context, selected: mode == item),

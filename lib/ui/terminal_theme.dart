@@ -7,7 +7,9 @@ TerminalTheme harborTerminalTheme(ColorScheme colors) {
   final dark = colors.brightness == Brightness.dark;
   return TerminalTheme(
     foreground: colors.onSurface,
-    background: colors.surfaceContainerLowest,
+    // Xterm also uses this role as foreground for reverse-video cells. Window
+    // transparency is controlled by TerminalView.backgroundOpacity instead.
+    background: colors.surfaceContainerLowest.withValues(alpha: 1),
     cursor: colors.primary,
     selection: colors.primary.withValues(alpha: dark ? 0.30 : 0.16),
     black: const Color(0xFF1D1B20),

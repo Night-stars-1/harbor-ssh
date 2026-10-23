@@ -35,11 +35,17 @@ class _SettingsWindowAppState extends State<SettingsWindowApp> {
         theme: harborTheme(
           color: controller.appearance.color,
           dynamicScheme: SystemColorScope.of(context)?.light,
+          acrylic:
+              controller.appearance.windowAcrylic && windowAcrylicSupported,
+          frosted: controller.appearance.frostedSurfaces,
         ),
         darkTheme: harborTheme(
           brightness: Brightness.dark,
           color: controller.appearance.color,
           dynamicScheme: SystemColorScope.of(context)?.dark,
+          acrylic:
+              controller.appearance.windowAcrylic && windowAcrylicSupported,
+          frosted: controller.appearance.frostedSurfaces,
         ),
         themeMode: flutterThemeMode(controller.appearance.mode),
         builder: (context, child) =>

@@ -6,6 +6,9 @@ import window_manager
 
 class MainFlutterWindow: NSWindow {
   private var localPathsChannel: FlutterMethodChannel?
+  private var windowEffectChannel: FlutterMethodChannel?
+  private weak var flutterViewController: FlutterViewController?
+  private let backdrop = NSVisualEffectView()
   private var scopedDirectories: [String: (url: URL, started: Bool)] = [:]
   private var stagedBookmarks: [String: Data] = [:]
   private let bookmarkKey = "harbor.files.default-local-bookmark.v1"
@@ -13,7 +16,23 @@ class MainFlutterWindow: NSWindow {
   override func awakeFromNib() {
     let flutterViewController = FlutterViewController()
     let windowFrame = self.frame
-    self.contentViewController = flutterViewController
+    // The acrylic backdrop sits under the Flutter view. Plugins look the
+    // Flutter controller up among the content controller's children.
+    let container = NSViewController()
+    container.view = NSView(frame: NSRect(origin: .zero, size: windowFrame.size))
+    backdrop.frame = container.view.bounds
+    backdrop.autoresizingMask = [.width, .height]
+    backdrop.blendingMode = .behindWindow
+    backdrop.material = .underWindowBackground
+    backdrop.state = .followsWindowActiveState
+    backdrop.isHidden = true
+    container.view.addSubview(backdrop)
+    container.addChild(flutterViewController)
+    flutterViewController.view.frame = container.view.bounds
+    flutterViewController.view.autoresizingMask = [.width, .height]
+    container.view.addSubview(flutterViewController.view)
+    self.flutterViewController = flutterViewController
+    self.contentViewController = container
     self.setFrame(windowFrame, display: true)
 
     RegisterGeneratedPlugins(registry: flutterViewController)
@@ -26,11 +45,41 @@ class MainFlutterWindow: NSWindow {
       self?.handleLocalPathCall(call, result: result)
     }
     localPathsChannel = channel
+    let effectChannel = FlutterMethodChannel(
+      name: "harbor/window_effect",
+      binaryMessenger: flutterViewController.engine.binaryMessenger)
+    effectChannel.setMethodCallHandler { [weak self] call, result in
+      self?.handleWindowEffectCall(call, result: result)
+    }
+    windowEffectChannel = effectChannel
     super.awakeFromNib()
   }
 
   deinit {
     stopAllScopedAccess()
+  }
+
+  private func handleWindowEffectCall(_ call: FlutterMethodCall, result: @escaping FlutterResult) {
+    switch call.method {
+    case "supported":
+      result(true)
+    case "setAcrylic":
+      guard let arguments = call.arguments as? [String: Any],
+            let enabled = arguments["enabled"] as? Bool,
+            let dark = arguments["dark"] as? Bool else {
+        result(FlutterError(
+          code: "arguments", message: "Invalid window effect arguments", details: nil))
+        return
+      }
+      backdrop.isHidden = !enabled
+      // The tint follows the app theme, not the system appearance.
+      backdrop.appearance = NSAppearance(named: dark ? .darkAqua : .aqua)
+      // The Flutter view is black behind transparent pixels unless cleared.
+      flutterViewController?.backgroundColor = enabled ? .clear : nil
+      result(enabled)
+    default:
+      result(FlutterMethodNotImplemented)
+    }
   }
 
   private func handleLocalPathCall(_ call: FlutterMethodCall, result: @escaping FlutterResult) {

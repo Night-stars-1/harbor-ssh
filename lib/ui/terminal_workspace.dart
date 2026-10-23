@@ -341,6 +341,9 @@ class _TerminalWorkspaceState extends State<TerminalWorkspace> {
   }
 
   Widget _splitButton(int side) => PopupMenuButton<String>(
+    clipBehavior: Theme.of(context).windowBackdrop.frosted
+        ? Clip.antiAlias
+        : Clip.none,
     key: ValueKey('terminal-split-menu-$side'),
     tooltip: '',
     popUpAnimationStyle: HarborMotion.popup(context),
@@ -351,6 +354,8 @@ class _TerminalWorkspaceState extends State<TerminalWorkspace> {
     ),
     onSelected: (value) => _split(side, value),
     itemBuilder: (_) => [
+      if (Theme.of(context).windowBackdrop.frosted)
+        const HarborPopupMenuBackdrop<String>(),
       const HarborPopupMenuItem(value: 'horizontal', child: Text('左右分屏')),
       const HarborPopupMenuItem(value: 'vertical', child: Text('上下分屏')),
       if (_layout is _TerminalSplit) ...[
@@ -361,6 +366,9 @@ class _TerminalWorkspaceState extends State<TerminalWorkspace> {
   );
 
   Widget _sessionPicker(int side, String title) => PopupMenuButton<Object>(
+    clipBehavior: Theme.of(context).windowBackdrop.frosted
+        ? Clip.antiAlias
+        : Clip.none,
     key: ValueKey('terminal-session-picker-$side'),
     tooltip: '',
     popUpAnimationStyle: HarborMotion.popup(context),
@@ -374,6 +382,8 @@ class _TerminalWorkspaceState extends State<TerminalWorkspace> {
       }
     },
     itemBuilder: (_) => [
+      if (Theme.of(context).windowBackdrop.frosted)
+        const HarborPopupMenuBackdrop<Object>(),
       for (final session in _sessions.values)
         HarborPopupMenuItem(
           value: session,
@@ -451,7 +461,8 @@ class _TerminalWorkspaceState extends State<TerminalWorkspace> {
       onPointerDown: (_) => _activate(side, requestFocus: false),
       child: Material(
         key: ValueKey('terminal-region-$side'),
-        color: colors.surfaceContainerLow,
+        color: Theme.of(context).windowBackdrop
+            .chrome(colors.surfaceContainerLow),
         shape: HarborShapes.superellipse().copyWith(
           side: BorderSide(
             color: split && _focused == side

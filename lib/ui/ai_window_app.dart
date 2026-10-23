@@ -72,11 +72,15 @@ class _AiWindowAppState extends State<AiWindowApp> {
           theme: harborTheme(
             color: appearance.color,
             dynamicScheme: system?.light,
+            acrylic: appearance.windowAcrylic && windowAcrylicSupported,
+            frosted: appearance.frostedSurfaces,
           ),
           darkTheme: harborTheme(
             brightness: Brightness.dark,
             color: appearance.color,
             dynamicScheme: system?.dark,
+            acrylic: appearance.windowAcrylic && windowAcrylicSupported,
+            frosted: appearance.frostedSurfaces,
           ),
           themeMode: flutterThemeMode(appearance.mode),
           builder: (context, child) =>

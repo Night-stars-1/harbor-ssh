@@ -118,7 +118,8 @@ class _RemoteStatusBarState extends State<RemoteStatusBar> {
 
   @override
   Widget build(BuildContext context) {
-    final colors = Theme.of(context).colorScheme;
+    final theme = Theme.of(context);
+    final colors = theme.colorScheme;
     return SizedBox(
       height: RemoteStatusBar.height,
       child: Material(
@@ -129,7 +130,10 @@ class _RemoteStatusBarState extends State<RemoteStatusBar> {
           consumeOutsideTap: true,
           style: MenuStyle(
             padding: const WidgetStatePropertyAll(EdgeInsets.zero),
-            backgroundColor: WidgetStatePropertyAll(colors.surfaceContainer),
+            backgroundColor: WidgetStatePropertyAll(
+              theme.windowBackdrop.floating(colors.surfaceContainerHigh),
+            ),
+            surfaceTintColor: const WidgetStatePropertyAll(Colors.transparent),
             shape: WidgetStatePropertyAll(
               RoundedRectangleBorder(
                 borderRadius: BorderRadius.circular(12),
@@ -143,6 +147,7 @@ class _RemoteStatusBarState extends State<RemoteStatusBar> {
             _pinned = false;
           },
           menuChildren: [
+            if (theme.windowBackdrop.frosted) const HarborSurfaceBlur(),
             MouseRegion(
               onEnter: (_) => _hoverTimer?.cancel(),
               onExit: (_) => _leave(),
@@ -568,7 +573,7 @@ class _RemoteStatusBarState extends State<RemoteStatusBar> {
       key: const ValueKey('swap-summary'),
       padding: const EdgeInsets.fromLTRB(12, 8, 12, 9),
       decoration: BoxDecoration(
-        color: colors.surfaceContainerHighest,
+        color: _tileFill(context, colors),
         borderRadius: BorderRadius.circular(10),
       ),
       child: Column(
@@ -651,7 +656,7 @@ class _RemoteStatusBarState extends State<RemoteStatusBar> {
       key: const ValueKey('memory-capacity-summary'),
       padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
       decoration: BoxDecoration(
-        color: colors.surfaceContainerHighest,
+        color: _tileFill(context, colors),
         borderRadius: BorderRadius.circular(10),
       ),
       child: IntrinsicHeight(
@@ -1054,7 +1059,7 @@ class _RemoteStatusBarState extends State<RemoteStatusBar> {
     return Container(
       padding: const EdgeInsets.fromLTRB(12, 10, 12, 12),
       decoration: BoxDecoration(
-        color: colors.surfaceContainerHighest,
+        color: _tileFill(context, colors),
         borderRadius: BorderRadius.circular(10),
       ),
       child: Column(
@@ -1337,6 +1342,13 @@ class _RemoteStatusBarState extends State<RemoteStatusBar> {
       : colors.onSurface;
 
   static String _celsius(double value) => '${value.round()}°C';
+
+  /// Summary tiles sit on the panel; when frosted they tint the blur instead
+  /// of covering it.
+  static Color _tileFill(BuildContext context, ColorScheme colors) =>
+      Theme.of(context).windowBackdrop.frosted
+      ? colors.surfaceContainerHighest.withValues(alpha: .5)
+      : colors.surfaceContainerHighest.withValues(alpha: 1);
 
   static Color _textTone(ColorScheme colors, double? percent) => percent == null
       ? colors.onSurfaceVariant

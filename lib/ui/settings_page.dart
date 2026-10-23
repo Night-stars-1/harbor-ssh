@@ -113,7 +113,8 @@ class _SettingsPageState extends State<SettingsPage> {
     return Padding(
       padding: EdgeInsets.fromLTRB(wide ? 0 : 12, 12, 12, 12),
       child: Material(
-        color: Theme.of(context).colorScheme.surface,
+        color: Theme.of(context).windowBackdrop
+            .sheet(Theme.of(context).colorScheme.surface),
         borderRadius: BorderRadius.circular(32),
         clipBehavior: Clip.antiAlias,
         child: child,
@@ -186,16 +187,20 @@ class _SettingsPageState extends State<SettingsPage> {
             if (!didPop && widget.navigation == null) navigation.back();
           },
           child: Material(
-            color: widget.desktop && widget.standalone
-                ? theme.colorScheme.surfaceContainerLow
-                : theme.colorScheme.surface,
+            color: theme.windowBackdrop.chrome(
+              widget.desktop && widget.standalone
+                  ? theme.colorScheme.surfaceContainerLow
+                  : theme.colorScheme.surface,
+            ),
             child: Row(
               children: [
                 if (wide)
                   SizedBox(
                     width: 240,
                     child: Material(
-                      color: theme.colorScheme.surfaceContainerLow,
+                      color: theme.windowBackdrop.chrome(
+                        theme.colorScheme.surfaceContainerLow,
+                      ),
                       child: Padding(
                         padding: const EdgeInsets.fromLTRB(12, 20, 12, 12),
                         child: Column(

@@ -458,6 +458,7 @@ class _AiSettingsPageState extends State<AiSettingsPage> {
         icon: const Icon(Icons.more_vert_rounded),
       ),
       menuChildren: [
+        if (Theme.of(context).windowBackdrop.frosted) const HarborSurfaceBlur(),
         MenuItemButton(
           key: const ValueKey('ai-rename-provider'),
           leadingIcon: const Icon(Icons.edit_outlined, size: 20),
@@ -656,7 +657,7 @@ class _AiSettingsPageState extends State<AiSettingsPage> {
 
         alignmentOffset: const Offset(0, 4),
         menuHeight: 320,
-        dropdownMenuEntries: [
+        dropdownMenuEntries: harborDropdownEntries(context, [
           for (final entry in options.entries)
             DropdownMenuEntry(
               value: entry.key,
@@ -682,7 +683,7 @@ class _AiSettingsPageState extends State<AiSettingsPage> {
                 textStyle: theme.textTheme.bodyLarge,
               ),
             ),
-        ],
+        ]),
         onSelected: (next) {
           if (next != null) onChanged(next);
         },

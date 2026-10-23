@@ -426,7 +426,7 @@ class _HostEditorState extends State<HostEditor> {
                           .inputDecorationTheme,
                       label: const Text('中转主机（可选）'),
                       alignmentOffset: const Offset(0, 4),
-                      dropdownMenuEntries: [
+                      dropdownMenuEntries: harborDropdownEntries(context, [
                         for (final host in choices)
                           _connectionMenuEntry(
                             host,
@@ -434,7 +434,7 @@ class _HostEditorState extends State<HostEditor> {
                             selected: host.id == _jumpHostId,
                             online: widget.onlineHostIds.contains(host.id),
                           ),
-                      ],
+                      ]),
                       onSelected: (host) => setState(() {
                         _jumpHostId = host?.id ?? '';
                         _error = null;
@@ -563,10 +563,10 @@ class _HostEditorState extends State<HostEditor> {
                           .inputDecorationTheme,
                       label: const Text('凭证（可选）'),
                       alignmentOffset: const Offset(0, 4),
-                      dropdownMenuEntries: [
+                      dropdownMenuEntries: harborDropdownEntries(context, [
                         entry('', '不使用凭证'),
                         for (final user in _users) entry(user.id, user.name),
-                      ],
+                      ]),
                       onSelected: (value) => setState(() {
                         _userId = value ?? '';
                         _auth = _userId.isEmpty

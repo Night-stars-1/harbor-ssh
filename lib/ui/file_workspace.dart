@@ -173,6 +173,9 @@ class _FileWorkspaceState extends State<FileWorkspace> {
   }
 
   Widget _addMenu(int side, {bool expanded = false}) => PopupMenuButton<Object>(
+    clipBehavior: Theme.of(context).windowBackdrop.frosted
+        ? Clip.antiAlias
+        : Clip.none,
     key: ValueKey(expanded ? 'empty-add-file-tab-$side' : 'add-file-tab-$side'),
     enabled: !_adding,
     tooltip: '',
@@ -195,6 +198,8 @@ class _FileWorkspaceState extends State<FileWorkspace> {
         for (final host in widget.hosts) host.id: host,
       };
       return [
+        if (Theme.of(context).windowBackdrop.frosted)
+          const HarborPopupMenuBackdrop<Object>(),
         const HarborPopupMenuItem<Object>(
           value: 'local',
           child: Row(
@@ -1014,6 +1019,9 @@ class _FileWorkspaceState extends State<FileWorkspace> {
     final marked = bookmarks.any((path) => _samePath(tab, path, tab.path));
     final colors = Theme.of(context).colorScheme;
     return PopupMenuButton<(String, String)>(
+      clipBehavior: Theme.of(context).windowBackdrop.frosted
+          ? Clip.antiAlias
+          : Clip.none,
       key: ValueKey('file-bookmarks-${tab.id}'),
       enabled: enabled,
       tooltip: '目录书签',
@@ -1044,6 +1052,8 @@ class _FileWorkspaceState extends State<FileWorkspace> {
         }
       },
       itemBuilder: (menuContext) => [
+        if (Theme.of(context).windowBackdrop.frosted)
+          const HarborPopupMenuBackdrop<(String, String)>(),
         HarborPopupMenuItem(
           key: ValueKey('file-bookmark-toggle-${tab.id}'),
           value: (marked ? 'remove' : 'add', tab.path),
@@ -1153,11 +1163,16 @@ class _FileWorkspaceState extends State<FileWorkspace> {
     final colors = Theme.of(context).colorScheme;
     final action = await showMenu<Object>(
       context: context,
+      clipBehavior: Theme.of(context).windowBackdrop.frosted
+          ? Clip.antiAlias
+          : Clip.none,
       popUpAnimationStyle: HarborMotion.popup(context),
       // 相等的左右锚距让菜单按阅读方向从鼠标右侧展开；
       // 空间不足时 Flutter 仍会将自适应宽度的菜单限制在屏幕内。
       position: RelativeRect.fromLTRB(anchorX, point.dy, anchorX, 0),
       items: [
+        if (Theme.of(context).windowBackdrop.frosted)
+          const HarborPopupMenuBackdrop<Object>(),
         if (creatable) ...[
           HarborPopupMenuItem<Object>(
             key: const ValueKey('create-directory-entry'),
@@ -1434,9 +1449,14 @@ class _FileWorkspaceState extends State<FileWorkspace> {
     final colors = Theme.of(context).colorScheme;
     final action = await showMenu<Object>(
       context: context,
+      clipBehavior: Theme.of(context).windowBackdrop.frosted
+          ? Clip.antiAlias
+          : Clip.none,
       popUpAnimationStyle: HarborMotion.popup(context),
       position: RelativeRect.fromLTRB(anchorX, point.dy, anchorX, 0),
       items: [
+        if (Theme.of(context).windowBackdrop.frosted)
+          const HarborPopupMenuBackdrop<Object>(),
         HarborPopupMenuItem<Object>(
           key: const ValueKey('blank-create-directory'),
           value: 'create-directory',

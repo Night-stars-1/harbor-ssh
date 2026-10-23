@@ -405,7 +405,8 @@ class _FileBrowserState extends State<FileBrowser> {
         if (!didPop) _leave();
       },
       child: Scaffold(
-        backgroundColor: colors.surface,
+        backgroundColor: Theme.of(context).windowBackdrop
+            .chrome(colors.surface),
         appBar: AppBar(
           leading: IconButton(
             onPressed: _leave,

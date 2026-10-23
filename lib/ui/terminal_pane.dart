@@ -839,6 +839,7 @@ class _TerminalPaneState extends State<TerminalPane> {
     final session = widget.session;
     final connected = session.status == ConnectionStatus.connected;
     final colors = Theme.of(context).colorScheme;
+    final backdrop = Theme.of(context).windowBackdrop;
     _linkStyle.color = colors.brightness == Brightness.dark
         ? const Color(0xff9ecaff)
         : const Color(0xff005bb5);
@@ -958,7 +959,7 @@ class _TerminalPaneState extends State<TerminalPane> {
           ),
         Expanded(
           child: ColoredBox(
-            color: colors.surfaceContainerLowest,
+            color: backdrop.chrome(colors.surfaceContainerLowest),
             child: LayoutBuilder(
               builder: (context, constraints) => Stack(
                 key: _completionStackKey,
@@ -1026,6 +1027,9 @@ class _TerminalPaneState extends State<TerminalPane> {
                             shortcuts: const {},
                             deleteDetection: true,
                             theme: _terminalTheme(colors),
+                            // Window acrylic shows through the terminal; cells
+                            // with an explicit background stay opaque.
+                            backgroundOpacity: backdrop.acrylic ? 0 : 1,
                             padding: const EdgeInsets.all(16),
                             onPrepareCellDecoration: _prepareLinkDecoration,
                             cellDecoration: _linkDecoration,
@@ -1344,10 +1348,15 @@ class TerminalOptionsButton extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) => PopupMenuButton<String>(
+    clipBehavior: Theme.of(context).windowBackdrop.frosted
+        ? Clip.antiAlias
+        : Clip.none,
     tooltip: '终端选项',
     popUpAnimationStyle: HarborMotion.popup(context),
     onSelected: onSelected ?? controller!.selectOption,
     itemBuilder: (_) => [
+      if (Theme.of(context).windowBackdrop.frosted)
+        const HarborPopupMenuBackdrop<String>(),
       if (MediaQuery.sizeOf(context).width < 900) ...[
         HarborPopupMenuItem(
           value: 'copy',

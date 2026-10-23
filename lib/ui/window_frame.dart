@@ -2,6 +2,7 @@ import 'dart:async';
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:window_manager/window_manager.dart';
 
 import 'expressive_widgets.dart';
@@ -20,6 +21,14 @@ bool get usesCustomTitleBar =>
     usesWindowsTitleBar || usesMacosTitleBar || usesLinuxTitleBar;
 
 const _macosTrafficLightInset = 78.0;
+
+const _windowEffect = MethodChannel('harbor/window_effect');
+
+/// Whether this window can show the native system backdrop: Windows 11 22H2
+/// or later, macOS, or a Linux desktop whose compositor exposes KDE/KWin
+/// background blur. Resolved by [initializeWindowsWindow]; unsupported
+/// platforms and missing window-effect channels keep windows opaque.
+bool windowAcrylicSupported = false;
 
 Future<void> initializeWindowsWindow({
   bool settings = false,
@@ -48,6 +57,17 @@ Future<void> initializeWindowsWindow({
     await windowManager.show();
     await windowManager.focus();
   }
+  if (usesWindowsTitleBar || usesMacosTitleBar || usesLinuxTitleBar) {
+    try {
+      windowAcrylicSupported =
+          await _windowEffect.invokeMethod<bool>('supported') == true;
+    } on PlatformException {
+      windowAcrylicSupported = false;
+    } on MissingPluginException {
+      // Desktop runners without a window-effect channel stay opaque.
+      windowAcrylicSupported = false;
+    }
+  }
 }
 
 /// Lives outside the navigator so dialogs keep the window controls accessible.
@@ -56,9 +76,17 @@ class WindowsWindowFrame extends StatefulWidget {
     super.key,
     required this.child,
     this.title = 'Harbor SSH',
+    this.leading,
+    this.actions = const [],
   });
   final Widget child;
   final String title;
+
+  /// Shown before the app mark, e.g. a side panel toggle.
+  final Widget? leading;
+
+  /// Shown before the window buttons, e.g. workspace navigation.
+  final List<Widget> actions;
 
   @override
   State<WindowsWindowFrame> createState() => _WindowsWindowFrameState();
@@ -70,6 +98,7 @@ class _WindowsWindowFrameState extends State<WindowsWindowFrame>
   bool _focused = true;
   bool _fullScreen = false;
   Brightness? _brightness;
+  bool _acrylic = false;
 
   @override
   void initState() {
@@ -95,10 +124,33 @@ class _WindowsWindowFrameState extends State<WindowsWindowFrame>
   @override
   void didChangeDependencies() {
     super.didChangeDependencies();
-    final brightness = Theme.of(context).brightness;
-    if (_brightness != brightness) {
+    final theme = Theme.of(context);
+    final brightness = theme.brightness;
+    final brightnessChanged = _brightness != brightness;
+    if (brightnessChanged) {
       _brightness = brightness;
       unawaited(windowManager.setBrightness(brightness));
+    }
+    final acrylic = theme.windowBackdrop.acrylic;
+    if (acrylic != _acrylic || (acrylic && brightnessChanged)) {
+      _acrylic = acrylic;
+      _applyAcrylic();
+    }
+  }
+
+  /// The native side tints the backdrop with the app theme brightness.
+  void _applyAcrylic() => unawaited(_setNativeAcrylic());
+
+  Future<void> _setNativeAcrylic() async {
+    try {
+      await _windowEffect.invokeMethod<bool>('setAcrylic', {
+        'enabled': _acrylic,
+        'dark': _brightness == Brightness.dark,
+      });
+    } on MissingPluginException {
+      // A desktop runner without the effect channel cannot blur; the theme
+      // only enables acrylic after [windowAcrylicSupported] succeeded.
+      return;
     }
   }
 
@@ -119,7 +171,11 @@ class _WindowsWindowFrameState extends State<WindowsWindowFrame>
   @override
   void onWindowEnterFullScreen() => setState(() => _fullScreen = true);
   @override
-  void onWindowLeaveFullScreen() => setState(() => _fullScreen = false);
+  void onWindowLeaveFullScreen() {
+    setState(() => _fullScreen = false);
+    // Leaving full screen resets the DWM frame the backdrop shows through.
+    if (_acrylic && usesWindowsTitleBar) _applyAcrylic();
+  }
 
   Future<void> _toggleMaximize() async {
     if (await windowManager.isMaximized()) {
@@ -175,20 +231,28 @@ class _WindowsWindowFrameState extends State<WindowsWindowFrame>
   @override
   Widget build(BuildContext context) {
     final colors = Theme.of(context).colorScheme;
+    // Navigation hosted in the bar must stay reachable in full screen.
+    final hostsNavigation = widget.leading != null || widget.actions.isNotEmpty;
     final frame = Column(
       children: [
-        if (!_fullScreen)
+        if (!_fullScreen || hostsNavigation)
           Material(
             key: const ValueKey('windows-title-bar'),
-            color: colors.surfaceContainerLow,
+            color: Theme.of(context).windowBackdrop
+                .chrome(colors.surfaceContainerLow),
             child: SizedBox(
               height: 40,
               child: Row(
                 children: [
-                  if (usesMacosTitleBar)
+                  if (usesMacosTitleBar && !_fullScreen)
                     const SizedBox(
                       key: ValueKey('macos-traffic-light-inset'),
                       width: _macosTrafficLightInset,
+                    ),
+                  if (widget.leading != null)
+                    Padding(
+                      padding: EdgeInsets.only(left: usesMacosTitleBar ? 0 : 6),
+                      child: widget.leading,
                     ),
                   Expanded(
                     child: GestureDetector(
@@ -201,7 +265,9 @@ class _WindowsWindowFrameState extends State<WindowsWindowFrame>
                           : windowManager.popUpWindowMenu,
                       child: Padding(
                         padding: EdgeInsets.only(
-                          left: usesMacosTitleBar ? 0 : 14,
+                          left: usesMacosTitleBar || widget.leading != null
+                              ? 0
+                              : 14,
                         ),
                         child: Row(
                           children: [
@@ -226,6 +292,8 @@ class _WindowsWindowFrameState extends State<WindowsWindowFrame>
                       ),
                     ),
                   ),
+                  ...widget.actions,
+                  if (widget.actions.isNotEmpty) const SizedBox(width: 6),
                   if (!usesMacosTitleBar) ...[
                     _button(
                       name: 'minimize',
@@ -257,7 +325,10 @@ class _WindowsWindowFrameState extends State<WindowsWindowFrame>
         Expanded(child: Semantics(container: true, child: widget.child)),
       ],
     );
-    if (!usesLinuxTitleBar) return frame;
+    // Title bar tooltips need an overlay; the navigator's sits below the bar.
+    // Always present so toggling bar content never remounts the app below.
+    final overlaid = Overlay.wrap(child: frame);
+    if (!usesLinuxTitleBar) return overlaid;
     // Linux has no native resize border once the header bar is hidden, so the
     // shared frame is wrapped in Flutter-drawn resize edges. The wrapper adds
     // no visible border and is disabled while maximized or full screen.
@@ -266,7 +337,7 @@ class _WindowsWindowFrameState extends State<WindowsWindowFrame>
       enableResizeEdges: _maximized || _fullScreen
           ? const <ResizeEdge>[]
           : null,
-      child: frame,
+      child: overlaid,
     );
   }
 }

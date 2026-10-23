@@ -665,6 +665,9 @@ class _RemoteSelectionToolbarController implements SelectionToolbarController {
       final localizations = MaterialLocalizations.of(context);
       final action = await showMenu<String>(
         context: context,
+        clipBehavior: Theme.of(context).windowBackdrop.frosted
+            ? Clip.antiAlias
+            : Clip.none,
         popUpAnimationStyle: HarborMotion.popup(context),
         position: RelativeRect.fromLTRB(
           x,
@@ -673,6 +676,8 @@ class _RemoteSelectionToolbarController implements SelectionToolbarController {
           overlay.size.height - y,
         ),
         items: [
+          if (Theme.of(context).windowBackdrop.frosted)
+            const HarborPopupMenuBackdrop<String>(),
           if (canEdit())
             HarborPopupMenuItem(
               value: 'cut',
