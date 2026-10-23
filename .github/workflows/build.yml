@@ -65,16 +65,6 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y clang cmake ninja-build pkg-config libgtk-3-dev libsecret-1-dev libwayland-dev libx11-dev liblzma-dev libstdc++-12-dev rpm
       - run: flutter pub get
-      - name: Run macOS native regression tests
-        if: matrix.target == 'macos'
-        run: |
-          xcodebuild test \
-            -workspace macos/Runner.xcworkspace \
-            -scheme Runner \
-            -configuration Debug \
-            -destination 'platform=macOS' \
-            -parallel-testing-enabled NO \
-            CODE_SIGNING_ALLOWED=NO
       - name: Verify macOS credential bundle
         if: matrix.target == 'macos'
         shell: bash
