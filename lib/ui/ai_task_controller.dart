@@ -39,6 +39,14 @@ bool aiCommandNeedsApproval(AiToolCall call) =>
       caseSensitive: false,
     ).hasMatch(call.command);
 
+/// Waits before resending a request whose connection dropped; one entry per
+/// automatic retry.
+const aiRetryDelays = [
+  Duration(seconds: 1),
+  Duration(seconds: 2),
+  Duration(seconds: 4),
+];
+
 class AiTaskController extends ChangeNotifier {
   AiTaskController({
     required this.settings,
@@ -745,22 +753,51 @@ class AiTaskController extends ChangeNotifier {
         status = commands == 0 ? '思考中' : '整理结果';
         _notify();
         AiTaskEntry? streamedReply;
-        final reply = await client.stream(
-          config,
-          messages,
-          toolMode: approvalMode == AiApprovalMode.readOnly
-              ? AiToolMode.readOnly
-              : AiToolMode.command,
-          onText: (delta) {
-            if (!_current(revision)) return;
-            streamedReply ??= AiTaskEntry('', model: config.model.trim());
-            if (!entries.contains(streamedReply)) {
-              entries.add(streamedReply!);
+        AiReply? received;
+        for (var attempt = 0; received == null; attempt++) {
+          try {
+            received = await client.stream(
+              config,
+              messages,
+              toolMode: approvalMode == AiApprovalMode.readOnly
+                  ? AiToolMode.readOnly
+                  : AiToolMode.command,
+              onText: (delta) {
+                if (!_current(revision)) return;
+                streamedReply ??= AiTaskEntry('', model: config.model.trim());
+                if (!entries.contains(streamedReply)) {
+                  entries.add(streamedReply!);
+                }
+                streamedReply!.text += delta;
+                _notify();
+              },
+            );
+          } on AiFailure catch (error) {
+            if (!error.retryable || !_current(revision)) rethrow;
+            if (attempt >= aiRetryDelays.length) {
+              throw AiFailure(
+                '${error.message}（已自动重试 ${aiRetryDelays.length} 次）',
+              );
             }
-            streamedReply!.text += delta;
+            // The request is resent unchanged, so text from the dropped
+            // attempt would be duplicated by the next one.
+            if (streamedReply != null) entries.remove(streamedReply);
+            streamedReply = null;
+            final delay = aiRetryDelays[attempt];
+            failure = error.message;
+            status =
+                '连接中断，${delay.inSeconds} 秒后重试'
+                '（${attempt + 1}/${aiRetryDelays.length}）';
             _notify();
-          },
-        );
+            await Future<void>.delayed(delay);
+            if (!_current(revision)) return;
+            if (!connected()) throw const AiFailure('SSH 已断开，任务已停止');
+            status = '重新请求中（${attempt + 1}/${aiRetryDelays.length}）';
+            _notify();
+          }
+        }
+        final reply = received;
+        failure = null;
         if (!_current(revision)) return;
         messages.add(Map<String, dynamic>.from(reply.message));
         if (reply.text.trim().isNotEmpty) {

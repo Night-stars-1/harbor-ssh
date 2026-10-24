@@ -929,14 +929,149 @@ void main() {
         },
       ),
       throwsA(
-        isA<AiFailure>().having(
-          (e) => e.message,
-          'message',
-          contains('流式回复中断'),
-        ),
+        isA<AiFailure>()
+            .having((e) => e.message, 'message', contains('流式回复中断'))
+            .having((e) => e.retryable, 'retryable', isTrue),
       ),
     );
     expect(chunks, ['已收到部分回答']);
+  });
+
+  test('AI 连接中断后自动重新请求，重试期间显示原因，成功后不重复已收文本', () async {
+    final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+    addTearDown(() => server.close(force: true));
+    var requests = 0;
+    final bodies = <Map>[];
+    server.listen((request) async {
+      requests++;
+      bodies.add(jsonDecode(await utf8.decoder.bind(request).join()) as Map);
+      if (requests == 1) {
+        // Headers and one SSE chunk go out, then the socket is cut before
+        // the chunked body ends, like a gateway reset mid-reply.
+        final socket = await request.response.detachSocket(
+          writeHeaders: false,
+        );
+        final chunk = utf8.encode(
+          'data: {"choices":[{"delta":{"content":"半截"}}]}\n\n',
+        );
+        socket.add(
+          utf8.encode(
+            'HTTP/1.1 200 OK\r\n'
+            'Content-Type: text/event-stream; charset=utf-8\r\n'
+            'Transfer-Encoding: chunked\r\n\r\n'
+            '${chunk.length.toRadixString(16)}\r\n',
+          ),
+        );
+        socket.add(chunk);
+        socket.add(utf8.encode('\r\n'));
+        await socket.flush();
+        await Future<void>.delayed(const Duration(milliseconds: 50));
+        socket.destroy();
+        return;
+      }
+      request.response.headers.contentType = ContentType(
+        'text',
+        'event-stream',
+        charset: 'utf-8',
+      );
+      request.response.write(
+        'data: {"choices":[{"delta":{"content":"完整回答"}}]}\n\n'
+        'data: [DONE]\n\n',
+      );
+      await request.response.close();
+    });
+    final task = AiTaskController(
+      settings: () => AiSettings(
+        baseUrl: 'http://127.0.0.1:${server.port}/v1',
+        model: 'mock',
+      ),
+      executorFactory: _Executor.new,
+      connected: () => true,
+    );
+    addTearDown(task.dispose);
+    final seen = <(String, String?)>[];
+    task.addListener(() => seen.add((task.status, task.failure)));
+    await task.start('你好');
+    expect(requests, 2);
+    expect(bodies[1]['messages'], bodies[0]['messages']);
+    expect(
+      seen.any(
+        (s) =>
+            s.$1.startsWith('连接中断，1 秒后重试（1/3）') &&
+            (s.$2 ?? '').contains('AI 流式回复中断'),
+      ),
+      isTrue,
+      reason: '重试期间显示中断原因',
+    );
+    expect(task.failure, isNull);
+    expect(task.status, '已完成');
+    expect(task.entries.map((e) => e.text), ['你好', '完整回答']);
+  });
+
+  test('AI 连接持续中断时重试用尽，显示具体原因与重试次数', () async {
+    final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+    addTearDown(() => server.close(force: true));
+    var requests = 0;
+    server.listen((request) async {
+      requests++;
+      await request.drain<void>();
+      (await request.response.detachSocket()).destroy();
+    });
+    final task = AiTaskController(
+      settings: () => AiSettings(
+        baseUrl: 'http://127.0.0.1:${server.port}/v1',
+        model: 'mock',
+      ),
+      executorFactory: _Executor.new,
+      connected: () => true,
+    );
+    addTearDown(task.dispose);
+    await task.start('你好');
+    expect(requests, 1 + aiRetryDelays.length);
+    expect(task.running, isFalse);
+    expect(task.status, '回复中断');
+    expect(
+      task.failure,
+      allOf(
+        startsWith('AI 连接中断：'),
+        contains('HttpException'),
+        endsWith('（已自动重试 3 次）'),
+      ),
+    );
+    expect(task.entries.last.notice, isTrue);
+    expect(task.entries.last.text, task.failure);
+  }, timeout: const Timeout(Duration(seconds: 30)));
+
+  test('重试等待中停止任务不会再次请求', () async {
+    final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+    addTearDown(() => server.close(force: true));
+    var requests = 0;
+    final dropped = Completer<void>();
+    server.listen((request) async {
+      requests++;
+      await request.drain<void>();
+      (await request.response.detachSocket()).destroy();
+      if (!dropped.isCompleted) dropped.complete();
+    });
+    final task = AiTaskController(
+      settings: () => AiSettings(
+        baseUrl: 'http://127.0.0.1:${server.port}/v1',
+        model: 'mock',
+      ),
+      executorFactory: _Executor.new,
+      connected: () => true,
+    );
+    addTearDown(task.dispose);
+    final turn = task.start('你好');
+    await dropped.future;
+    while (!task.status.startsWith('连接中断')) {
+      await Future<void>.delayed(const Duration(milliseconds: 10));
+    }
+    task.stop();
+    await turn;
+    await Future<void>.delayed(const Duration(seconds: 2));
+    expect(requests, 1);
+    expect(task.running, isFalse);
   });
 
   test('增量回调异常不会误报为 AI 网络故障或泄漏异常内容', () async {

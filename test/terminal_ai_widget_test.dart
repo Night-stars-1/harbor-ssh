@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
@@ -1290,6 +1291,86 @@ void main() {
       task.dispose();
     });
   }
+
+  testWidgets('刷新模型列表不关闭菜单，加载中可见，失败显示原因，成功后列表就地更新', (tester) async {
+    tester.view.devicePixelRatio = 1;
+    tester.view.physicalSize = const Size(1280, 900);
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    final client = _RefreshClient();
+    final task = AiTaskController(
+      settings: () => const AiSettings(
+        baseUrl: 'https://ai.example.com/v1',
+        model: 'model-a',
+      ),
+      executorFactory: _RecordingExecutor.new,
+      connected: () => true,
+      clientFactory: () => client,
+    );
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: harborTheme(),
+        home: Scaffold(
+          body: TerminalAiPanel(task: task, hostName: '开发服务器'),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+    final refresh = find.byKey(const ValueKey('ai-refresh-models'));
+    await tester.tap(find.byKey(const ValueKey('ai-model-picker')));
+    await tester.pumpAndSettle();
+    expect(find.text('model-a'), findsWidgets);
+    expect(find.text('model-c'), findsNothing);
+
+    // 失败：菜单保持打开并就地显示原因。
+    client.next = Completer();
+    await tester.tap(refresh);
+    await tester.pump();
+    await tester.pump();
+    expect(refresh, findsOneWidget, reason: '点击刷新后菜单仍打开');
+    expect(
+      find.descendant(
+        of: find.byType(MenuAnchor),
+        matching: find.byType(CircularProgressIndicator),
+      ),
+      findsOneWidget,
+    );
+    expect(
+      tester.widget<MenuItemButton>(refresh).onPressed,
+      isNull,
+      reason: '加载中不重复刷新',
+    );
+    client.next!.completeError(const AiFailure('无法获取模型，请检查地址和网络'));
+    await tester.pumpAndSettle();
+    expect(refresh, findsOneWidget);
+    expect(find.text('无法获取模型，请检查地址和网络'), findsOneWidget);
+
+    // 成功：同一个菜单里换成新列表，错误清除。
+    client.next = Completer();
+    await tester.tap(refresh);
+    await tester.pump();
+    await tester.pump();
+    client.next!.complete(['model-a', 'model-c']);
+    await tester.pumpAndSettle();
+    expect(refresh, findsOneWidget);
+    expect(find.text('无法获取模型，请检查地址和网络'), findsNothing);
+    expect(find.text('model-c'), findsOneWidget);
+    await tester.tap(find.text('model-c'));
+    await tester.pumpAndSettle();
+    expect(task.activeModel, 'model-c');
+    expect(refresh, findsNothing, reason: '选择模型仍会关闭菜单');
+    expect(tester.takeException(), isNull);
+    await tester.pumpWidget(const SizedBox.shrink());
+    task.dispose();
+  });
+}
+
+class _RefreshClient extends TerminalAiClient {
+  Completer<List<String>>? next;
+
+  @override
+  Future<List<String>> listModels(AiSettings settings) =>
+      next?.future ?? Future.value(const ['model-a', 'model-b']);
 }
 
 class _EffortClient extends TerminalAiClient {

@@ -603,11 +603,17 @@ class _TerminalAiPanelState extends State<TerminalAiPanel> {
             ),
           ),
           // Refresh stays pinned below the scrolling body so a tall slide of
-          // models (or 200% text) can never push it out of the menu.
+          // models (or 200% text) can never push it out of the menu. The menu
+          // stays open so the spinner, any error and the new list show in
+          // place.
           MenuItemButton(
+            key: const ValueKey('ai-refresh-models'),
+            closeOnActivate: false,
             style: _floatingMenuItemStyle(),
             leadingIcon: const Icon(Icons.refresh_rounded, size: 18),
-            onPressed: () => _loadModels(task, force: true),
+            onPressed: _loadingModels
+                ? null
+                : () => _loadModels(task, force: true),
             child: const Text('刷新模型列表'),
           ),
         ],

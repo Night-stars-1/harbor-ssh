@@ -3,8 +3,12 @@ import 'dart:convert';
 import 'dart:io';
 
 class AiFailure implements Exception {
-  const AiFailure(this.message);
+  const AiFailure(this.message, {this.retryable = false});
   final String message;
+
+  /// The connection dropped before a complete reply arrived; sending the same
+  /// request again may succeed.
+  final bool retryable;
   @override
   String toString() => message;
 }
@@ -847,9 +851,8 @@ class TerminalAiClient {
     } on TypeError {
       throw const AiFailure('AI 返回格式不正确，请检查接口兼容性');
     } on IOException catch (error) {
-      throw AiFailure(
-        _cancelled ? '已取消生成' : 'AI 连接或响应中断（${error.runtimeType}），请检查网络或服务端',
-      );
+      if (_cancelled) throw const AiFailure('已取消生成');
+      throw AiFailure('AI 连接中断：${_ioDetail(error)}', retryable: true);
     } catch (error) {
       throw AiFailure(
         _cancelled ? '已取消生成' : 'AI 响应处理异常（${error.runtimeType}），请重试或反馈错误类型',
@@ -937,12 +940,12 @@ class TerminalAiClient {
     } on TypeError {
       throw const AiFailure('AI 返回格式不正确，请检查接口兼容性');
     } on IOException catch (error) {
+      if (_cancelled) throw const AiFailure('已取消生成');
       throw AiFailure(
-        _cancelled
-            ? '已取消生成'
-            : streaming
-            ? 'AI 流式回复中断（${error.runtimeType}），请检查网络或服务端后继续'
-            : 'AI 连接或响应中断（${error.runtimeType}），请检查网络或服务端',
+        streaming
+            ? 'AI 流式回复中断：${_ioDetail(error)}'
+            : 'AI 连接中断：${_ioDetail(error)}',
+        retryable: true,
       );
     } catch (error) {
       throw AiFailure(
@@ -952,6 +955,28 @@ class TerminalAiClient {
       client.close(force: true);
       _client = null;
     }
+  }
+
+  /// The cause of a dropped connection in words, plus the OS error code when
+  /// there is one. Never includes the URL, headers or response body.
+  static String _ioDetail(IOException error) {
+    final os = switch (error) {
+      SocketException(:final osError) => osError,
+      TlsException(:final osError) => osError,
+      _ => null,
+    };
+    final reason = switch (error) {
+      SocketException() => '网络连接失败或被重置',
+      HandshakeException() => 'TLS 握手失败',
+      TlsException() => 'TLS 连接异常',
+      HttpException() => '服务端提前关闭了连接',
+      _ => '网络异常',
+    };
+    final code = os == null || os.errorCode == 0 ? '' : '，错误码 ${os.errorCode}';
+    final text = os?.message.trim() ?? '';
+    return text.isEmpty
+        ? '$reason（${error.runtimeType}$code）'
+        : '$reason（${error.runtimeType}$code：$text）';
   }
 
   /// Passes [response] through, failing once it exceeds
