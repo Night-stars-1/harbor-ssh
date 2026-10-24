@@ -746,11 +746,11 @@ class AiTaskController extends ChangeNotifier {
               if (goal.trim().isNotEmpty) {'type': 'text', 'text': goal.trim()},
             ],
     });
-    var commands = 0;
+    var hasToolCalls = false;
     try {
       while (_current(revision)) {
         if (!connected()) throw const AiFailure('SSH 已断开，任务已停止');
-        status = commands == 0 ? '思考中' : '整理结果';
+        status = hasToolCalls ? '整理结果' : '思考中';
         _notify();
         AiTaskEntry? streamedReply;
         AiReply? received;
@@ -818,9 +818,7 @@ class AiTaskController extends ChangeNotifier {
         }
         for (final call in reply.calls) {
           if (!_current(revision)) return;
-          if (++commands > 24) {
-            throw const AiFailure('本轮已执行 24 条命令，可以继续发送消息');
-          }
+          hasToolCalls = true;
           final command = _commandForTool(call);
           final entry = AiTaskEntry(
             command ?? call.command,

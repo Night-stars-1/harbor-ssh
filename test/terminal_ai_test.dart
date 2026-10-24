@@ -66,14 +66,18 @@ class _Executor implements AiCommandExecutor {
   Completer<AiCommandResult>? pending;
   bool cancelled = false;
   int exitCode = 0;
+
+  /// 为 true 时把命令自身作为输出回传，便于校验结果与调用的对应关系。
+  bool echoCommand = false;
   @override
   Future<AiCommandResult> execute(
     String command,
     void Function(String) onOutput,
   ) async {
     commands.add(command);
-    onOutput('server output');
-    return pending?.future ?? AiCommandResult('server output', exitCode);
+    final output = echoCommand ? 'output:$command' : 'server output';
+    onOutput(output);
+    return pending?.future ?? AiCommandResult(output, exitCode);
   }
 
   @override
@@ -766,20 +770,98 @@ void main() {
     second.dispose();
   });
 
-  test('自动循环在 24 条命令后停止', () async {
+  test('同一任务可跨越旧上限连续执行多轮命令，结果按序回传并正常完成', () async {
+    const rounds = 10;
+    const batch = 3;
+    const total = rounds * batch;
+    String command(int index) => 'echo step-$index';
+    AiReply batchCall(int round) {
+      final indexes = [
+        for (var i = 0; i < batch; i++) round * batch + i,
+      ];
+      return AiReply(
+        {
+          'role': 'assistant',
+          'content': null,
+          'tool_calls': [
+            for (final index in indexes)
+              {
+                'id': 'call-$index',
+                'type': 'function',
+                'function': {
+                  'name': 'run_command',
+                  'arguments': jsonEncode({
+                    'command': command(index),
+                    'reason': '顺序检查',
+                    'requires_approval': false,
+                  }),
+                },
+              },
+          ],
+        },
+        [
+          for (final index in indexes)
+            AiToolCall(
+              'call-$index',
+              command(index),
+              '顺序检查',
+              false,
+            ),
+        ],
+      );
+    }
+
     final client = _Client()
-      ..replies.addAll(List.generate(25, (i) => _call('pwd', id: '$i')));
-    final executor = _Executor();
+      ..replies.addAll([
+        for (var round = 0; round < rounds; round++) batchCall(round),
+        _done,
+      ]);
+    final executor = _Executor()..echoCommand = true;
     final task = AiTaskController(
       settings: () => _settings,
       executorFactory: () => executor,
       connected: () => true,
       clientFactory: () => client,
     );
-    await task.start('检查');
-    expect(executor.commands, hasLength(24));
-    expect(task.failure, contains('24'));
-    task.dispose();
+    addTearDown(task.dispose);
+
+    await task.start('按顺序检查 30 项');
+
+    expect(task.failure, isNull);
+    expect(task.running, isFalse);
+    expect(task.status, '已完成');
+    expect(task.entries.last.text, '检查完成');
+    expect(executor.commands, [
+      for (var i = 0; i < total; i++) command(i),
+    ]);
+    final executed = task.entries.where((entry) => entry.command).toList();
+    expect(executed, hasLength(total));
+    expect(executed.every((entry) => entry.finished), isTrue);
+    expect(executed.last.output, 'output:${command(total - 1)}');
+
+    // 每次模型往返批量下发 3 条命令，共 10 次往返后由普通文本收尾。
+    expect(client.requests, hasLength(rounds + 1));
+    final toolResults = client.requests.last
+        .where((message) => message['role'] == 'tool')
+        .toList();
+    expect(toolResults, hasLength(total));
+    for (var i = 0; i < total; i++) {
+      final content = toolResults[i]['content'] as String;
+      final result = jsonDecode(content) as Map<String, dynamic>;
+      expect(toolResults[i]['tool_call_id'], 'call-$i');
+      expect(result['output'], 'output:${command(i)}');
+      expect(result['exitCode'], 0);
+    }
+
+    // 第 25 条及之后仍按序执行，并把实际结果回传给下一次模型请求。
+    final pastLimit = client.requests[rounds - 1]
+        .where((message) => message['role'] == 'tool')
+        .toList();
+    expect(pastLimit, hasLength(total - batch));
+    expect(
+      jsonDecode(pastLimit.last['content'] as String)['output'],
+      'output:${command(total - batch - 1)}',
+    );
   });
 
   test('真实 HTTP 协议请求工具调用，错误消息不回显服务端秘密', () async {
