@@ -6,6 +6,7 @@ import 'dart:typed_data';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:harbor_ssh/data/remote_text_editor.dart';
 import 'package:harbor_ssh/data/ssh_connection.dart';
+import 'package:harbor_ssh/data/ssh_keys.dart';
 import 'package:harbor_ssh/data/remote_metrics.dart';
 import 'package:harbor_ssh/data/terminal_ai.dart';
 import 'package:harbor_ssh/domain/host.dart';
@@ -30,6 +31,7 @@ void main() {
       late int port;
       late String privateKey;
       late String publicKey;
+      late List<Map<String, dynamic>> pkcs8Keys;
       setUpAll(() async {
         fixture = await Process.start('python', ['tool/ssh_fixture.py']);
         final output = fixture.stdout
@@ -48,6 +50,8 @@ void main() {
         port = config['port'] as int;
         privateKey = config['privateKey'] as String;
         publicKey = config['publicKey'] as String;
+        pkcs8Keys = (config['pkcs8Keys'] as List)
+            .cast<Map<String, dynamic>>();
       });
       tearDownAll(() async {
         fixture.kill();
@@ -514,6 +518,69 @@ void main() {
           ConnectionStatus.connected,
           reason: connection.error,
         );
+      });
+      test('PKCS#8 各算法私钥认证、终端命令与 SFTP 使用同一身份', () async {
+        expect(
+          pkcs8Keys.map((entry) => entry['algorithm']).toList(),
+          ['rsa', 'ec-p256', 'ec-p384', 'ec-p521', 'ed25519'],
+        );
+        for (final entry in pkcs8Keys) {
+          final algorithm = entry['algorithm'] as String;
+          final pem = entry['privateKey'] as String;
+          final publicLine = entry['publicKey'] as String;
+          // 应用从同一私钥派生的公钥必须与 fixture 公布的一致。
+          expect(
+            publicKeyFromPrivatePem(pem),
+            publicLine.split(' ').take(2).join(' '),
+            reason: '应用派生的公钥应与 fixture 公布的 $algorithm 公钥一致',
+          );
+          final connection = SshConnection(
+            id: 'pkcs8-$algorithm',
+            host: host(method: AuthMethod.privateKey),
+          );
+          addTearDown(connection.dispose);
+          await connection.connect(
+            Credentials(privateKey: pem),
+            memoryRepository(),
+            (_, _) async => true,
+          );
+          expect(
+            connection.status,
+            ConnectionStatus.connected,
+            reason: connection.error,
+          );
+          await eventually(
+            () =>
+                connection.terminal.buffer.getText().contains('测试 connected'),
+          );
+          // 虚拟命令回报本次会话实际通过校验的公钥指纹。
+          connection.send('auth-key\r');
+          await eventually(
+            () => connection.terminal.buffer.getText().contains(
+              'AUTHKEY=${entry['fingerprint']}',
+            ),
+          );
+          connection.send('pkcs8-$algorithm\r');
+          await eventually(
+            () => connection.terminal.buffer.getText().contains(
+              'ECHO=pkcs8-$algorithm',
+            ),
+          );
+          // 同一连接上的 SFTP 通道读到 fixture 固定内容。
+          final listing = await connection.files.browse('~');
+          final readme = listing.entries.firstWhere(
+            (file) => file.name == 'readme.txt',
+          );
+          final bytes = BytesBuilder();
+          await connection.files.download(
+            readme.path,
+            (chunk) async => bytes.add(chunk),
+            cancellation: TransferCancellation(),
+            onProgress: (_) {},
+          );
+          expect(utf8.decode(bytes.takeBytes()), 'Hello SFTP\n');
+          connection.close();
+        }
       });
       test('AI 独立执行通道返回输出与退出码，取消不关闭交互终端', () async {
         final connection = SshConnection(id: 'ai-exec', host: host());

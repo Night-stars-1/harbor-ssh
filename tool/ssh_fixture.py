@@ -1,4 +1,6 @@
 """Loopback-only SSH protocol fixture. No OS commands are executed."""
+import base64
+import hashlib
 import io
 import json
 import logging
@@ -12,6 +14,8 @@ import threading
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / ".tools" / "python"))
 import paramiko
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric import ec, ed25519, rsa
 
 logging.getLogger("paramiko").setLevel(logging.CRITICAL)
 host_key = paramiko.RSAKey.generate(2048)
@@ -22,6 +26,42 @@ client_key.write_private_key(key_text, password="fixture-passphrase")
 public_key_line = "ssh-rsa {} harbor-fixture-client".format(client_key.get_base64())
 existing_key_line = "ssh-rsa {} harbor-fixture-host".format(host_key.get_base64())
 resume_storage = None
+
+
+def _pkcs8_fixture_keys():
+    """Unencrypted PKCS#8 client keys and their SSH public halves."""
+    generated = [
+        ("rsa", rsa.generate_private_key(public_exponent=65537, key_size=2048)),
+        ("ec-p256", ec.generate_private_key(ec.SECP256R1())),
+        ("ec-p384", ec.generate_private_key(ec.SECP384R1())),
+        ("ec-p521", ec.generate_private_key(ec.SECP521R1())),
+        ("ed25519", ed25519.Ed25519PrivateKey.generate()),
+    ]
+    entries, blobs = [], set()
+    for algorithm, private_key in generated:
+        pem = private_key.private_bytes(
+            serialization.Encoding.PEM,
+            serialization.PrivateFormat.PKCS8,
+            serialization.NoEncryption(),
+        ).decode()
+        # cryptography already emits the OpenSSH public line for these types.
+        key_type, encoded = private_key.public_key().public_bytes(
+            serialization.Encoding.OpenSSH,
+            serialization.PublicFormat.OpenSSH,
+        ).decode().strip().split(" ")
+        blob = base64.b64decode(encoded)
+        digest = base64.b64encode(hashlib.sha256(blob).digest()).decode()
+        entries.append({
+            "algorithm": algorithm,
+            "privateKey": pem,
+            "publicKey": f"{key_type} {encoded} harbor-fixture-pkcs8-{algorithm}",
+            "fingerprint": "SHA256:" + digest.rstrip("="),
+        })
+        blobs.add(blob)
+    return entries, blobs
+
+
+pkcs8_client_keys, pkcs8_client_blobs = _pkcs8_fixture_keys()
 
 
 def requested_permissions(attr, default):
@@ -275,6 +315,7 @@ class Server(paramiko.ServerInterface):
     def __init__(self):
         self.shell_ready = threading.Event()
         self.shell_channel = None
+        self.auth_key = None
         self.width, self.height = 80, 24
         self.catalog_queries = 0
         self.metrics_queries = 0
@@ -286,7 +327,12 @@ class Server(paramiko.ServerInterface):
         self.resume_mode = username == 'resume-tester'
         return paramiko.AUTH_SUCCESSFUL if username in ('tester', 'resume-tester') and password == 'fixture-password' else paramiko.AUTH_FAILED
     def check_auth_publickey(self, username, key):
-        return paramiko.AUTH_SUCCESSFUL if username == "tester" and key == client_key else paramiko.AUTH_FAILED
+        if username != "tester":
+            return paramiko.AUTH_FAILED
+        if key == client_key or key.asbytes() in pkcs8_client_blobs:
+            self.auth_key = key
+            return paramiko.AUTH_SUCCESSFUL
+        return paramiko.AUTH_FAILED
     def check_channel_request(self, kind, chanid):
         return paramiko.OPEN_SUCCEEDED if kind == "session" else paramiko.OPEN_FAILED_ADMINISTRATIVELY_PROHIBITED
     def check_channel_pty_request(self, channel, term, width, height, pixelwidth, pixelheight, modes):
@@ -446,6 +492,13 @@ def serve(client):
                     channel.sendall(f"SIZE={server.width}x{server.height}\r\n$ ".encode())
                 elif command == b"catalog-count":
                     channel.sendall(f"CATALOGS={server.catalog_queries}\r\n$ ".encode())
+                elif command == b"auth-key":
+                    identity = (
+                        "none"
+                        if server.auth_key is None
+                        else server.auth_key.fingerprint
+                    )
+                    channel.sendall(f"AUTHKEY={identity}\r\n$ ".encode())
                 else:
                     channel.sendall(b"ECHO=" + command + b"\r\n$ ")
     except (EOFError, OSError, paramiko.SSHException):
@@ -461,6 +514,7 @@ print(json.dumps({
     "privateKey": key_text.getvalue(),
     "publicKey": public_key_line,
     "existingKey": existing_key_line,
+    "pkcs8Keys": pkcs8_client_keys,
 }), flush=True)
 while True:
     client, _ = listener.accept()

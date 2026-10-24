@@ -76,7 +76,7 @@ class EcKeyPair {
         final inner = ASN1Parser(element.valueBytes()).nextObject();
         if (inner is ASN1ObjectIdentifier && inner.identifier != null) {
           final oid = inner.identifier!;
-          curveId = _curveIdFromOid(oid);
+          curveId = curveIdFromOid(oid);
           if (curveId == null) {
             throw UnsupportedError(
                 'Unsupported EC PRIVATE KEY curve OID: $oid');
@@ -97,7 +97,7 @@ class EcKeyPair {
     }
 
     if (publicPoint != null) {
-      final expectedPublicPoint = _derivePublicPoint(curveId, d);
+      final expectedPublicPoint = derivePublicPoint(curveId, d);
       if (publicPoint.length != expectedPublicPoint.length ||
           !publicPoint.equals(expectedPublicPoint)) {
         throw UnsupportedError(
@@ -105,12 +105,13 @@ class EcKeyPair {
       }
     }
 
-    final q = publicPoint ?? _derivePublicPoint(curveId, d);
+    final q = publicPoint ?? derivePublicPoint(curveId, d);
 
     return OpenSSHEcdsaKeyPair(curveId, q, d, '');
   }
 
-  String? _curveIdFromOid(String oid) {
+  /// Maps a named-curve OID to its SSH curve identifier.
+  static String? curveIdFromOid(String oid) {
     if (oid == '1.2.840.10045.3.1.7') return 'nistp256';
     if (oid == '1.3.132.0.34') return 'nistp384';
     if (oid == '1.3.132.0.35') return 'nistp521';
@@ -130,8 +131,14 @@ class EcKeyPair {
     return null;
   }
 
-  Uint8List _derivePublicPoint(String curveId, BigInt d) {
-    final curve = _curveForId(curveId);
+  /// Derives the uncompressed public point for private scalar [d].
+  static Uint8List derivePublicPoint(String curveId, BigInt d) {
+    return derivePublicPointForCurve(curveForId(curveId), d);
+  }
+
+  /// Derives the uncompressed public point for [d] on [curve].
+  static Uint8List derivePublicPointForCurve(
+      ECDomainParameters curve, BigInt d) {
     final point = curve.G * d;
     if (point == null) {
       throw FormatException('Failed to derive public EC point');
@@ -139,7 +146,8 @@ class EcKeyPair {
     return point.getEncoded(false);
   }
 
-  ECDomainParameters _curveForId(String curveId) {
+  /// Returns the domain parameters for [curveId].
+  static ECDomainParameters curveForId(String curveId) {
     switch (curveId) {
       case 'nistp256':
         return ECCurve_secp256r1();

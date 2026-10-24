@@ -2,6 +2,7 @@ import 'dart:typed_data';
 
 import 'package:dartssh2/src/key_pair/openssh_key_pair.dart';
 import 'package:dartssh2/src/key_pair/pkcs1_rsa_key_pair.dart';
+import 'package:dartssh2/src/key_pair/pkcs8_key_pair.dart';
 import 'package:dartssh2/src/key_pair/sec1_ec_key_pair.dart';
 import 'package:dartssh2/src/ssh_hostkey.dart';
 import 'package:dartssh2/src/ssh_identity.dart';
@@ -14,7 +15,8 @@ export 'package:dartssh2/src/key_pair/sec1_ec_key_pair.dart';
 /// Base interface for in-memory SSH cryptographic key pairs.
 ///
 /// Implements [SSHIdentity] for authentication and provides factory methods to
-/// parse OpenSSH, PKCS#1 RSA, and SEC1 EC private key formats.
+/// parse OpenSSH, PKCS#1 RSA, SEC1 EC, and unencrypted PKCS#8 private key
+/// formats.
 abstract class SSHKeyPair implements SSHIdentity {
   /// Decodes one or more [SSHKeyPair] instances from [pemText].
   ///
@@ -23,6 +25,8 @@ abstract class SSHKeyPair implements SSHIdentity {
   /// - `OPENSSH PRIVATE KEY` (OpenSSH format, including bcrypt KDF)
   /// - `RSA PRIVATE KEY` (PKCS#1 format)
   /// - `EC PRIVATE KEY` (SEC1 format)
+  /// - `PRIVATE KEY` (unencrypted PKCS#8 format, including RSA, NIST EC,
+  ///   and Ed25519)
   static List<SSHKeyPair> fromPem(String pemText, [String? passphrase]) {
     final pem = SSHPem.decode(pemText);
     switch (pem.type) {
@@ -35,6 +39,12 @@ abstract class SSHKeyPair implements SSHIdentity {
       case 'EC PRIVATE KEY':
         final pair = EcKeyPair.decode(pem);
         return [pair.getPrivateKeys(passphrase)];
+      case 'PRIVATE KEY':
+        final pair = Pkcs8KeyPair.decode(pem);
+        return [pair.getPrivateKeys(passphrase)];
+      case 'ENCRYPTED PRIVATE KEY':
+        throw UnsupportedError(
+            'Encrypted PKCS#8 PRIVATE KEY is not supported');
       default:
         throw UnsupportedError('Unsupported key type: ${pem.type}');
     }
@@ -53,6 +63,11 @@ abstract class SSHKeyPair implements SSHIdentity {
       case 'EC PRIVATE KEY':
         final pair = EcKeyPair.decode(pem);
         return pair.isEncrypted;
+      case 'PRIVATE KEY':
+        final pair = Pkcs8KeyPair.decode(pem);
+        return pair.isEncrypted;
+      case 'ENCRYPTED PRIVATE KEY':
+        return true;
       default:
         throw UnsupportedError('Unsupported key type: ${pem.type}');
     }
