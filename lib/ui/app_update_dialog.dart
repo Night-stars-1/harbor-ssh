@@ -49,6 +49,9 @@ class _AppUpdateDialogState extends State<AppUpdateDialog> {
   _Phase _phase = _Phase.ready;
   String _error = '';
   AppUpdater? _updater;
+
+  /// The updater that opened the macOS image; quits the app afterwards.
+  AppUpdater? _installer;
   final _received = ValueNotifier(0);
 
   AppRelease get _release => widget.check.release;
@@ -77,7 +80,10 @@ class _AppUpdateDialogState extends State<AppUpdateDialog> {
       await updater.install(package);
       if (!mounted) return;
       if (updater.platform == TargetPlatform.macOS) {
-        setState(() => _phase = _Phase.opened);
+        setState(() {
+          _phase = _Phase.opened;
+          _installer = updater;
+        });
       } else {
         Navigator.pop(context);
       }
@@ -371,7 +377,7 @@ class _AppUpdateDialogState extends State<AppUpdateDialog> {
         return _Banner(
           key: const ValueKey('status-opened'),
           icon: Icons.check_circle_outline_rounded,
-          message: '已打开安装包，请将 Harbor SSH 拖入「应用程序」替换旧版本。',
+          message: '已打开安装包。请先退出软件，再将 Harbor SSH 拖入「应用程序」替换旧版本。',
           background: colors.primaryContainer,
           foreground: colors.onPrimaryContainer,
         );
@@ -412,7 +418,12 @@ class _AppUpdateDialogState extends State<AppUpdateDialog> {
       ],
       _Phase.installing => const <Widget>[],
       _Phase.opened => [
-        FilledButton(onPressed: close, child: const Text('完成')),
+        FilledButton(
+          key: const ValueKey('update-quit'),
+          autofocus: true,
+          onPressed: () => _installer!.quit(),
+          child: const Text('退出软件'),
+        ),
       ],
       _Phase.ready || _Phase.failed => [
         TextButton(

@@ -357,4 +357,7 @@ class AppUpdater {
         throw const UpdateFailure('当前平台不支持应用内安装');
     }
   }
+
+  /// Quits Harbor SSH, e.g. so the macOS copy being replaced is not running.
+  void quit() => exit(0);
 }

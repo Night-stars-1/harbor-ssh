@@ -48,6 +48,10 @@ class AppearancePreferences {
   /// instead of a side panel section. Stored only on this device.
   final bool titleBarSessions;
 
+  /// Navigation and sessions both live in the title bar, so wide desktop
+  /// layouts show no side panel at all.
+  bool get sidebarHidden => titleBarNavigation && titleBarSessions;
+
   /// Desktop only: the window shows the native system backdrop through
   /// translucent app surfaces. Windows uses acrylic material, macOS uses
   /// vibrancy, and Linux uses KDE/KWin background blur when available.

@@ -713,6 +713,24 @@ void main() {
     );
     final terminalState = tester.state(find.byType(TerminalView));
     expect(tab('first'), findsNothing);
+    Finder sidebarSession(String id) =>
+        find.byKey(ValueKey('session-menu-$id'));
+
+    // 会话以空图标快照打开；之后正常保存主机图标，无需重连即可生效。
+    expect(model.loading, isFalse);
+    const renamedFirst = Host(
+      id: 'host-1',
+      name: '改名后的主机',
+      address: 'dev.example.com',
+      username: 'deploy',
+      tags: ['开发'],
+      icon: 'router',
+    );
+    await model.saveHost(renamedFirst, null);
+    await tester.pumpAndSettle();
+    expect(first.host, same(testHost));
+    expect(first.host.icon, '');
+    expect(second.host.icon, 'database');
 
     await model.saveAppearance(
       const AppearancePreferences(titleBarSessions: true),
@@ -725,7 +743,7 @@ void main() {
       findsNothing,
     );
     expect(tab('first'), findsOneWidget);
-    // 自定义图标显示在标签上；未设置图标的会话沿用终端图标。
+    // 图标读已保存主机的最新配置；未保存的会话沿用快照图标。
     expect(
       find.descendant(
         of: tab('second'),
@@ -736,10 +754,113 @@ void main() {
     expect(
       find.descendant(
         of: tab('first'),
+        matching: find.byIcon(Icons.router_rounded),
+      ),
+      findsOneWidget,
+    );
+    expect(
+      find.descendant(
+        of: tab('first'),
+        matching: find.byIcon(Icons.terminal_rounded),
+      ),
+      findsNothing,
+    );
+    expect(
+      find.descendant(of: tab('first'), matching: find.text(testHost.name)),
+      findsOneWidget,
+    );
+    expect(tester.state(find.byType(TerminalView)), same(terminalState));
+
+    // 清空图标恢复默认终端图标，再换图标也立即生效。
+    await model.saveHost(
+      const Host(
+        id: 'host-1',
+        name: '改名后的主机',
+        address: 'dev.example.com',
+        username: 'deploy',
+        tags: ['开发'],
+      ),
+      null,
+    );
+    await tester.pumpAndSettle();
+    expect(
+      find.descendant(
+        of: tab('first'),
         matching: find.byIcon(Icons.terminal_rounded),
       ),
       findsOneWidget,
     );
+    expect(
+      find.descendant(
+        of: tab('first'),
+        matching: find.byIcon(Icons.router_rounded),
+      ),
+      findsNothing,
+    );
+    await model.saveHost(
+      const Host(
+        id: 'host-1',
+        name: '改名后的主机',
+        address: 'dev.example.com',
+        username: 'deploy',
+        tags: ['开发'],
+        icon: 'web',
+      ),
+      null,
+    );
+    await tester.pumpAndSettle();
+    expect(
+      find.descendant(
+        of: tab('first'),
+        matching: find.byIcon(Icons.public_rounded),
+      ),
+      findsOneWidget,
+    );
+
+    // 关掉标题栏会话时侧栏显示同一份最新图标，切回来保持一致。
+    await model.saveAppearance(
+      const AppearancePreferences(titleBarNavigation: true),
+    );
+    await tester.pumpAndSettle();
+    expect(tab('first'), findsNothing);
+    expect(
+      find.descendant(
+        of: sidebarSession('first'),
+        matching: find.byIcon(Icons.public_rounded),
+      ),
+      findsOneWidget,
+    );
+    // 侧栏也沿用会话快照的名字与未保存主机的图标。
+    expect(
+      find.descendant(
+        of: sidebarSession('first'),
+        matching: find.text(testHost.name),
+      ),
+      findsOneWidget,
+    );
+    expect(
+      find.descendant(
+        of: sidebarSession('second'),
+        matching: find.byIcon(Icons.storage_rounded),
+      ),
+      findsOneWidget,
+    );
+    await model.saveAppearance(
+      const AppearancePreferences(titleBarSessions: true),
+    );
+    await tester.pumpAndSettle();
+    expect(
+      find.descendant(
+        of: tab('first'),
+        matching: find.byIcon(Icons.public_rounded),
+      ),
+      findsOneWidget,
+    );
+    // 只换图标，没有重连或新建会话，终端输出保持。
+    expect(model.sessions, [first, second]);
+    expect(first.host, same(testHost));
+    expect(first.status, ConnectionStatus.connected);
+    expect(first.terminal.buffer.getText(), contains('first output'));
     expect(tester.state(find.byType(TerminalView)), same(terminalState));
 
     await tester.tap(tab('second'));
@@ -775,6 +896,13 @@ void main() {
     expect(sidebar, findsNothing);
     expect(find.byKey(const ValueKey('sidebar-toggle')), findsNothing);
     expect(tab('second'), findsOneWidget);
+    expect(
+      find.descendant(
+        of: tab('second'),
+        matching: find.byIcon(Icons.storage_rounded),
+      ),
+      findsOneWidget,
+    );
     expect(find.byKey(const ValueKey('title-bar-users')), findsOneWidget);
 
     // 窄屏回到移动端布局，标题栏不再放会话标签。

@@ -335,6 +335,11 @@ Widget _settingsButton(
   icon: const Icon(Icons.settings_outlined, semanticLabel: '设置'),
 );
 
+/// 会话显示的图标。连接快照保留建连时的身份，图标以已保存的主机配置为准，
+/// 这样编辑图标后标题栏和侧栏无需重连即可更新；主机尚未保存时沿用快照。
+IconData _sessionHostIcon(WorkspaceModel model, SshConnection session) =>
+    sessionIcon(model.sessionHostIcon(session.host));
+
 /// Actions shared by a session's sidebar item and its title bar tab.
 List<Widget> _sessionMenuChildren(
   BuildContext context,
@@ -429,7 +434,7 @@ class _TitleBarSessionTabs extends StatelessWidget {
                       mainAxisSize: MainAxisSize.min,
                       children: [
                         Icon(
-                          sessionIcon(session.host.icon),
+                          _sessionHostIcon(model, session),
                           size: 16,
                           color: session.status == ConnectionStatus.connected
                               ? (selected
@@ -1839,7 +1844,7 @@ class _WorkspaceState extends State<Workspace> {
                   borderRadius: BorderRadius.circular(12),
                 ),
                 leading: Icon(
-                  sessionIcon(session.host.icon),
+                  _sessionHostIcon(model, session),
                   color: session.status == ConnectionStatus.connected
                       ? colors.primary
                       : colors.onSurfaceVariant,
@@ -1860,7 +1865,7 @@ class _WorkspaceState extends State<Workspace> {
                 ),
               )
             : _navItem(
-                sessionIcon(session.host.icon),
+                _sessionHostIcon(model, session),
                 session.host.name,
                 '',
                 selected,

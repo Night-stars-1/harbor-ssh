@@ -18,7 +18,18 @@ Future<void> main(List<String> arguments) async {
   final settings =
       usesWindowsTitleBar && arguments.contains('--settings-window');
   final ai = usesWindowsTitleBar && arguments.contains('--ai-window');
-  await initializeWindowsWindow(settings: settings, ai: ai);
+  // macOS shows the main window only after it is configured; size it for the
+  // saved layout first so a window without a side panel opens narrower.
+  final sidebarless =
+      usesMacosTitleBar &&
+      (await WorkspaceModel.readAppearance(PreferencesStore()))
+              ?.sidebarHidden ==
+          true;
+  await initializeWindowsWindow(
+    settings: settings,
+    ai: ai,
+    size: sidebarless ? macosSidebarlessWindowSize : null,
+  );
   if (settings) {
     runApp(const SettingsWindowApp());
     return;

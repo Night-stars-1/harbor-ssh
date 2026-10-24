@@ -14,11 +14,14 @@ import 'package:harbor_ssh/ui/workspace_model.dart';
 import 'support.dart';
 
 class _FakeUpdater extends AppUpdater {
-  _FakeUpdater(this.release, {this.onDownload})
-    : super(platform: TargetPlatform.android);
+  _FakeUpdater(
+    this.release, {
+    this.onDownload,
+    super.platform = TargetPlatform.android,
+  });
   final AppRelease release;
   final Future<File> Function(void Function(int, int)?)? onDownload;
-  int checks = 0, installs = 0;
+  int checks = 0, installs = 0, quits = 0;
   bool cancelled = false;
 
   @override
@@ -41,6 +44,9 @@ class _FakeUpdater extends AppUpdater {
 
   @override
   void cancel() => cancelled = true;
+
+  @override
+  void quit() => quits++;
 }
 
 AppRelease _release(String version) => AppRelease(
@@ -141,6 +147,46 @@ void main() {
     await tester.tap(find.byKey(const ValueKey('update-install')));
     await tester.pumpAndSettle();
     expect(updater.installs, 1);
+  });
+
+  testWidgets('macOS 打开安装包后只提供「退出软件」，点击退出应用', (tester) async {
+    final updater = _FakeUpdater(
+      _release('1.1.0'),
+      onDownload: (_) async => File('update.dmg'),
+      platform: TargetPlatform.macOS,
+    );
+    final model = WorkspaceModel(memoryRepository());
+    await model.initialize();
+    final controller = LocalSyncSettingsController(model);
+    addTearDown(controller.dispose);
+    addTearDown(model.dispose);
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: harborTheme(),
+        home: Scaffold(
+          body: AboutSettings(
+            controller: controller,
+            updaterFactory: () => updater,
+          ),
+        ),
+      ),
+    );
+    await tester.tap(find.byKey(const ValueKey('update-check')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const ValueKey('update-install')));
+    await tester.pumpAndSettle();
+    expect(updater.installs, 1);
+    expect(find.textContaining('请先退出软件'), findsOneWidget);
+    expect(find.text('完成'), findsNothing);
+    final quit = find.byKey(const ValueKey('update-quit'));
+    expect(
+      find.descendant(of: quit, matching: find.text('退出软件')),
+      findsOneWidget,
+    );
+    expect(updater.quits, 0);
+    await tester.tap(quit);
+    await tester.pump();
+    expect(updater.quits, 1);
   });
 
   testWidgets('启动检查：跳过的版本不再提示，关闭自动检查后不请求', (tester) async {

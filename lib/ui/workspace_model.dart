@@ -76,15 +76,23 @@ class WorkspaceModel extends ChangeNotifier {
   }
 
   Future<void> _loadAppearance() async {
+    final saved = await readAppearance(repository.preferences);
+    if (saved != null && !_disposed) appearance.value = saved;
+  }
+
+  /// The saved appearance, or null when none is stored or it is unreadable.
+  /// Also read before the first window is shown, ahead of [initialize].
+  static Future<AppearancePreferences?> readAppearance(
+    KeyValueStore preferences,
+  ) async {
     try {
-      final saved = await repository.preferences.read(_appearanceKey);
-      if (saved != null && !_disposed) {
-        appearance.value = AppearancePreferences.fromJson(
-          jsonDecode(saved) as Map,
-        );
-      }
+      final saved = await preferences.read(_appearanceKey);
+      return saved == null
+          ? null
+          : AppearancePreferences.fromJson(jsonDecode(saved) as Map);
     } catch (_) {
       // An unreadable appearance preference must not prevent loading connections.
+      return null;
     }
   }
 
@@ -158,6 +166,17 @@ class WorkspaceModel extends ChangeNotifier {
   Timer? _syncDelay, _syncPoll;
   List<Host> _hosts = [];
   List<Host> get hosts => List.unmodifiable(_hosts);
+
+  /// 会话展示图标对应的主机配置 id：快照只保留建连时的身份，图标以最新的
+  /// 已保存主机为准，未保存的主机沿用快照。直接遍历内部列表，避免每个会话
+  /// 复制整份 [hosts]。
+  String sessionHostIcon(Host snapshot) {
+    for (final host in _hosts) {
+      if (host.id == snapshot.id) return host.icon;
+    }
+    return snapshot.icon;
+  }
+
   static const _hostOrderKey = 'harbor.host-order.v1';
   Map<String, int> _hostRank = const {};
 
