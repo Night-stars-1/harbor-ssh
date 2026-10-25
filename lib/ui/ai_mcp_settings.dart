@@ -670,11 +670,21 @@ class _AiMcpServerDialogState extends State<_AiMcpServerDialog> {
               ),
               if (_headers.isEmpty)
                 Padding(
-                  padding: const EdgeInsets.only(top: 6),
-                  child: Text(
-                    '请求头可留空，鉴权信息仅保存在本机。',
-                    style: theme.textTheme.bodyMedium?.copyWith(
-                      color: colors.onSurfaceVariant,
+                  padding: const EdgeInsets.only(top: 10),
+                  child: Material(
+                    color: colors.surfaceContainerLow,
+                    shape: HarborShapes.superellipse(
+                      const BorderRadius.all(HarborShapes.md),
+                    ),
+                    child: Padding(
+                      padding: const EdgeInsets.all(20),
+                      child: Text(
+                        '请求头可留空，鉴权信息仅保存在本机。',
+                        textAlign: TextAlign.center,
+                        style: theme.textTheme.bodyMedium?.copyWith(
+                          color: colors.onSurfaceVariant,
+                        ),
+                      ),
                     ),
                   ),
                 )

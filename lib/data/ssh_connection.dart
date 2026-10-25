@@ -47,17 +47,22 @@ class SshConnection extends ChangeNotifier {
     );
   });
   AiCommandExecutor createAiExecutor() => SshAiExecutor(
-    (command) async {
-      final client = _client;
-      if (client == null || status != ConnectionStatus.connected || _closed) {
-        throw const AiFailure('SSH 已断开，请重新连接');
-      }
-      return client.execute(command);
-    },
+    _openAiExec,
     systemContext: _aiSystemContext(),
+    // Each call opens a separate writable-stdin exec channel, so the root
+    // supervisor can never share the human terminal or the default exec path.
+    openPrivilege: _openAiExec,
     startForward: _aiCreatePortForward,
     stopForward: (ruleId) => portForwards.stop(ruleId),
   );
+
+  Future<SSHSession> _openAiExec(String command) async {
+    final client = _client;
+    if (client == null || status != ConnectionStatus.connected || _closed) {
+      throw const AiFailure('SSH 已断开，请重新连接');
+    }
+    return client.execute(command);
+  }
   RemoteFileSystem get files => SftpFiles(_openSftp);
   late Host _host;
   Host get host => _host;

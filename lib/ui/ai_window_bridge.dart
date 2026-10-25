@@ -29,6 +29,15 @@ abstract final class AiWindowOp {
   static const start = 'start';
   static const stop = 'stop';
   static const approve = 'approve';
+
+  /// Verifies the password of the exact pending `request_root` call. The
+  /// password travels as a transient argument of this action only.
+  static const authorizeRoot = 'authorizeRoot';
+
+  /// Ends this turn's root session. A running turn is stopped, never silently
+  /// downgraded and continued. The request names the turn it was rendered for
+  /// ([AiTaskController.turnStartedAt]) and is ignored once that turn is gone.
+  static const endRoot = 'endRoot';
   static const setModel = 'setModel';
   static const setReasoningEffort = 'setReasoningEffort';
   static const setApprovalMode = 'setApprovalMode';
@@ -52,6 +61,12 @@ abstract final class AiWindowOp {
 /// and the encrypted conversation store; the second engine only renders and
 /// forwards. `changed`/`state` payloads never carry an API key, an SSH secret
 /// or command text typed outside the conversation.
+///
+/// The one credential that does cross the channel is a root password submitted
+/// in the detached window, and only as the transient `authorizeRoot` action
+/// argument: the mirror reports [`rootActive`], [`authorizingRoot`] and a fixed
+/// [`privilegeError`] instead of anything derived from it, so nothing about the
+/// password is ever echoed back, stored or logged.
 class AiWindowHost extends ChangeNotifier {
   AiWindowHost({
     required this.appearance,
@@ -77,6 +92,11 @@ class AiWindowHost extends ChangeNotifier {
   Future<bool> Function(String sessionId)? _ensure;
 
   String _catalogSignature = '';
+
+  /// Host-wide counter behind [_DetachedSession.generation]. Deriving it from
+  /// the previous registration alone would restart at 1 after an unregister,
+  /// letting a late action from the old window match the replacement mirror.
+  int _generationSerial = 0;
 
   /// Binds the authoritative session directory.
   ///
@@ -122,6 +142,8 @@ class AiWindowHost extends ChangeNotifier {
   /// [dispose]; opening and closing the window never re-subscribes. Registering
   /// the same session again (a reconnected pane) bumps the mirror generation so
   /// the detached window drops the previous conversation instead of mixing it.
+  /// The generation is a host-wide serial, so closing and reopening the same
+  /// session id never hands the new mirror a value an old window still holds.
   void register(
     String sessionId,
     AiTaskController task,
@@ -148,7 +170,7 @@ class AiWindowHost extends ChangeNotifier {
       hostName,
       onDock,
       onSettings,
-      (previous?.generation ?? 0) + 1,
+      ++_generationSerial,
     );
     _sessions[sessionId] = session;
     task.addListener(session.markDirty);
@@ -296,7 +318,8 @@ class AiWindowHost extends ChangeNotifier {
           (session) =>
               '${session.id}|${session.hostName}|${session.endpoint}'
               '|${session.connected}|${session.running}'
-              '|${session.waitingApproval}',
+              '|${session.waitingApproval}'
+              '|${session.rootActive}|${session.authorizingRoot}',
         )
         .join('\n');
     if (signature == _catalogSignature) return;
@@ -353,6 +376,18 @@ class AiWindowHost extends ChangeNotifier {
         ? Map<String, Object?>.from(map['args'] as Map)
         : const <String, Object?>{};
     final generation = session.generation;
+    // A privilege decision belongs to one exact mirror generation: a window
+    // that saw a pane which has since been rebuilt must neither elevate nor
+    // stop the controller that replaced it.
+    if ((op == AiWindowOp.authorizeRoot || op == AiWindowOp.endRoot) &&
+        map['generation'] != generation) {
+      final mirrored = _sessionId == null ? null : _sessions[_sessionId];
+      return <String, Object?>{
+        'state':
+            mirrored?.snapshot(full: true) ??
+            const <String, Object?>{'sessionId': null},
+      };
+    }
     final result = await session.run(op, argumentsMap);
     // A reply that arrives after the window moved to another session (or after
     // its pane was rebuilt) must never drag the old conversation back.
@@ -461,7 +496,8 @@ class _DetachedSession {
   VoidCallback onDock;
   VoidCallback? onSettings;
 
-  /// Bumped whenever a session id is re-registered with a new controller.
+  /// Unique within the host: bumped on every registration of a new controller,
+  /// never reused even after the session id is unregistered.
   final int generation;
 
   bool _disposed = false;
@@ -572,6 +608,47 @@ class _DetachedSession {
             saveForward: arguments['saveForward'] == true,
             expectedCallId: expected,
           );
+        case AiWindowOp.authorizeRoot:
+          final expected = arguments['callId'];
+          final password = arguments['password'];
+          // The password is an argument of this call only: it is handed to the
+          // controller and never stored on the mirror, an entry, the history or
+          // a log. A repeated or late submission is dropped by the exact id.
+          if (expected is! String || password is! String) return null;
+          final current = task.pending;
+          if (current == null ||
+              current.id != expected ||
+              current.name != aiRootToolName) {
+            return null;
+          }
+          try {
+            await task.authorizeRoot(password, expectedCallId: expected);
+          } catch (_) {
+            // The raw error is never rethrown: an exception raised while a
+            // password is in flight may quote the credential or the SSH prompt
+            // that produced it.
+            throw PlatformException(
+              code: 'ai',
+              message: '提权未完成，请重试',
+            );
+          }
+        case AiWindowOp.endRoot:
+          // The only endRoot the panel offers is the root banner, so a turn
+          // that holds no root state has nothing to end.
+          if (!task.rootActive &&
+              !task.authorizingRoot &&
+              task.privilegeError == null) {
+            return null;
+          }
+          // The click names the turn it was rendered for. A delayed click that
+          // arrives after the model moved on (same controller, therefore the
+          // same generation) must not stop a turn that started since — even
+          // when that new turn also holds root. No token, no endRoot.
+          final expectedTurn = arguments['turnStartedAt'];
+          if (expectedTurn != task.turnStartedAt?.toIso8601String()) {
+            return null;
+          }
+          task.endRoot();
         case AiWindowOp.setModel:
           task.setModel(arguments['model'] as String?);
         case AiWindowOp.setReasoningEffort:
@@ -685,6 +762,10 @@ class _DetachedSession {
       'running': task.running,
       'status': task.status,
       'failure': task.failure,
+      // Root state only, never the password that produced it.
+      'rootActive': task.rootActive,
+      'authorizingRoot': task.authorizingRoot,
+      'privilegeError': task.privilegeError,
       'pending': pending == null
           ? null
           : <String, Object?>{
@@ -878,6 +959,13 @@ class RemoteAiTaskController extends AiTaskController
   bool _resyncPending = false;
   bool _selecting = false;
 
+  /// A password was submitted and its forward is still in flight. Holds no
+  /// secret: session, generation and the call id are enough to decide whether
+  /// the verifying state still describes the mirrored conversation.
+  ({int serial, String? session, int generation, String callId})?
+  _rootSubmission;
+  int _rootSubmissionSerial = 0;
+
   @override
   List<AiConversationSummary> get conversations =>
       List.unmodifiable(_mirror.conversations);
@@ -910,6 +998,29 @@ class RemoteAiTaskController extends AiTaskController
   bool get settingsAvailable => _mirror.settingsAvailable;
 
   AppearancePreferences get appearance => _mirror.appearance;
+
+  /// Whether the main-engine turn currently runs commands as root. Read from
+  /// the mirror: the detached engine never elevates anything itself.
+  @override
+  bool get rootActive => _mirror.rootActive;
+
+  /// True while a submitted password is being verified. The in-flight forward
+  /// counts only for the conversation that submitted it: switching to another
+  /// session, a rebuilt pane or a newer pending call never inherits it, so an
+  /// unrelated prompt is not left locked behind someone else's verification.
+  @override
+  bool get authorizingRoot {
+    if (_mirror.authorizingRoot) return true;
+    final submission = _rootSubmission;
+    if (submission == null) return false;
+    return submission.session == _mirror.sessionId &&
+        submission.generation == _mirror.generation &&
+        submission.callId == pending?.id;
+  }
+
+  /// Fixed, credential-free reason the last root authorization failed.
+  @override
+  String? get privilegeError => _mirror.privilegeError;
 
   /// Completes when every mirror received so far has been applied.
   @visibleForTesting
@@ -1024,6 +1135,57 @@ class RemoteAiTaskController extends AiTaskController
         'allowed': allowed,
         'saveForward': saveForward,
         'callId': expectedCallId,
+      }),
+    );
+  }
+
+  /// Verifies [password] for the exact pending `request_root` call in the main
+  /// engine.
+  ///
+  /// The password is an argument of this call only: it is forwarded as a
+  /// transient action parameter and never stored on this proxy, the mirror, an
+  /// entry, a status, a failure or a log. The main engine re-validates the call
+  /// id before touching SSH, so a stale submission authorizes nothing.
+  @override
+  Future<void> authorizeRoot(
+    String password, {
+    required String expectedCallId,
+  }) async {
+    if (_disposed) return;
+    final submission = (
+      serial: ++_rootSubmissionSerial,
+      session: _mirror.sessionId,
+      generation: _mirror.generation,
+      callId: expectedCallId,
+    );
+    _rootSubmission = submission;
+    notifyListeners();
+    try {
+      await _forward(AiWindowOp.authorizeRoot, <String, Object?>{
+        'password': password,
+        'callId': expectedCallId,
+      });
+    } finally {
+      // Only this submission may clear the flag: a newer one, or a switch that
+      // already invalidated it, must not be marked finished by an older reply.
+      if (_rootSubmission?.serial == submission.serial) {
+        _rootSubmission = null;
+        if (!_disposed) notifyListeners();
+      }
+    }
+  }
+
+  /// Stops this turn and ends its root session. Forwarded, never decided here.
+  ///
+  /// The click carries the turn it was rendered for: the main engine refuses an
+  /// `endRoot` whose turn already ended, so a delayed click can never stop the
+  /// turn that replaced it.
+  @override
+  void endRoot() {
+    if (_disposed) return;
+    unawaited(
+      _forward(AiWindowOp.endRoot, <String, Object?>{
+        'turnStartedAt': turnStartedAt?.toIso8601String(),
       }),
     );
   }
@@ -1291,6 +1453,12 @@ class RemoteAiTaskController extends AiTaskController
     status = raw['status'] is String ? raw['status'] as String : '';
     failure = raw['failure'] is String ? raw['failure'] as String : null;
     pending = _pendingFrom(raw['pending']);
+    _mirror
+      ..rootActive = raw['rootActive'] == true
+      ..authorizingRoot = raw['authorizingRoot'] == true
+      ..privilegeError = raw['privilegeError'] is String
+          ? raw['privilegeError'] as String
+          : null;
     if (raw['approvalMode'] is String) {
       approvalMode = _modeFrom(raw['approvalMode']);
     }
@@ -1350,8 +1518,12 @@ class RemoteAiTaskController extends AiTaskController
       ..conversations = const []
       ..activeConversationId = null
       ..historyFailure = null
-      ..historyLoading = false;
+      ..historyLoading = false
+      ..rootActive = false
+      ..authorizingRoot = false
+      ..privilegeError = null;
     _resyncPending = false;
+    _rootSubmission = null;
     if (entries.isEmpty && !running && pending == null && failure == null) {
       status = 'AI 会话已关闭，请从主窗口重新打开';
       notifyListeners();
@@ -1469,4 +1641,7 @@ class _RemoteMirror {
   String? activeConversationId;
   bool historyLoading = false;
   String? historyFailure;
+  bool rootActive = false;
+  bool authorizingRoot = false;
+  String? privilegeError;
 }

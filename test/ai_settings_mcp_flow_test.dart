@@ -423,6 +423,7 @@ void main() {
     final task = _ApprovalTask();
     addTearDown(task.dispose);
     task
+      ..approvalMode = AiApprovalMode.auto
       ..running = true
       ..status = '等待确认'
       ..pending = _forward(1);
@@ -436,35 +437,71 @@ void main() {
     );
     await tester.pumpAndSettle();
     final option = find.byKey(const ValueKey('ai-save-forward-rule'));
+    final local = find.byKey(const ValueKey('ai-forward-local-endpoint'));
+    final server = find.byKey(const ValueKey('ai-forward-server-endpoint'));
     expect(option, findsOneWidget);
     expect(find.text('保存到主机规则'), findsOneWidget);
-    expect(tester.widget<CheckboxListTile>(option).value, isFalse);
+    expect(tester.widget<SwitchListTile>(option).value, isFalse);
+    // Auto mode never approves a forward: the card keeps the explicit decision
+    // and replaces the global mode switch instead of implying a shortcut.
+    expect(find.byKey(const ValueKey('ai-auto-approve')), findsNothing);
+    expect(find.text('批准并执行'), findsOneWidget);
+    expect(find.text('取消'), findsOneWidget);
+    expect(find.byIcon(Icons.gpp_maybe_outlined), findsOneWidget);
+    // Each end is shown as the address it really is, never as a flat sentence.
     expect(
-      find.text('本地端口转发：127.0.0.1:8080 → 服务器侧 127.0.0.1:80'),
+      find.descendant(of: local, matching: find.text('127.0.0.1:8080')),
+      findsOneWidget,
+    );
+    expect(
+      find.descendant(of: server, matching: find.text('127.0.0.1:80')),
       findsOneWidget,
     );
 
     await tester.ensureVisible(option);
     await tester.tap(option);
     await tester.pump();
-    expect(tester.widget<CheckboxListTile>(option).value, isTrue);
+    expect(tester.widget<SwitchListTile>(option).value, isTrue);
     await tester.ensureVisible(find.text('批准并执行'));
     await tester.tap(find.text('批准并执行'));
     await tester.pumpAndSettle();
     expect(task.approvals, [(true, true, 'f1')]);
 
-    // A new forward always starts unchecked, and cancel never saves.
+    // A new forward always starts off, and cancel never saves.
     task
       ..running = true
       ..status = '等待确认'
       ..pending = _forward(2);
     task.poke();
     await tester.pumpAndSettle();
-    expect(tester.widget<CheckboxListTile>(option).value, isFalse);
+    expect(tester.widget<SwitchListTile>(option).value, isFalse);
     await tester.ensureVisible(find.text('取消'));
     await tester.tap(find.text('取消'));
     await tester.pumpAndSettle();
     expect(task.approvals.last, (false, false, 'f2'));
+
+    // Port 0 asks for an automatic choice, and an IPv6 target keeps its real
+    // bracketed address instead of being flattened or hidden.
+    task
+      ..running = true
+      ..status = '等待确认'
+      ..pending = _forward(
+        4,
+        localPort: 0,
+        targetHost: '::1',
+        targetPort: 5432,
+      );
+    task.poke();
+    await tester.pumpAndSettle();
+    expect(tester.widget<SwitchListTile>(option).value, isFalse);
+    expect(
+      find.descendant(of: local, matching: find.text('127.0.0.1:待分配')),
+      findsOneWidget,
+    );
+    expect(
+      find.descendant(of: server, matching: find.text('[::1]:5432')),
+      findsOneWidget,
+    );
 
     await tester.pumpWidget(const SizedBox.shrink());
   });
@@ -477,6 +514,7 @@ void main() {
     final task = _ApprovalTask();
     addTearDown(task.dispose);
     task
+      ..approvalMode = AiApprovalMode.auto
       ..running = true
       ..status = '等待确认'
       ..pending = _forward(3);
@@ -490,10 +528,24 @@ void main() {
     );
     await tester.pumpAndSettle();
     final option = find.byKey(const ValueKey('ai-save-forward-rule'));
+    final local = find.byKey(const ValueKey('ai-forward-local-endpoint'));
+    final server = find.byKey(const ValueKey('ai-forward-server-endpoint'));
     await tester.ensureVisible(option);
-    expect(tester.widget<CheckboxListTile>(option).value, isFalse);
+    expect(tester.widget<SwitchListTile>(option).value, isFalse);
+    expect(
+      find.descendant(of: local, matching: find.text('127.0.0.1:8080')),
+      findsOneWidget,
+    );
+    expect(
+      find.descendant(of: server, matching: find.text('127.0.0.1:80')),
+      findsOneWidget,
+    );
+    // The workbench keeps its single mode control in the composer; the approval
+    // card never adds a second one above the explicit decision.
+    expect(find.byKey(const ValueKey('ai-auto-approve')), findsOneWidget);
     await tester.tap(option);
     await tester.pump();
+    expect(tester.widget<SwitchListTile>(option).value, isTrue);
     await tester.ensureVisible(find.text('批准并执行'));
     await tester.tap(find.text('批准并执行'));
     await tester.pumpAndSettle();
@@ -534,6 +586,9 @@ void main() {
     );
     await tester.pumpAndSettle();
     expect(find.text('保存到主机规则'), findsNothing);
+    // MCP calls always need this explicit decision, so the card carries the
+    // static heading instead of the global approval-mode switch.
+    expect(find.byKey(const ValueKey('ai-auto-approve')), findsNothing);
     expect(find.text('MCP「GitHub」调用工具 search_issues'), findsWidgets);
     final texts = tester.widgetList<SelectableText>(
       find.byType(SelectableText),
@@ -612,17 +667,23 @@ Widget _mcpHarness({
   ),
 );
 
-AiToolCall _forward(int id) => AiToolCall(
+AiToolCall _forward(
+  int id, {
+  int localPort = 8080,
+  String targetHost = '127.0.0.1',
+  int targetPort = 80,
+}) => AiToolCall(
   'f$id',
-  '本地端口转发：127.0.0.1:8080 → 服务器侧 127.0.0.1:80',
+  '本地端口转发：127.0.0.1:${localPort == 0 ? '自动分配' : localPort}'
+      ' → 服务器侧 $targetHost:$targetPort',
   '允许建立本地端口转发？',
   true,
   name: 'create_port_forward',
   arguments: {
     'name': 'web',
-    'local_port': 8080,
-    'target_host': '127.0.0.1',
-    'target_port': 80,
+    'local_port': localPort,
+    'target_host': targetHost,
+    'target_port': targetPort,
     'reason': '访问内网管理页',
   },
 );

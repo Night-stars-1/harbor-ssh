@@ -5,6 +5,7 @@ import 'dart:math';
 import 'package:flutter/foundation.dart';
 
 import '../data/ai_conversation_store.dart';
+import '../data/ai_privilege.dart';
 import '../data/mcp_client.dart';
 import '../data/terminal_ai.dart';
 export '../data/terminal_ai.dart' show AiApprovalMode, AiReasoningEffort;
@@ -48,6 +49,14 @@ const aiRetryDelays = [
   Duration(seconds: 4),
 ];
 
+/// Outcome of one pending approval card.
+///
+/// [denied] is a single-call refusal for `request_root` and
+/// `create_port_forward`: the turn keeps running and the model is told the
+/// operation was not executed. [cancelled] keeps the stop semantics used by
+/// plain commands, MCP calls and explicit stops.
+enum _ApprovalDecision { approved, denied, cancelled }
+
 class AiTaskController extends ChangeNotifier {
   AiTaskController({
     required this.settings,
@@ -74,14 +83,21 @@ class AiTaskController extends ChangeNotifier {
   String status = '';
   String? failure;
   AiToolCall? pending;
-  Completer<bool>? _approval;
+  Completer<_ApprovalDecision>? _approval;
   TerminalAiClient? _client;
   AiCommandExecutor? _executor;
   _AiTurn? _turn;
   int _approvalSerial = 0;
   String _systemContext = '';
   bool _disposed = false;
+  bool _rootActive = false;
+  bool _authorizingRoot = false;
+  String? _privilegeError;
   int _revision = 0;
+  // Identifies the current root authorization. A denial or a newer attempt
+  // makes an older elevate() result stale, so it can neither install root nor
+  // clear the state of the attempt that replaced it.
+  int _rootAttempt = 0;
   final _history = <Map<String, dynamic>>[];
   final _unresolved = <String, AiTaskEntry?>{};
   String? _contextModel;
@@ -105,6 +121,27 @@ class AiTaskController extends ChangeNotifier {
   int _loadedSerial = 0;
 
   bool get autoApprove => approvalMode == AiApprovalMode.auto;
+
+  /// Whether this turn currently runs commands as root.
+  ///
+  /// The executor can close the elevated channel on its own (for example when
+  /// the sudo channel drops) without notifying the controller, so the cached
+  /// flag is never trusted alone: the live [AiPrivilegeExecutor.elevated] state
+  /// must agree. Always false while no turn is running.
+  bool get rootActive => _rootChannelLive;
+
+  /// Cached root flag plus the executor's authoritative elevated state.
+  bool get _rootChannelLive {
+    if (!_rootActive) return false;
+    final executor = _executor;
+    return executor is AiPrivilegeExecutor && executor.elevated;
+  }
+
+  /// True while a password submitted by the privileged UI is being verified.
+  bool get authorizingRoot => _authorizingRoot;
+
+  /// Fixed, credential-free reason the last root authorization failed.
+  String? get privilegeError => _privilegeError;
 
   /// Stored conversations, newest first. Empty when history is not wired.
   List<AiConversationSummary> get conversations =>
@@ -159,8 +196,62 @@ class AiTaskController extends ChangeNotifier {
   }
 
   /// Only plain command calls may be auto-approved by an approval-mode switch.
-  /// Local forwards and MCP tools always need an explicit user decision.
+  /// Local forwards, MCP tools and root requests always need an explicit user
+  /// decision; root additionally requires [authorizeRoot].
   static bool _autoApprovable(AiToolCall call) => call.name == 'run_command';
+
+  /// Fixed text for every root authorization failure: never echo SSH output,
+  /// which may contain the password prompt or a password echo.
+  static const _rootAuthFailure = '提权失败，请检查密码或服务器权限后重试';
+
+  static const _rootScopeNote =
+      'root 权限仅在本轮任务内有效，任务结束、取消或结束提权后自动撤销；'
+      '每条命令仍是独立的 root 子 shell，cd 和 export 不会在命令之间保留。';
+
+  static String _rootDescription(Map<String, dynamic> arguments) {
+    final reason = arguments['reason'];
+    final text = reason is String ? reason.trim() : '';
+    return text.isEmpty ? '请求 root 权限' : '请求 root 权限：$text';
+  }
+
+  /// A malformed `request_root` call must fail before the approval UI: a fake
+  /// or drifted tool must never start a privileged authentication.
+  static bool _rootArgumentsValid(Map<String, dynamic> arguments) =>
+      aiToolSchemaError(aiRootInputSchema, arguments) == null;
+
+  void _clearRootState() {
+    _rootActive = false;
+    _authorizingRoot = false;
+    _privilegeError = null;
+  }
+
+  /// Reports the already-granted root identity without any credential and
+  /// without another authentication round.
+  void _completeRootSuccess(
+    AiTaskEntry entry,
+    AiToolCall call,
+    List<Map<String, dynamic>> messages,
+  ) {
+    entry.output =
+        '已获得 root 权限（仅限本轮任务）。后续命令直接以 root 身份在独立的 '
+        'root 子 shell 中执行；cd 和 export 不会在命令之间保留。';
+    entry.exitCode = 0;
+    entry.finished = true;
+    entry.started = true;
+    messages.add({
+      'role': 'tool',
+      'tool_call_id': call.id,
+      'content': jsonEncode({
+        'status': 'ok',
+        'privilege': 'root',
+        'scope': 'current_turn',
+        'revokedOn': 'turn_end',
+        'note': _rootScopeNote,
+      }),
+    });
+    _unresolved.remove(call.id);
+    _notify();
+  }
 
   static String _forwardDescription(Map<String, dynamic> arguments) {
     final local = arguments['local_port'];
@@ -253,6 +344,15 @@ class AiTaskController extends ChangeNotifier {
         ),
       );
     }
+    if (executor is AiPrivilegeExecutor) {
+      specs.add(
+        const AiToolSpec(
+          name: aiRootToolName,
+          description: aiRootDescription,
+          inputSchema: aiRootInputSchema,
+        ),
+      );
+    }
     final servers = settings().mcpServers
         .where((server) => server.enabled)
         .toList();
@@ -300,6 +400,7 @@ class AiTaskController extends ChangeNotifier {
       'search_text',
       'system_info',
       aiPortForwardToolName,
+      aiRootToolName,
     };
     final bindings = <String, _AiMcpBinding>{};
     for (final (serverId, tools, error) in discovered) {
@@ -385,6 +486,33 @@ class AiTaskController extends ChangeNotifier {
         'exitCode': null,
         'error': message,
         if (untrusted) 'untrusted': true,
+      }),
+    });
+    _unresolved.remove(call.id);
+    _notify();
+  }
+
+  /// Records a user refusal as that call's tool result and keeps the turn
+  /// alive. The model is told the operation did not run and must not claim
+  /// success, retry without a new request, or bypass the refusal with sudo.
+  void _completeUserDenied(
+    AiTaskEntry entry,
+    AiToolCall call,
+    List<Map<String, dynamic>> messages,
+  ) {
+    entry.interruption = '用户拒绝，未执行';
+    entry.finished = true;
+    entry.started = false;
+    messages.add({
+      'role': 'tool',
+      'tool_call_id': call.id,
+      'content': jsonEncode({
+        'status': 'denied',
+        'output': '',
+        'exitCode': null,
+        'error': '用户拒绝执行，未执行',
+        'note': '用户明确拒绝了该请求；不要声称已经完成，也不要换用其他工具、命令或'
+            '权限方式绕过。除非用户明确重新要求，不要再次申请同一操作。',
       }),
     });
     _unresolved.remove(call.id);
@@ -566,6 +694,7 @@ class AiTaskController extends ChangeNotifier {
       failure = null;
       pending = null;
       turnStartedAt = null;
+      _clearRootState();
       _clearHistoryFailure(keepSaveFailures: true);
     } on AiConversationFailure catch (error) {
       _recordHistoryFailure(error.message, fromSave: false);
@@ -651,6 +780,7 @@ class AiTaskController extends ChangeNotifier {
         failure = null;
         pending = null;
         turnStartedAt = null;
+        _clearRootState();
       }
       _clearHistoryFailure(keepSaveFailures: true);
     } on AiConversationFailure catch (error) {
@@ -898,6 +1028,7 @@ class AiTaskController extends ChangeNotifier {
     failure = null;
     status = '';
     turnStartedAt = null;
+    _clearRootState();
     _activeId = null;
     _activeCreatedAt = null;
     _contextModel = null;
@@ -944,15 +1075,187 @@ class AiTaskController extends ChangeNotifier {
     // A detached or delayed UI click names the call it was rendered for.
     // Never let a stale approval grant a later, different call.
     if (expectedCallId != null && pending?.id != expectedCallId) return;
+    // request_root is granted only through [authorizeRoot]; a generic approve
+    // (including the approval-mode switch) must never bypass that flow.
+    if (allowed && pending?.name == aiRootToolName) return;
     if (allowed) {
       final turn = _turn;
       if (turn != null) turn.saveForward = saveForward;
-      if (_approval?.isCompleted == false) _approval!.complete(true);
+      if (_approval?.isCompleted == false) {
+        _approval!.complete(_ApprovalDecision.approved);
+      }
       pending = null;
       _notify();
     } else {
+      final current = pending;
+      // A root or forward card is a single-call decision: rejecting it leaves
+      // the turn running so the model can report the refusal and continue.
+      // Plain commands and MCP calls keep the existing stop semantics.
+      if (current != null &&
+          (current.name == aiRootToolName ||
+              current.name == aiPortForwardToolName)) {
+        _denyCall(current);
+        return;
+      }
       stop();
     }
+  }
+
+  /// Rejects exactly [call] without stopping the turn.
+  ///
+  /// The turn loop writes a `denied` tool result for this call id and asks the
+  /// model for the next step. A root rejection also invalidates an in-flight
+  /// verification and closes only this attempt's privileged channel: the
+  /// conversation, the human terminal and later unprivileged commands keep
+  /// working, and a new authorization can start immediately.
+  void _denyCall(AiToolCall call) {
+    if (pending?.id != call.id) return;
+    if (call.name == aiRootToolName) {
+      // Invalidate before completing the approval: a late elevate() result
+      // from this attempt must not touch a newer attempt's flags or channel.
+      _rootAttempt++;
+      _authorizingRoot = false;
+      _privilegeError = null;
+      _rootActive = false;
+      final executor = _executor;
+      if (executor is AiPrivilegeExecutor) executor.revokePrivilege();
+    }
+    pending = null;
+    status = '整理结果';
+    if (_approval?.isCompleted == false) {
+      _approval!.complete(_ApprovalDecision.denied);
+    }
+    _notify();
+  }
+
+  /// Verifies the root password for the exact pending `request_root` call.
+  ///
+  /// The password lives only in this call's stack frame: it is passed straight
+  /// to [AiPrivilegeExecutor.elevate] and never stored on the controller, the
+  /// turn, an entry, the model history or a saved conversation. An empty
+  /// password is passed through unchanged so configured NOPASSWD sudo can be
+  /// authorized by submitting an empty field. Failures keep the request
+  /// pending so the user can retry, and report a fixed message instead of raw
+  /// SSH output.
+  Future<void> authorizeRoot(
+    String password, {
+    required String expectedCallId,
+  }) async {
+    if (_disposed || !running) return;
+    if (approvalMode == AiApprovalMode.readOnly) return;
+    // A second submission while verifying is ignored; the privileged UI
+    // disables its own action, this is the authoritative guard.
+    if (_authorizingRoot) return;
+    final turn = _turn;
+    final current = pending;
+    if (turn == null || current == null) return;
+    if (current.id != expectedCallId || current.name != aiRootToolName) return;
+    final executor = _executor;
+    if (executor is! AiPrivilegeExecutor) return;
+    if (!connected()) {
+      _privilegeError = 'SSH 已断开，请重新连接后再提权';
+      _notify();
+      return;
+    }
+    _authorizingRoot = true;
+    _privilegeError = null;
+    status = '正在提权';
+    _notify();
+    final revision = _revision;
+    final attempt = ++_rootAttempt;
+    try {
+      await executor.elevate(password);
+    } catch (_) {
+      // A denial (which advances the attempt) or a turn that was stopped or
+      // replaced makes this result stale. Only a dead turn still needs its
+      // own executor closed here; a denied attempt was already revoked, and
+      // revoking now could close a newer channel on the same executor.
+      if (attempt != _rootAttempt) {
+        if (!identical(_turn, turn) || revision != _revision) {
+          executor.revokePrivilege();
+        }
+        return;
+      }
+      if (!identical(_turn, turn) || revision != _revision) return;
+      _authorizingRoot = false;
+      if (pending?.id == expectedCallId) {
+        _privilegeError = _rootAuthFailure;
+        status = '等待确认';
+      }
+      _notify();
+      return;
+    }
+    if (attempt != _rootAttempt) {
+      // The user rejected this request or a newer authorization superseded
+      // it. The denial already revoked this attempt's channel; never revoke
+      // the newer one from this stale callback.
+      if (!identical(_turn, turn) || revision != _revision) {
+        executor.revokePrivilege();
+      }
+      return;
+    }
+    if (!identical(_turn, turn) || revision != _revision) {
+      // The original turn is gone: close only that executor's late elevated
+      // channel, and never touch flags or listeners of a newer turn.
+      executor.revokePrivilege();
+      return;
+    }
+    if (_disposed) {
+      executor.revokePrivilege();
+      return;
+    }
+    _authorizingRoot = false;
+    if (!_current(revision) || pending?.id != expectedCallId || !connected()) {
+      // The turn was stopped or disconnected while the password was being
+      // verified: close the elevated channel instead of leaving it usable by
+      // a run that the user already cancelled.
+      executor.revokePrivilege();
+      if (pending?.id == expectedCallId) {
+        _privilegeError = 'SSH 已断开，请重新连接后再提权';
+        status = '等待确认';
+      }
+      _notify();
+      return;
+    }
+    if (!executor.elevated) {
+      // Never report root unless the executor confirms the channel is live.
+      executor.revokePrivilege();
+      _privilegeError = _rootAuthFailure;
+      status = '等待确认';
+      _notify();
+      return;
+    }
+    _rootActive = true;
+    _privilegeError = null;
+    pending = null;
+    status = '执行工具';
+    if (_approval?.isCompleted == false) {
+      _approval!.complete(_ApprovalDecision.approved);
+    }
+    _notify();
+  }
+
+  /// Ends this turn's root session. A running elevated turn is stopped, never
+  /// silently downgraded and continued.
+  ///
+  /// [endRoot] carries no turn token, so a delayed call from an earlier root
+  /// turn must not stop an unrelated newer turn: it only acts while this turn
+  /// actually has root involvement.
+  void endRoot() {
+    if (!running) {
+      if (_rootActive || _authorizingRoot || _privilegeError != null) {
+        _clearRootState();
+        _notify();
+      }
+      return;
+    }
+    final rootInvolved =
+        _rootActive ||
+        _authorizingRoot ||
+        _privilegeError != null ||
+        pending?.name == aiRootToolName;
+    if (!rootInvolved) return;
+    stop(message: '已结束提权并停止本轮任务');
   }
 
   void stop({String? message}) {
@@ -963,8 +1266,11 @@ class AiTaskController extends ChangeNotifier {
     final turn = _turn;
     _turn = null;
     turn?.close();
-    if (_approval?.isCompleted == false) _approval!.complete(false);
+    if (_approval?.isCompleted == false) {
+      _approval!.complete(_ApprovalDecision.cancelled);
+    }
     pending = null;
+    _clearRootState();
     running = false;
     status = message ?? '已停止；如有正在运行的命令，已请求终止';
     _interruptTurn(status);
@@ -1106,8 +1412,11 @@ class AiTaskController extends ChangeNotifier {
           hasToolCalls = true;
           final mcp = turn.mcpByModelName[call.name];
           final isForward = call.name == aiPortForwardToolName;
+          final isRoot = call.name == aiRootToolName;
           final command = _commandForTool(call);
-          final readable = isForward
+          final readable = isRoot
+              ? _rootDescription(call.arguments)
+              : isForward
               ? _forwardDescription(call.arguments)
               : mcp != null
               ? 'MCP「${mcp.serverName}」调用工具 ${mcp.toolName}\n'
@@ -1129,13 +1438,21 @@ class AiTaskController extends ChangeNotifier {
                 'system_info',
               ].contains(call.name);
           final forwardUnavailable = isForward && executor is! AiSessionExecutor;
+          final rootUnavailable = isRoot && executor is! AiPrivilegeExecutor;
+          final rootInvalid = isRoot && !_rootArgumentsValid(call.arguments);
           final unknownTool =
-              mcp == null && !isForward && command == null;
-          if (blockedByReadOnly || forwardUnavailable || unknownTool) {
+              mcp == null && !isForward && !isRoot && command == null;
+          if (blockedByReadOnly ||
+              forwardUnavailable ||
+              rootUnavailable ||
+              rootInvalid ||
+              unknownTool) {
             entry.interruption = blockedByReadOnly
                 ? '只读模式不允许此工具'
                 : forwardUnavailable
                 ? '当前会话不支持端口转发'
+                : rootUnavailable
+                ? '当前会话不支持提权'
                 : '工具参数无效，未执行';
             entry.finished = true;
             messages.add({
@@ -1152,9 +1469,26 @@ class AiTaskController extends ChangeNotifier {
             _notify();
             continue;
           }
-          // MCP calls and local forwards never inherit auto approval: every
-          // one of them needs the user to approve this exact call.
-          final explicitConsent = isForward || mcp != null;
+          // The exported flag can be stale: the executor closes the elevated
+          // channel on its own (dropped sudo channel) without notifying the
+          // controller. Never return a false success or skip a needed manual
+          // authorization; drop the cached flag and re-enter the approval flow.
+          if (isRoot &&
+              _rootActive &&
+              executor is AiPrivilegeExecutor &&
+              !executor.elevated) {
+            _rootActive = false;
+            _privilegeError = 'root 权限通道已结束，请重新授权';
+          }
+          // Already root for this turn with a live channel: no privilege is
+          // being requested, so report the scope without another password.
+          if (isRoot && _rootChannelLive) {
+            _completeRootSuccess(entry, call, messages);
+            continue;
+          }
+          // MCP calls, local forwards and root requests never inherit auto
+          // approval: every one of them needs an explicit user decision.
+          final explicitConsent = isForward || mcp != null || isRoot;
           if (explicitConsent ||
               (aiCommandNeedsApproval(call) &&
                   approvalMode == AiApprovalMode.manual)) {
@@ -1162,7 +1496,11 @@ class AiTaskController extends ChangeNotifier {
               'approval-$revision-${_approvalSerial++}',
               readable,
               call.reason.trim().isEmpty
-                  ? (isForward ? '创建本地端口转发' : '调用 MCP 工具')
+                  ? (isForward
+                        ? '创建本地端口转发'
+                        : isRoot
+                        ? '申请 root 权限'
+                        : '调用 MCP 工具')
                   : call.reason,
               true,
               name: call.name,
@@ -1170,12 +1508,34 @@ class AiTaskController extends ChangeNotifier {
             );
             turn.saveForward = false;
             status = '等待确认';
-            final approval = _approval = Completer<bool>();
+            final approval = _approval = Completer<_ApprovalDecision>();
             _notify();
-            if (!await approval.future || !_current(revision)) return;
+            final decision = await approval.future;
+            if (identical(_approval, approval)) _approval = null;
+            if (!_current(revision)) return;
+            if (decision == _ApprovalDecision.cancelled) return;
+            if (decision == _ApprovalDecision.denied) {
+              _completeUserDenied(entry, call, messages);
+              continue;
+            }
           }
           if (!_current(revision)) return;
           if (!connected()) throw const AiFailure('SSH 已断开，未执行操作');
+          if (isRoot) {
+            if (!_rootChannelLive) {
+              final wasRoot = _rootActive;
+              _rootActive = false;
+              _completeToolFailure(
+                entry,
+                call,
+                messages,
+                wasRoot ? 'root 权限通道已关闭，请重新提权' : '未获得 root 授权，未执行',
+              );
+              continue;
+            }
+            _completeRootSuccess(entry, call, messages);
+            continue;
+          }
           final saveForward = isForward && turn.saveForward;
           turn.saveForward = false;
           status = isForward || mcp != null ? '执行工具' : '执行命令';
@@ -1338,6 +1698,7 @@ class AiTaskController extends ChangeNotifier {
       if (revision == _revision) {
         running = false;
         pending = null;
+        _clearRootState();
         _notify();
         // Runs after the turn is frozen, so the snapshot is complete.
         unawaited(_persistConversation());

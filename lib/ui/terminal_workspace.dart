@@ -167,6 +167,9 @@ class _TerminalWorkspaceState extends State<TerminalWorkspace> {
         running: _aiRetention.taskOf(session.id)?.running ?? false,
         waitingApproval:
             _aiRetention.taskOf(session.id)?.pending?.requiresApproval ?? false,
+        rootActive: _aiRetention.taskOf(session.id)?.rootActive ?? false,
+        authorizingRoot:
+            _aiRetention.taskOf(session.id)?.authorizingRoot ?? false,
       ),
   ];
 

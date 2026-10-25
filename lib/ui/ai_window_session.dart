@@ -7,6 +7,8 @@ class AiWindowSession {
     required this.connected,
     this.running = false,
     this.waitingApproval = false,
+    this.rootActive = false,
+    this.authorizingRoot = false,
   });
 
   final String id;
@@ -15,6 +17,13 @@ class AiWindowSession {
   final bool connected;
   final bool running;
   final bool waitingApproval;
+
+  /// Whether the session's turn currently runs commands as root, so the picker
+  /// can show the same privileged badge as the embedded panel.
+  final bool rootActive;
+
+  /// Whether that session is verifying a submitted root password.
+  final bool authorizingRoot;
 
   /// Wire form used by the `harbor/ai_window` mirror. Only the fields above
   /// cross the channel; no password, key or provider profile is ever included.
@@ -25,6 +34,8 @@ class AiWindowSession {
     'connected': connected,
     'running': running,
     'waitingApproval': waitingApproval,
+    'rootActive': rootActive,
+    'authorizingRoot': authorizingRoot,
   };
 
   factory AiWindowSession.fromJson(Map<Object?, Object?> json) =>
@@ -35,6 +46,8 @@ class AiWindowSession {
         connected: json['connected'] == true,
         running: json['running'] == true,
         waitingApproval: json['waitingApproval'] == true,
+        rootActive: json['rootActive'] == true,
+        authorizingRoot: json['authorizingRoot'] == true,
       );
 }
 

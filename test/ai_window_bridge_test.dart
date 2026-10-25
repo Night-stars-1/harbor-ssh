@@ -6,6 +6,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:harbor_ssh/data/ai_image.dart';
+import 'package:harbor_ssh/data/ai_privilege.dart';
 import 'package:harbor_ssh/data/terminal_ai.dart';
 import 'package:harbor_ssh/domain/appearance.dart';
 import 'package:harbor_ssh/ui/ai_task_controller.dart';
@@ -774,10 +775,14 @@ bash deploy-marzban.sh 1
       'connected',
       'running',
       'waitingApproval',
+      'rootActive',
+      'authorizingRoot',
     });
     expect(jsonEncode(rows), isNot(contains('sk-secret')));
     expect(jsonEncode(rows), isNot(contains('password')));
     expect(h.remote.sessions.single.waitingApproval, isTrue);
+    expect(h.remote.sessions.single.rootActive, isFalse);
+    expect(h.remote.sessions.single.authorizingRoot, isFalse);
   });
 
   test('独立窗口改思考等级落在真实主控制器并进入下一次请求与快照', () async {
@@ -917,6 +922,541 @@ bash deploy-marzban.sh 1
     expect(bodies.last.containsKey('reasoning_effort'), isFalse);
     expect((pushes.last['settings'] as Map)['reasoningEffort'], 'automatic');
   });
+
+  test('独立窗口完成 root 授权失败重试、成功后撤销，密码不进入镜像', () async {
+    const secret = 'pw-9f3c-root';
+    const wrongSecret = 'pw-9f3c-wrong';
+    final h = _Harness();
+    addTearDown(h.dispose);
+    h.host.register('s1', h.task, '生产服务器', onDock: h.dock);
+    h.task
+      ..acceptedRootPassword = secret
+      ..running = true
+      ..status = '等待确认'
+      ..turnStartedAt = DateTime(2026, 10, 25, 10)
+      ..pending = const AiToolCall(
+        'root-1',
+        '',
+        '读取系统配置前需要 root',
+        true,
+        name: aiRootToolName,
+        arguments: {'reason': '读取系统配置'},
+      );
+    h.sessions = () => [
+      AiWindowSession(
+        id: 's1',
+        hostName: '生产服务器',
+        endpoint: 'a.example:22',
+        connected: true,
+        running: h.task.running,
+        waitingApproval: h.task.pending?.requiresApproval ?? false,
+        rootActive: h.task.rootActive,
+        authorizingRoot: h.task.authorizingRoot,
+      ),
+    ];
+    h.bindSessions();
+    await h.host.open('s1');
+    await h.remote.initialize();
+    await h.settle();
+
+    // The privileged request reaches the detached window like any other prompt.
+    expect(h.remote.pending!.name, aiRootToolName);
+    expect(h.remote.rootActive, isFalse);
+    expect(h.remote.authorizingRoot, isFalse);
+    expect(h.remote.privilegeError, isNull);
+
+    // A stale call id never reaches the controller: the request that is really
+    // pending survives and nothing becomes root.
+    await h.host.handle(
+      const MethodCall('action', <String, Object?>{
+        'sessionId': 's1',
+        'generation': 1,
+        'op': AiWindowOp.authorizeRoot,
+        'args': <String, Object?>{'password': secret, 'callId': 'root-0'},
+      }),
+    );
+    expect(h.task.pending?.id, 'root-1');
+    expect(h.task.rootActive, isFalse);
+    expect(h.remote.rootActive, isFalse);
+
+    // A stale generation (the pane was rebuilt behind the window) authorizes
+    // nothing either, even when the call id still matches.
+    await h.host.handle(
+      const MethodCall('action', <String, Object?>{
+        'sessionId': 's1',
+        'generation': 999,
+        'op': AiWindowOp.authorizeRoot,
+        'args': <String, Object?>{'password': secret, 'callId': 'root-1'},
+      }),
+    );
+    expect(h.remote.rootActive, isFalse);
+    expect(h.remote.pending?.id, 'root-1');
+    expect(h.task.rootActive, isFalse);
+
+    // A password that is not a string is protocol drift: refused before the
+    // controller ever sees it.
+    await h.host.handle(
+      const MethodCall('action', <String, Object?>{
+        'sessionId': 's1',
+        'generation': 1,
+        'op': AiWindowOp.authorizeRoot,
+        'args': <String, Object?>{'password': 12345, 'callId': 'root-1'},
+      }),
+    );
+    expect(h.task.rootActive, isFalse);
+    expect(h.remote.rootActive, isFalse);
+    expect(h.task.pending?.id, 'root-1');
+
+    // A generic approve never grants root and leaves the prompt pending.
+    h.remote.approve(true, expectedCallId: 'root-1');
+    await h.settle();
+    expect(h.task.approved, isNull);
+    expect(h.task.pending?.id, 'root-1');
+    expect(h.remote.rootActive, isFalse);
+
+    // First attempt fails: a credential-free reason is mirrored and the
+    // request stays pending for a retry.
+    await h.remote.authorizeRoot(wrongSecret, expectedCallId: 'root-1');
+    await h.settle();
+    expect(h.remote.rootActive, isFalse);
+    expect(h.remote.authorizingRoot, isFalse);
+    expect(h.remote.privilegeError, isNotNull, reason: '失败原因镜像给独立窗口');
+    expect(
+      h.remote.privilegeError,
+      allOf(isNot(contains(secret)), isNot(contains(wrongSecret))),
+      reason: '失败原因永不回显输入的密码',
+    );
+    expect(h.remote.pending?.id, 'root-1', reason: '失败后保留请求以便重试');
+
+    // Retry succeeds. The verifying state is mirrored while the password is
+    // being checked, then the prompt clears and root is reported.
+    final gate = Completer<void>();
+    h.task.rootGate = gate;
+    final retry = h.remote.authorizeRoot(secret, expectedCallId: 'root-1');
+    await h.settle();
+    expect(h.remote.authorizingRoot, isTrue, reason: '校验期间保持锁定');
+    expect(
+      h.remote.sessions.single.authorizingRoot,
+      isTrue,
+      reason: '目录同步显示校验中',
+    );
+
+    // The verifying state belongs to the conversation that submitted it: a
+    // switch while the password is in flight must not lock another session's
+    // own root request.
+    final other = _TestTask();
+    addTearDown(other.dispose);
+    other
+      ..acceptedRootPassword = secret
+      ..running = true
+      ..pending = const AiToolCall(
+        'root-b',
+        '',
+        'B 需要 root',
+        true,
+        name: aiRootToolName,
+        arguments: {'reason': 'B 需要 root'},
+      );
+    h.host.register('s2', other, '测试服务器', onDock: h.dock);
+    expect(await h.remote.selectSession('s2'), isTrue);
+    await h.settle();
+    expect(h.remote.sessionId, 's2');
+    expect(h.remote.pending!.id, 'root-b');
+    expect(h.remote.authorizingRoot, isFalse, reason: 'A 的校验不得污染 B');
+    expect(h.remote.rootActive, isFalse);
+
+    // B authorizes immediately, while A is still verifying.
+    await h.remote.authorizeRoot(secret, expectedCallId: 'root-b');
+    await h.settle();
+    expect(h.remote.rootActive, isTrue);
+    expect(h.remote.authorizingRoot, isFalse);
+
+    // Back to A: its verification is still in flight and only now finishes.
+    expect(await h.remote.selectSession('s1'), isTrue);
+    await h.settle();
+    expect(h.remote.pending!.id, 'root-1');
+    expect(h.remote.authorizingRoot, isTrue, reason: '回到 A 恢复其校验状态');
+    gate.complete();
+    h.task.rootGate = null;
+    await retry;
+    await h.settle();
+    expect(h.remote.rootActive, isTrue);
+    expect(h.remote.authorizingRoot, isFalse);
+    expect(h.remote.privilegeError, isNull);
+    expect(h.remote.pending, isNull);
+    expect(
+      h.remote.sessions.single.rootActive,
+      isTrue,
+      reason: '会话目录同步显示 root 状态',
+    );
+
+    // Ending root stops the turn (never a silent downgrade) and clears every
+    // mirrored flag without asking for a password again.
+    h.remote.endRoot();
+    await h.settle();
+    expect(h.task.stopCount, 1, reason: '结束提权即停止本轮，且只停一次');
+    expect(h.remote.rootActive, isFalse);
+    expect(h.remote.running, isFalse);
+    expect(h.remote.sessions.single.rootActive, isFalse);
+    expect(h.task.rootActive, isFalse);
+
+    // The endRoot click names its turn. A turn that never held root has nothing
+    // to end, and once a later turn does hold root only the click made in that
+    // turn may stop it.
+    h.task
+      ..running = true
+      ..turnStartedAt = DateTime(2026, 10, 25, 10, 30)
+      ..holdRoot(false);
+    await h.settle();
+    h.remote.endRoot();
+    await h.settle();
+    expect(h.task.stopCount, 1, reason: '无 root 状态时 endRoot 不停止新一轮');
+    expect(h.task.running, isTrue);
+    expect(h.remote.running, isTrue);
+
+    // The new turn also holds root: the root state alone cannot tell the two
+    // turns apart, so the click must carry the turn it was rendered for.
+    h.task.holdRoot(true);
+    await h.settle();
+    expect(h.remote.rootActive, isTrue);
+    await h.host.handle(
+      const MethodCall('action', <String, Object?>{
+        'sessionId': 's1',
+        'generation': 1,
+        'op': AiWindowOp.endRoot,
+        'args': <String, Object?>{'turnStartedAt': '2026-10-25T10:00:00.000'},
+      }),
+    );
+    expect(
+      h.task.stopCount,
+      1,
+      reason: '上一轮的迟到点击不停止已再次 root 的新一轮',
+    );
+    expect(h.task.running, isTrue);
+    expect(h.remote.rootActive, isTrue);
+    expect(h.remote.running, isTrue);
+
+    // The click made in the current turn is accepted.
+    h.remote.endRoot();
+    await h.settle();
+    expect(h.task.stopCount, 2, reason: '当前轮的结束提权生效');
+    expect(h.task.running, isFalse);
+    expect(h.remote.rootActive, isFalse);
+    expect(h.remote.running, isFalse);
+
+    // A background session's privilege state belongs to the directory the
+    // picker shows: an elevation that happened elsewhere is reported there
+    // without the mirrored conversation changing.
+    var backgroundRoot = false;
+    h.sessions = () => [
+      AiWindowSession(
+        id: 's1',
+        hostName: '生产服务器',
+        endpoint: 'a.example:22',
+        connected: true,
+        running: h.task.running,
+      ),
+      AiWindowSession(
+        id: 's2',
+        hostName: '测试服务器',
+        endpoint: 'b.example:22',
+        connected: true,
+        rootActive: backgroundRoot,
+      ),
+    ];
+    // The host keeps the catalog it was bound with, so the new directory has
+    // to be bound again before a refresh can be observed.
+    h.bindSessions();
+    await h.settle();
+    expect(
+      h.remote.sessions.firstWhere((s) => s.id == 's2').rootActive,
+      isFalse,
+    );
+
+    backgroundRoot = true;
+    h.host.refreshSessions();
+    await h.settle();
+    final elevated = h.remote.sessions.firstWhere((s) => s.id == 's2');
+    expect(elevated.rootActive, isTrue, reason: '后台会话的 root 状态进入目录');
+    expect(elevated.authorizingRoot, isFalse);
+    expect(
+      h.remote.sessions.firstWhere((s) => s.id == 's1').rootActive,
+      isFalse,
+      reason: '目录按会话区分 root 状态',
+    );
+
+    // Closing and reopening the same session id never reuses a generation, so a
+    // stale window cannot authorize the replacement turn with an old value.
+    final replacement = _TestTask();
+    addTearDown(replacement.dispose);
+    h.host.unregister('s1');
+    h.host.register('s1', replacement, '生产服务器', onDock: h.dock);
+    replacement
+      ..running = true
+      ..pending = const AiToolCall(
+        'root-9',
+        '',
+        '重新请求 root',
+        true,
+        name: aiRootToolName,
+        arguments: {'reason': '重新请求'},
+      );
+    await h.host.handle(
+      const MethodCall('action', <String, Object?>{
+        'sessionId': 's1',
+        'generation': 1,
+        'op': AiWindowOp.authorizeRoot,
+        'args': <String, Object?>{'password': secret, 'callId': 'root-9'},
+      }),
+    );
+    expect(
+      replacement.rootActive,
+      isFalse,
+      reason: '会话重开后旧 generation 不授权',
+    );
+    expect(replacement.pending?.id, 'root-9', reason: '重开后的请求保持待确认');
+
+    // The password never reaches any mirror payload: status, failure, entries
+    // and the session directory all stay credential-free. This covers the
+    // rejected attempt too.
+    expect(
+      jsonEncode(h.pushes),
+      allOf(isNot(contains(secret)), isNot(contains(wrongSecret))),
+    );
+    expect(jsonEncode(h.pushes), isNot(contains('password')));
+    // Nor does any other message the window sends to the main engine.
+    expect(
+      jsonEncode([
+        for (final call in h.relay)
+          if (call.method != 'action' ||
+              (call.arguments as Map)['op'] != AiWindowOp.authorizeRoot)
+            call.arguments,
+      ]),
+      allOf(isNot(contains(secret)), isNot(contains(wrongSecret))),
+    );
+  });
+
+  testWidgets('真实主引擎下独立窗口拒绝 root 与转发后模型继续，镜像恢复仍可输入', (
+    tester,
+  ) async {
+    tester.view.physicalSize = const Size(1000, 900);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+
+    final client = _DenialEngineClient([
+      _denialRootReply('root-a', reason: '读取系统配置'),
+      _denialForwardReply('forward-a'),
+      _denialRootReply('root-b', reason: '再次读取系统配置'),
+      const AiReply({'role': 'assistant', 'content': '本轮已结束'}, []),
+      const AiReply({'role': 'assistant', 'content': '恢复后仍可继续'}, []),
+    ]);
+    final executor = _DenialEngineExecutor();
+    final task = AiTaskController(
+      settings: () => const AiSettings(
+        baseUrl: 'https://ai.example.com/v1',
+        apiKey: 'sk-bridge-denial',
+        model: 'bridge-denial-model',
+      ),
+      executorFactory: () => executor,
+      connected: () => true,
+      clientFactory: () => client,
+      approvalMode: AiApprovalMode.auto,
+    );
+    final h = _RealEngineHarness(task);
+    addTearDown(h.dispose);
+    h.host.register('s1', task, '生产服务器', onDock: () => h.docks++);
+    await h.host.open('s1');
+    await h.remote.initialize();
+
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: harborTheme(),
+        home: Scaffold(
+          body: TerminalAiPanel(
+            task: h.remote,
+            hostName: h.remote.hostName,
+            onDock: () {},
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    Future<void> pumpUntil(
+      bool Function() condition, {
+      String? reason,
+    }) async {
+      for (var attempt = 0; attempt < 800; attempt++) {
+        if (condition()) return;
+        await tester.pump(const Duration(milliseconds: 5));
+      }
+      expect(condition(), isTrue, reason: reason ?? '条件在 800 帧内未满足');
+    }
+
+    Future<void> send(String text) async {
+      final input = find.byKey(const ValueKey('ai-task-input'));
+      await tester.ensureVisible(input);
+      await tester.enterText(input, text);
+      await tester.pump();
+      final button = find.byKey(const ValueKey('ai-send'));
+      await tester.ensureVisible(button);
+      await tester.tap(button);
+      await tester.pump();
+    }
+
+    int approvalsFor(String callId) => h.relay
+        .where(
+          (call) =>
+              call.method == 'action' &&
+              (call.arguments as Map)['op'] == AiWindowOp.approve &&
+              ((call.arguments as Map)['args'] as Map)['callId'] == callId,
+        )
+        .length;
+
+    // The detached window shows the real engine's root prompt and its cancel
+    // button forwards a denial for exactly that call.
+    await send('检查 root 权限');
+    await pumpUntil(
+      () => h.remote.pending?.name == aiRootToolName,
+      reason: '独立窗口未镜像 root 请求',
+    );
+    await tester.pump();
+    final rootPendingId = h.remote.pending!.id;
+    expect(find.byKey(const ValueKey('ai-root-password')), findsOneWidget);
+    final rootCancel = find.byKey(const ValueKey('ai-root-cancel'));
+    await tester.ensureVisible(rootCancel);
+    await tester.tap(rootCancel);
+    await tester.pump();
+
+    // The real engine denies the root tool and continues the same turn with
+    // the next model reply (a port-forward request).
+    await pumpUntil(
+      () => h.remote.pending?.name == aiPortForwardToolName,
+      reason: '拒绝 root 后模型没有继续',
+    );
+    await tester.pump();
+    expect(task.running, isTrue);
+    expect(task.rootActive, isFalse);
+    expect(executor.elevateAttempts, isEmpty);
+    expect(executor.cancelCalls, 0, reason: '拒绝工具不停止任务');
+    expect(_denialResult(client, 'root-a')?['status'], 'denied');
+
+    // Checking "save rule" must not survive a rejection, and a stale root
+    // approval never touches the forward request that replaced it.
+    final forwardPendingId = h.remote.pending!.id;
+    final saveRule = find.byKey(const ValueKey('ai-save-forward-rule'));
+    await tester.ensureVisible(saveRule);
+    await tester.tap(saveRule);
+    await tester.pump();
+    final rootApprovalsBefore = approvalsFor(rootPendingId);
+    h.remote.approve(false, expectedCallId: rootPendingId);
+    await pumpUntil(
+      () => approvalsFor(rootPendingId) > rootApprovalsBefore,
+      reason: '过期 root 审批确实发到了主引擎',
+    );
+    expect(
+      h.remote.pending?.id,
+      forwardPendingId,
+      reason: '过期的 root 审批不作用于当前转发请求',
+    );
+
+    final cancelForward = find.descendant(
+      of: find.byKey(const ValueKey('ai-pending-approval')),
+      matching: find.widgetWithText(TextButton, '取消'),
+    );
+    await tester.ensureVisible(cancelForward);
+    await tester.tap(cancelForward);
+    await tester.pump();
+
+    // No listener is bound or saved, and the model's next request follows.
+    await pumpUntil(
+      () => h.remote.pending?.name == aiRootToolName,
+      reason: '拒绝转发后模型没有继续',
+    );
+    expect(executor.forwards, isEmpty, reason: '取消后不得创建或保存监听');
+    expect(_denialResult(client, 'forward-a')?['status'], 'denied');
+
+    // A stale forward approval is ignored by the live root request.
+    final forwardApprovalsBefore = approvalsFor(forwardPendingId);
+    h.remote.approve(false, expectedCallId: forwardPendingId);
+    await pumpUntil(
+      () => approvalsFor(forwardPendingId) > forwardApprovalsBefore,
+      reason: '过期审批确实发到了主引擎',
+    );
+    expect(h.remote.pending?.name, aiRootToolName);
+
+    await tester.pump();
+    final secondRootCancel = find.byKey(const ValueKey('ai-root-cancel'));
+    await tester.ensureVisible(secondRootCancel);
+    await tester.tap(secondRootCancel);
+    await tester.pump();
+    await pumpUntil(
+      () => !task.running && !h.remote.running && h.remote.pending == null,
+      reason: '第二次拒绝 root 后镜像没有回到空闲状态',
+    );
+    expect(_denialResult(client, 'root-b')?['status'], 'denied');
+    expect(executor.commands, isEmpty);
+    expect(
+      client.requests.any(
+        (request) => request.any(
+          (message) =>
+              message['role'] == 'tool' &&
+              (message['content'] as String).contains('"privilege":"root"'),
+        ),
+      ),
+      isFalse,
+    );
+    expect(task.entries.any((entry) => entry.text.contains('本轮已结束')), isTrue);
+
+    // A rebuilt detached proxy restores the same conversation and still lets
+    // the user type, even after both denials.
+    final restored = RemoteAiTaskController();
+    addTearDown(restored.dispose);
+    await restored.initialize();
+    await pumpUntil(
+      () => restored.entries.isNotEmpty && !restored.running,
+      reason: '重开的独立窗口未恢复对话',
+    );
+    expect(restored.pending, isNull);
+    expect(
+      restored.entries.any(
+        (entry) => entry.user == true && entry.text == '检查 root 权限',
+      ),
+      isTrue,
+      reason: '当前对话不丢失',
+    );
+    expect(
+      restored.entries.any((entry) => entry.text.contains('本轮已结束')),
+      isTrue,
+    );
+
+    await tester.pumpWidget(const SizedBox.shrink());
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: harborTheme(),
+        home: Scaffold(
+          body: TerminalAiPanel(
+            task: restored,
+            hostName: restored.hostName,
+            onDock: () {},
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+    await send('恢复后继续');
+    await pumpUntil(
+      () => restored.entries.any(
+        (entry) => entry.text.contains('恢复后仍可继续'),
+      ),
+      reason: '恢复后的窗口无法继续对话',
+    );
+    await pumpUntil(() => !restored.running);
+    expect(restored.running, isFalse);
+    expect(tester.takeException(), isNull);
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
 }
 
 /// Test double for the main-engine controller: records what the detached
@@ -950,6 +1490,70 @@ class _TestTask extends AiTaskController {
   List<AiImage> lastImages = const [];
   Completer<void>? previewGate;
 
+  /// Root flow of the main-engine controller, kept credential-free: the double
+  /// accepts exactly the password the test configured, so a transport that
+  /// drops or alters it can never end up authorized.
+  String acceptedRootPassword = '';
+  Completer<void>? rootGate;
+  bool _rootOn = false;
+  bool _rootBusy = false;
+  String? _rootError;
+
+  @override
+  bool get rootActive => _rootOn;
+
+  @override
+  bool get authorizingRoot => _rootBusy;
+
+  @override
+  String? get privilegeError => _rootError;
+
+  @override
+  Future<void> authorizeRoot(
+    String password, {
+    required String expectedCallId,
+  }) async {
+    final current = pending;
+    if (current == null || current.id != expectedCallId) {
+      calls.add('authorizeRoot:stale:$expectedCallId');
+      return;
+    }
+    calls.add('authorizeRoot:$expectedCallId');
+    _rootBusy = true;
+    _rootError = null;
+    notifyListeners();
+    final gate = rootGate;
+    if (gate != null) await gate.future;
+    _rootBusy = false;
+    if (password != acceptedRootPassword) {
+      // The real controller reports one fixed reason and keeps the request
+      // pending so the user can retry.
+      _rootError = '提权失败，请检查密码或服务器权限后重试';
+      notifyListeners();
+      return;
+    }
+    _rootOn = true;
+    pending = null;
+    notifyListeners();
+  }
+
+  @override
+  void endRoot() {
+    calls.add('endRoot');
+    if (running) stop(message: '已结束提权并停止本轮任务');
+    _rootOn = false;
+    _rootBusy = false;
+    _rootError = null;
+    notifyListeners();
+  }
+
+  /// Simulates a turn that already holds root; the real controller only reaches
+  /// that state through [authorizeRoot].
+  void holdRoot(bool value) {
+    _rootOn = value;
+    notifyListeners();
+  }
+
   AiSettings get config => holder.value;
   set config(AiSettings value) => holder.value = value;
 
@@ -966,6 +1570,7 @@ class _TestTask extends AiTaskController {
     stopCount++;
     calls.add('stop:${message ?? ''}');
     running = false;
+    turnStartedAt = null;
     notifyListeners();
   }
 
@@ -975,6 +1580,12 @@ class _TestTask extends AiTaskController {
     bool saveForward = false,
     String? expectedCallId,
   }) {
+    // Same invariant as the real controller: a generic approve never grants
+    // `request_root`, which only the password flow may authorize.
+    if (allowed && pending?.name == aiRootToolName) {
+      calls.add('approve:ignored-root');
+      return;
+    }
     calls.add('approve:$allowed:${saveForward ? 1 : 0}:$expectedCallId');
     approved = allowed;
     approvedSaveForward = saveForward;
@@ -1129,4 +1740,227 @@ class _RecordingExecutor implements AiCommandExecutor {
 
   @override
   void cancel() {}
+}
+
+/// Scripted provider for the real main-engine controller: the denial bridge
+/// test inspects the exact tool result each later request would carry.
+class _DenialEngineClient extends TerminalAiClient {
+  _DenialEngineClient(List<AiReply> replies) : _replies = [...replies];
+
+  final List<AiReply> _replies;
+  final requests = <List<Map<String, dynamic>>>[];
+
+  @override
+  Future<AiReply> complete(
+    AiSettings settings,
+    List<Map<String, dynamic>> messages,
+  ) async {
+    requests.add(
+      (jsonDecode(jsonEncode(messages)) as List)
+          .cast<Map<String, dynamic>>()
+          .toList(),
+    );
+    if (_replies.isEmpty) throw StateError('测试模型没有更多回复');
+    return _replies.removeAt(0);
+  }
+
+  @override
+  void cancel() {}
+}
+
+AiReply _denialRootReply(String id, {required String reason}) => AiReply(
+  {
+    'role': 'assistant',
+    'content': null,
+    'tool_calls': [
+      {
+        'id': id,
+        'type': 'function',
+        'function': {
+          'name': aiRootToolName,
+          'arguments': jsonEncode({'reason': reason}),
+        },
+      },
+    ],
+  },
+  [
+    AiToolCall(
+      id,
+      '',
+      reason,
+      true,
+      name: aiRootToolName,
+      arguments: {'reason': reason},
+    ),
+  ],
+);
+
+const _denialForwardArguments = <String, dynamic>{
+  'name': '管理页',
+  'local_port': 0,
+  'target_host': '127.0.0.1',
+  'target_port': 8080,
+  'reason': '访问管理页',
+};
+
+AiReply _denialForwardReply(String id) => AiReply(
+  {
+    'role': 'assistant',
+    'content': null,
+    'tool_calls': [
+      {
+        'id': id,
+        'type': 'function',
+        'function': {
+          'name': aiPortForwardToolName,
+          'arguments': jsonEncode(_denialForwardArguments),
+        },
+      },
+    ],
+  },
+  [
+    AiToolCall(
+      id,
+      '',
+      '访问管理页',
+      true,
+      name: aiPortForwardToolName,
+      arguments: _denialForwardArguments,
+    ),
+  ],
+);
+
+Map<String, dynamic>? _denialResult(
+  _DenialEngineClient client,
+  String callId,
+) {
+  for (final request in client.requests) {
+    for (final message in request) {
+      if (message['role'] != 'tool' || message['tool_call_id'] != callId) {
+        continue;
+      }
+      return jsonDecode(message['content'] as String) as Map<String, dynamic>;
+    }
+  }
+  return null;
+}
+
+/// Executor owning both capabilities under test. Elevation is never expected
+/// to succeed here: a denial must leave the channel closed and the turn alive.
+class _DenialEngineExecutor implements AiSessionExecutor, AiPrivilegeExecutor {
+  final commands = <String>[];
+  final forwards = <(AiForwardRequest, bool)>[];
+  final elevateAttempts = <String>[];
+  int cancelCalls = 0;
+  bool _elevated = false;
+
+  @override
+  bool get elevated => _elevated;
+
+  @override
+  String get systemContext => '主机：bridge.example.com';
+
+  @override
+  Future<void> elevate(String password) async {
+    elevateAttempts.add(password);
+    _elevated = true;
+  }
+
+  @override
+  void revokePrivilege() {
+    _elevated = false;
+  }
+
+  @override
+  void cancel() {
+    cancelCalls++;
+    _elevated = false;
+  }
+
+  @override
+  Future<AiForwardResult> createPortForward(
+    AiForwardRequest request, {
+    required bool save,
+  }) async {
+    forwards.add((request, save));
+    return AiForwardResult(
+      ruleId: 'bridge-rule',
+      name: request.name,
+      localPort: request.localPort == 0 ? 51000 : request.localPort,
+      targetHost: request.targetHost,
+      targetPort: request.targetPort,
+      url: 'http://127.0.0.1:51000',
+      saved: save,
+    );
+  }
+
+  @override
+  Future<AiCommandResult> execute(
+    String command,
+    void Function(String) onOutput,
+  ) async {
+    commands.add(command);
+    onOutput('1000');
+    return const AiCommandResult('1000', 0);
+  }
+}
+
+/// Native relay loopback for a test that needs the real main-engine
+/// controller behind the detached window instead of the recording double.
+class _RealEngineHarness {
+  _RealEngineHarness(this.task) {
+    host = AiWindowHost(
+      appearance: () => const AppearancePreferences(),
+      pushInterval: Duration.zero,
+    );
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(aiWindowChannel, _relay);
+  }
+
+  final AiTaskController task;
+  final remote = RemoteAiTaskController();
+  final pushes = <Map<Object?, Object?>>[];
+  final relay = <MethodCall>[];
+  late final AiWindowHost host;
+  int openCount = 0;
+  int hides = 0;
+  int docks = 0;
+
+  Future<void> deliver(Object? payload) => TestDefaultBinaryMessengerBinding
+      .instance
+      .defaultBinaryMessenger
+      .handlePlatformMessage(
+        aiWindowChannel.name,
+        const StandardMethodCodec().encodeMethodCall(
+          MethodCall('changed', payload),
+        ),
+        null,
+      );
+
+  Future<Object?> _relay(MethodCall call) async {
+    relay.add(call);
+    switch (call.method) {
+      case 'open':
+        openCount++;
+        return null;
+      case 'hide':
+        hides++;
+        return null;
+      case 'changed':
+        final payload = Map<Object?, Object?>.from(call.arguments as Map);
+        pushes.add(payload);
+        unawaited(deliver(payload));
+        return null;
+      default:
+        return host.handle(call);
+    }
+  }
+
+  void dispose() {
+    remote.dispose();
+    host.dispose();
+    task.dispose();
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(aiWindowChannel, null);
+  }
 }

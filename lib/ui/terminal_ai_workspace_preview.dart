@@ -7,24 +7,72 @@ import 'ai_window_session.dart';
 import 'terminal_ai_panel.dart';
 import 'theme.dart';
 
-/// Previews for the standalone AI workbench — the layout [TerminalAiPanel]
-/// renders when it is given an `onDock` callback (the detached window).
+/// Previews for the AI panel: the detached workbench (built when
+/// [TerminalAiPanel] gets an `onDock` callback) and, with `embedded: true`, the
+/// in-pane panel it shows when `onDock` is null.
 ///
 /// The panel is driven by a real controller with a preview-only model catalog.
 /// No network, SSH session or history store is used, and command execution is
 /// disabled. The controller is disposed when the preview is removed.
 
-AiTaskController _task({bool configured = true}) => AiTaskController(
-  settings: () => configured
-      ? const AiSettings(
-          baseUrl: 'https://ai.example.com/v1',
-          model: 'gpt-5-mini',
-        )
-      : const AiSettings(),
-  executorFactory: () => throw const AiFailure('预览不执行命令'),
-  connected: () => false,
-  clientFactory: _PreviewClient.new,
+AiTaskController _task({
+  bool configured = true,
+  bool rootActive = false,
+  bool authorizingRoot = false,
+  String? privilegeError,
+}) => _PreviewTask(
+  configured: configured,
+  rootActive: rootActive,
+  authorizingRoot: authorizingRoot,
+  privilegeError: privilegeError,
 );
+
+/// The real controller with only the privileged facts overridden, so the root
+/// states can be previewed without an SSH session, a password or a running
+/// sudo channel. Everything else — entries, pending, running, status — is the
+/// production controller's own state.
+class _PreviewTask extends AiTaskController {
+  _PreviewTask({
+    required bool configured,
+    bool rootActive = false,
+    bool authorizingRoot = false,
+    String? privilegeError,
+  }) : previewRootActive = rootActive,
+       previewAuthorizingRoot = authorizingRoot,
+       previewPrivilegeError = privilegeError,
+       super(
+         settings: () => configured
+             ? const AiSettings(
+                 baseUrl: 'https://ai.example.com/v1',
+                 model: 'gpt-5-mini',
+               )
+             : const AiSettings(),
+         executorFactory: () => throw const AiFailure('预览不执行命令'),
+         connected: () => false,
+         clientFactory: _PreviewClient.new,
+       );
+
+  bool previewRootActive;
+  bool previewAuthorizingRoot;
+  String? previewPrivilegeError;
+
+  @override
+  bool get rootActive => previewRootActive;
+
+  @override
+  bool get authorizingRoot => previewAuthorizingRoot;
+
+  @override
+  String? get privilegeError => previewPrivilegeError;
+
+  @override
+  void endRoot() {
+    previewRootActive = false;
+    previewAuthorizingRoot = false;
+    previewPrivilegeError = null;
+    notifyListeners();
+  }
+}
 
 class _PreviewClient extends TerminalAiClient {
   @override
@@ -55,15 +103,46 @@ void _fillTranscript(AiTaskController task) {
   ]);
 }
 
+/// A pending `request_root` call on top of the disk-check transcript, so the
+/// privileged card appears exactly where a real approval would.
+void _fillRootRequest(AiTaskController task) {
+  _fillTranscript(task);
+  task
+    ..running = true
+    ..status = '等待确认'
+    ..pending = AiToolCall(
+      'preview-root',
+      '请求 root 权限：安装构建依赖并调整服务配置',
+      '安装构建依赖并调整服务配置，需要 root 权限。',
+      true,
+      name: aiRootToolName,
+      arguments: const {'reason': '安装构建依赖并调整服务配置'},
+    );
+}
+
 Widget _workbench({
   required Brightness brightness,
   required double textScale,
   bool configured = true,
+
+  /// Draws the in-pane panel instead of the detached workbench: the panel only
+  /// switches layouts on its `onDock` callback, so leaving it null is enough.
+  bool embedded = false,
+
+  /// Privileged states the preview controller reports without a real sudo
+  /// channel. The scene callback still supplies the pending request.
+  bool rootActive = false,
+  bool authorizingRoot = false,
+  String? privilegeError,
   void Function(AiTaskController task)? scene,
 }) => _WorkbenchPreview(
   brightness: brightness,
   textScale: textScale,
   configured: configured,
+  embedded: embedded,
+  rootActive: rootActive,
+  authorizingRoot: authorizingRoot,
+  privilegeError: privilegeError,
   scene: scene,
 );
 
@@ -122,12 +201,20 @@ class _WorkbenchPreview extends StatefulWidget {
     required this.brightness,
     required this.textScale,
     required this.configured,
+    required this.embedded,
+    required this.rootActive,
+    required this.authorizingRoot,
+    required this.privilegeError,
     this.scene,
   });
 
   final Brightness brightness;
   final double textScale;
   final bool configured;
+  final bool embedded;
+  final bool rootActive;
+  final bool authorizingRoot;
+  final String? privilegeError;
   final void Function(AiTaskController task)? scene;
 
   @override
@@ -135,7 +222,12 @@ class _WorkbenchPreview extends StatefulWidget {
 }
 
 class _WorkbenchPreviewState extends State<_WorkbenchPreview> {
-  late final task = _task(configured: widget.configured);
+  late final task = _task(
+    configured: widget.configured,
+    rootActive: widget.rootActive,
+    authorizingRoot: widget.authorizingRoot,
+    privilegeError: widget.privilegeError,
+  );
   late final selection = _PreviewSessions(
     _previewSessions,
     _previewSessions.first.id,
@@ -164,6 +256,7 @@ class _WorkbenchPreviewState extends State<_WorkbenchPreview> {
       (item) => item.id == sessionId,
       orElse: () => selection.sessions.first,
     );
+    final embedded = widget.embedded;
     return MaterialApp(
       debugShowCheckedModeBanner: false,
       theme: harborTheme(brightness: widget.brightness),
@@ -174,14 +267,19 @@ class _WorkbenchPreviewState extends State<_WorkbenchPreview> {
       ),
       home: Scaffold(
         body: TerminalAiPanel(
-          key: ValueKey('ai-workbench-$sessionId'),
+          key: ValueKey(
+            embedded ? 'ai-embedded-preview' : 'ai-workbench-$sessionId',
+          ),
           task: task,
           hostName: session.hostName,
-          sessionSelection: selection,
-          draft: _drafts[sessionId],
-          onDraftChanged: (draft) => _drafts[sessionId] = draft,
+          sessionSelection: embedded ? null : selection,
+          draft: embedded ? null : _drafts[sessionId],
+          onDraftChanged: embedded
+              ? null
+              : (draft) => _drafts[sessionId] = draft,
           onSettings: () {},
-          onDock: () {},
+          onDetach: embedded ? () {} : null,
+          onDock: embedded ? null : () {},
         ),
       ),
     );
@@ -277,6 +375,38 @@ Widget aiWorkbenchForwardApprovalPreview() => _workbench(
 );
 
 @Preview(
+  name: 'AI 内嵌面板 · 本地转发审批 · 420 深色',
+  group: 'Harbor SSH · AI',
+  size: Size(420, 680),
+)
+Widget aiEmbeddedForwardApprovalPreview() => _workbench(
+  brightness: Brightness.dark,
+  textScale: 1,
+  embedded: true,
+  scene: (task) {
+    _fillTranscript(task);
+    task
+      ..approvalMode = AiApprovalMode.auto
+      ..running = true
+      ..status = '等待确认'
+      ..pending = AiToolCall(
+        'preview-forward-embedded',
+        '本地端口转发：127.0.0.1:自动分配 → 服务器侧 127.0.0.1:80',
+        'AI 请求在你的电脑上建立到服务器的本地端口转发。',
+        true,
+        name: 'create_port_forward',
+        arguments: const {
+          'name': 'admin',
+          'local_port': 0,
+          'target_host': '127.0.0.1',
+          'target_port': 80,
+          'reason': '访问内网管理页',
+        },
+      );
+  },
+);
+
+@Preview(
   name: 'AI 工作台 · MCP 工具审批 · 560',
   group: 'Harbor SSH · AI',
   size: Size(560, 720),
@@ -310,3 +440,70 @@ Widget aiWorkbenchMcpApprovalPreview() => _workbench(
 )
 Widget aiWorkbenchUnconfiguredPreview() =>
     _workbench(brightness: Brightness.light, textScale: 1, configured: false);
+
+@Preview(
+  name: 'AI 工作台 · root 授权 · 560',
+  group: 'Harbor SSH · AI',
+  size: Size(560, 760),
+)
+Widget aiWorkbenchRootApprovalPreview() => _workbench(
+  brightness: Brightness.light,
+  textScale: 1,
+  scene: _fillRootRequest,
+);
+
+@Preview(
+  name: 'AI 内嵌面板 · root 授权 · 420 深色 2x',
+  group: 'Harbor SSH · AI',
+  size: Size(420, 720),
+)
+Widget aiEmbeddedRootApprovalPreview() => _workbench(
+  brightness: Brightness.dark,
+  textScale: 2,
+  embedded: true,
+  scene: _fillRootRequest,
+);
+
+@Preview(
+  name: 'AI 工作台 · root 认证中 · 480 2x',
+  group: 'Harbor SSH · AI',
+  size: Size(480, 720),
+)
+Widget aiWorkbenchRootAuthorizingPreview() => _workbench(
+  brightness: Brightness.light,
+  textScale: 2,
+  authorizingRoot: true,
+  scene: (task) {
+    _fillRootRequest(task);
+    task.status = '正在提权';
+  },
+);
+
+@Preview(
+  name: 'AI 工作台 · root 认证失败 · 480 2x',
+  group: 'Harbor SSH · AI',
+  size: Size(480, 720),
+)
+Widget aiWorkbenchRootErrorPreview() => _workbench(
+  brightness: Brightness.light,
+  textScale: 2,
+  privilegeError: '提权失败，请检查密码或服务器权限后重试',
+  scene: _fillRootRequest,
+);
+
+@Preview(
+  name: 'AI 工作台 · root 已提权 · 1200 深色',
+  group: 'Harbor SSH · AI',
+  size: Size(1200, 820),
+)
+Widget aiWorkbenchRootActivePreview() => _workbench(
+  brightness: Brightness.dark,
+  textScale: 1,
+  rootActive: true,
+  scene: (task) {
+    _fillTranscript(task);
+    task
+      ..running = true
+      ..status = '执行命令';
+  },
+);

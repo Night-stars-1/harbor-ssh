@@ -724,6 +724,69 @@ void main() {
     expect(forwardEntry.output, contains('规则已保存到主机端口转发列表'));
   });
 
+  test('拒绝端口转发后不建监听也不保存，模型收到 denied 并继续回复', () async {
+    final model = await _ModelServer.start();
+    addTearDown(model.close);
+    model.onRequest = (request, body, index) async {
+      await _writeJson(
+        request,
+        index == 1
+            ? _toolReply(
+                'create_port_forward',
+                {
+                  'name': '不该创建的转发',
+                  'local_port': 0,
+                  'target_host': '127.0.0.1',
+                  'target_port': 8080,
+                  'reason': '访问仅内网可见的服务',
+                },
+                id: 'forward-denied',
+              )
+            : _textReply('已取消转发，未做任何改动'),
+      );
+    };
+    final executor = _SessionExecutor();
+    final task = AiTaskController(
+      settings: () => _settings(model),
+      executorFactory: () => executor,
+      connected: () => true,
+      approvalMode: AiApprovalMode.auto,
+    );
+    addTearDown(task.dispose);
+
+    final run = task.start('创建端口转发');
+    await _eventually(() => task.pending != null);
+    expect(task.pending!.name, 'create_port_forward');
+    // A checked save box must not turn a refusal into a saved rule.
+    task.approve(false, saveForward: true, expectedCallId: task.pending!.id);
+    await run;
+    expect(task.failure, isNull);
+    expect(task.running, isFalse);
+    expect(task.pending, isNull);
+    expect(executor.forwards, isEmpty, reason: '拒绝后不得创建监听或保存规则');
+    final entry = task.entries.singleWhere((item) => item.command);
+    expect(entry.finished, isTrue);
+    expect(entry.started, isNot(true));
+    expect(entry.exitCode, isNull);
+
+    // The next model request carries exactly one denied result for the same
+    // model call id, and the conversation continues normally.
+    expect(model.requests, hasLength(2));
+    final toolMessages = [
+      for (final message in model.requests[1]['messages'] as List)
+        if (message['role'] == 'tool') message,
+    ];
+    expect(toolMessages, hasLength(1));
+    final result =
+        jsonDecode(toolMessages.single['content'] as String)
+            as Map<String, dynamic>;
+    expect(toolMessages.single['tool_call_id'], 'forward-denied');
+    expect(result['status'], 'denied');
+    expect(result['exitCode'], isNull);
+    expect(result['output'], '');
+    expect(model.errors, isEmpty);
+  });
+
   test('只读模式不提供 MCP 或转发工具，模型请求也不会执行', () async {
     final model = await _ModelServer.start();
     final mcp = await _McpFixture.start();

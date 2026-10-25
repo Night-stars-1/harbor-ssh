@@ -46,6 +46,19 @@ const _workspaceBottomShare = 0.7;
 /// whole window, and grows with the text scale.
 const _composerCompactWidth = 300.0;
 
+/// Approval body caps. A local forward draws a three-step mapping whose two
+/// endpoints, addresses and captions need room at 1x, while a command keeps the
+/// tighter cap; both bodies stay scrollable, so an extremely short window can
+/// still reach every line.
+const _commandBodyMaxHeight = 160.0;
+const _forwardBodyMaxHeight = 260.0;
+const _rootBodyMaxHeight = 220.0;
+
+/// Share of the embedded canvas the approval prompt may occupy before it
+/// starts scrolling on its own. The remainder always leaves room for the panel
+/// header, so a short panel scrolls the prompt instead of overflowing it.
+const _embeddedPromptShare = 0.75;
+
 /// Standalone transcript bubbles: a user message reads as a right-aligned note
 /// and an assistant reply as a left-aligned document. Each is capped by an
 /// absolute width and by a share of the chat column, so a narrow window keeps
@@ -154,10 +167,26 @@ class _TerminalAiPanelState extends State<TerminalAiPanel> {
   /// `create_port_forward` when the user approves.
   String? _saveForwardPendingId;
   bool _saveForwardChecked = false;
+
+  /// Password for the pending `request_root` prompt. It is never read by the
+  /// controller beyond the single `authorizeRoot` call, never copied into an
+  /// entry, status, snapshot or log, and is cleared as soon as the pending
+  /// call changes or the user submits it.
+  final _rootPassword = TextEditingController();
+
+  /// Id of the pending call the password field belongs to. Captured so a
+  /// submit only ever authorizes the call the user was looking at, and a new
+  /// request can never inherit the previous password.
+  String? _rootPendingId;
+
   AiImageInput get _imageInput =>
       widget.imageInput ?? const NativeAiImageInput();
 
   bool _isForward(AiToolCall? call) => call?.name == 'create_port_forward';
+
+  /// Root requests get their own privileged card: a password field and
+  /// [AiTaskController.authorizeRoot] replace the ordinary approve decision.
+  bool _isRoot(AiToolCall? call) => call?.name == aiRootToolName;
 
   /// MCP calls carry their server and tool in a readable command and the tool
   /// arguments separately; everything else is a local command or tool.
@@ -178,8 +207,11 @@ class _TerminalAiPanelState extends State<TerminalAiPanel> {
 
   /// Sends one approval for the call displayed when the controls were built.
   /// [pending] is captured by the closure, so a tap that lands after the
-  /// controller moved to another call cannot grant (or stop) that later call.
+  /// controller moved to another call cannot grant or reject that later call.
   void _approve(AiTaskController task, AiToolCall pending, bool allowed) {
+    // A root request is granted only through [_authorizeRoot]; the ordinary
+    // approve decision must never be able to grant it, even if a caller slips.
+    if (allowed && _isRoot(pending)) return;
     final save = allowed && _isForward(pending) && _forwardChecked(pending);
     if (mounted) {
       setState(() {
@@ -187,11 +219,7 @@ class _TerminalAiPanelState extends State<TerminalAiPanel> {
         _saveForwardChecked = false;
       });
     }
-    task.approve(
-      allowed,
-      saveForward: save,
-      expectedCallId: pending.id,
-    );
+    task.approve(allowed, saveForward: save, expectedCallId: pending.id);
   }
 
   String _argumentsText(AiToolCall call) {
@@ -209,6 +237,7 @@ class _TerminalAiPanelState extends State<TerminalAiPanel> {
   Widget _pendingContent(AiToolCall pending) {
     final theme = Theme.of(context);
     final colors = theme.colorScheme;
+    if (_isRoot(pending)) return _rootScope();
     if (_isMcp(pending)) {
       final arguments = _argumentsText(pending);
       return Column(
@@ -237,34 +266,511 @@ class _TerminalAiPanelState extends State<TerminalAiPanel> {
         ],
       );
     }
-    if (_isForward(pending)) {
-      return Row(
-        children: [
-          Icon(Icons.alt_route_rounded, size: 18, color: colors.primary),
-          const SizedBox(width: 8),
-          Expanded(
-            child: Text(pending.command, style: theme.textTheme.bodyMedium),
-          ),
-        ],
-      );
-    }
+    if (_isForward(pending)) return _forwardMapping(pending);
     return SelectableText(
       pending.command,
       style: theme.textTheme.bodyMedium?.copyWith(fontFamily: 'monospace'),
     );
   }
 
+  /// Scope facts stated before the password field: what the grant covers,
+  /// what it never touches, and when it disappears. The body is capped and
+  /// scrollable, so a narrow prompt or large text still reaches every line.
+  Widget _rootScope() {
+    final theme = Theme.of(context);
+    final colors = theme.colorScheme;
+    const facts = <(IconData, String, String)>[
+      (
+        Icons.terminal_rounded,
+        '作用范围：本轮 AI 的 SSH 命令',
+        '获得授权后，本轮 AI 执行的 SSH 命令直接以 root 身份运行；'
+            '不涵盖 SFTP 文件传输、MCP 工具或人工终端。',
+      ),
+      (
+        Icons.desktop_windows_outlined,
+        '与人工终端隔离',
+        '不使用你正在操作的终端，也不继承其中的 sudo 授权；每条命令仍是独立 shell。',
+      ),
+      (
+        Icons.password_rounded,
+        '仅支持非交互 sudo -S',
+        '免密 sudo 可留空。服务器强制 requiretty、MFA 或交互式 PAM 时无法提权。',
+      ),
+      (
+        Icons.timer_off_rounded,
+        '结束后自动撤销',
+        '本轮完成、取消或点击“结束提权并停止”后立即撤销，不会留到下一轮。',
+      ),
+    ];
+    return Column(
+      key: const ValueKey('ai-root-scope'),
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        for (final (index, fact) in facts.indexed) ...[
+          if (index > 0) const SizedBox(height: 10),
+          Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Icon(fact.$1, size: 18, color: colors.primary),
+              const SizedBox(width: 10),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(fact.$2, style: theme.textTheme.labelMedium),
+                    const SizedBox(height: 2),
+                    Text(
+                      fact.$3,
+                      style: theme.textTheme.bodySmall?.copyWith(
+                        color: colors.onSurfaceVariant,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ],
+          ),
+        ],
+      ],
+    );
+  }
+
+  /// A local forward drawn as the path it really is: this machine's loopback
+  /// listener, the SSH tunnel, and the service as the server sees it. Both ends
+  /// may read `127.0.0.1`, so each side is labelled and never merged into one
+  /// flat sentence.
+  Widget _forwardMapping(AiToolCall pending) {
+    final theme = Theme.of(context);
+    final colors = theme.colorScheme;
+    final arguments = pending.arguments;
+    final rawLocal = arguments['local_port'];
+    final localPort = rawLocal is int && rawLocal > 0 && rawLocal <= 65535
+        ? rawLocal
+        : null;
+    final rawHost = arguments['target_host'];
+    final host = rawHost is String && rawHost.trim().isNotEmpty
+        ? rawHost.trim()
+        : '127.0.0.1';
+    final rawTarget = arguments['target_port'];
+    final targetPort = rawTarget is int && rawTarget > 0 && rawTarget <= 65535
+        ? rawTarget
+        : null;
+    final local = _forwardEndpoint(
+      key: const ValueKey('ai-forward-local-endpoint'),
+      icon: Icons.laptop_mac_rounded,
+      label: '本机入口',
+      address: localPort == null ? '127.0.0.1:待分配' : '127.0.0.1:$localPort',
+    );
+    final server = _forwardEndpoint(
+      key: const ValueKey('ai-forward-server-endpoint'),
+      icon: Icons.dns_rounded,
+      label: '服务器服务',
+      address: _forwardAddress(host, targetPort?.toString() ?? '?'),
+    );
+    return Row(
+      key: const ValueKey('ai-forward-mapping'),
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Expanded(child: local),
+        Padding(
+          padding: const EdgeInsets.fromLTRB(8, 14, 8, 0),
+          child: Icon(
+            Icons.arrow_forward_rounded,
+            size: 18,
+            color: colors.onSurfaceVariant,
+          ),
+        ),
+        Expanded(child: server),
+      ],
+    );
+  }
+
+  Widget _forwardEndpoint({
+    required Key key,
+    required IconData icon,
+    required String label,
+    required String address,
+  }) {
+    final theme = Theme.of(context);
+    final colors = theme.colorScheme;
+    return Column(
+      key: key,
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Row(
+          children: [
+            Icon(icon, size: 16, color: colors.primary),
+            const SizedBox(width: 6),
+            Flexible(
+              child: Text(
+                label,
+                style: theme.textTheme.labelMedium?.copyWith(
+                  color: colors.onSurfaceVariant,
+                ),
+              ),
+            ),
+          ],
+        ),
+        const SizedBox(height: 2),
+        Text(address, style: theme.textTheme.bodyMedium),
+      ],
+    );
+  }
+
+  /// `host:port` as it must be reached from the server. An IPv6 literal keeps
+  /// its real value and is bracketed so the port separator stays unambiguous;
+  /// an already bracketed host is passed through unchanged.
+  static String _forwardAddress(String host, String port) {
+    final bracketed = host.startsWith('[') && host.endsWith(']');
+    return host.contains(':') && !bracketed ? '[$host]:$port' : '$host:$port';
+  }
+
+  /// Approval body height cap. The forward diagram and the root scope facts
+  /// both need more room than a command; every body stays scrollable.
+  double _pendingBodyMaxHeight(AiToolCall pending) => _isRoot(pending)
+      ? _rootBodyMaxHeight
+      : _isForward(pending)
+      ? _forwardBodyMaxHeight
+      : _commandBodyMaxHeight;
+
+  /// Canvas height the embedded panel keeps. A very short panel still lays out
+  /// and scrolls as a whole instead of squeezing its rows, and the text scale
+  /// grows the canvas so large text is never clipped.
+  double _embeddedCanvasHeight(BoxConstraints constraints) => math.max(
+    constraints.maxHeight,
+    300 * MediaQuery.textScalerOf(context).scale(14) / 14,
+  );
+
+  /// Local forwards, MCP tools and root requests are confirmed one call at a
+  /// time even in auto mode, so their card must not offer the global mode
+  /// switch: a clickable "自动审批" right above these buttons would imply the
+  /// call may run without this tap. Plain commands keep the switch — while a
+  /// prompt replaces the composer, it is their only mode entry point.
+  bool _forcedConfirmation(AiToolCall call) =>
+      _isForward(call) || _isRoot(call) || _isMcp(call);
+
+  /// The approval card both layouts share: one tonal MD3E surface with the
+  /// confirmation heading, the reason, the prompt body on its own inner panel,
+  /// the save-rule option and both decisions.
+  ///
+  /// A `request_root` call uses the same surface but its own heading, scope
+  /// facts, password field and privileged decision. It never shows the
+  /// ordinary approve button: root is granted only through [_authorizeRoot].
+  ///
+  /// [showModeSwitch] keeps the approval-mode control only where the card
+  /// replaces the composer (the embedded panel); the workbench keeps that
+  /// control in its own composer row, so it never appears twice. Forwards and
+  /// MCP calls always need this explicit decision, so they never show a mode
+  /// control at all.
+  Widget _approvalCard(
+    AiTaskController task,
+    AiToolCall pending, {
+    bool compactMode = false,
+    bool showModeSwitch = false,
+  }) {
+    final theme = Theme.of(context);
+    final colors = theme.colorScheme;
+    final forced = _forcedConfirmation(pending);
+    final root = _isRoot(pending);
+    if (root && _rootPendingId != pending.id) {
+      // The password belongs to one exact pending call. This is a defensive
+      // second path next to the controller listener: if a build ever sees a
+      // different request, drop the old secret after the frame instead of
+      // mutating a controller mid-build.
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) _syncRootPending();
+      });
+    }
+    return Material(
+      key: const ValueKey('ai-pending-approval'),
+      color: colors.surfaceContainerHigh,
+      shape: HarborShapes.superellipse(const BorderRadius.all(HarborShapes.xl)),
+      clipBehavior: Clip.antiAlias,
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Row(
+              children: [
+                Icon(
+                  root
+                      ? Icons.admin_panel_settings_outlined
+                      : Icons.gpp_maybe_outlined,
+                  size: 20,
+                  color: colors.primary,
+                ),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: Text(
+                    root ? '需要 root 授权' : '需要确认',
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: theme.textTheme.titleSmall,
+                  ),
+                ),
+                if (root)
+                  Text(
+                    '仅本轮',
+                    style: theme.textTheme.labelSmall?.copyWith(
+                      color: colors.onSurfaceVariant,
+                    ),
+                  )
+                else if (!forced && showModeSwitch)
+                  _approvalMode(task, compact: compactMode),
+              ],
+            ),
+            const SizedBox(height: 10),
+            Text(pending.reason, style: theme.textTheme.bodyMedium),
+            const SizedBox(height: 10),
+            DecoratedBox(
+              decoration: ShapeDecoration(
+                color: colors.surfaceContainerLow,
+                shape: HarborShapes.superellipse(
+                  const BorderRadius.all(HarborShapes.sm),
+                ),
+              ),
+              child: ConstrainedBox(
+                constraints: BoxConstraints(
+                  maxHeight: _pendingBodyMaxHeight(pending),
+                ),
+                child: SingleChildScrollView(
+                  padding: const EdgeInsets.all(12),
+                  child: SizedBox(
+                    width: double.infinity,
+                    child: _pendingContent(pending),
+                  ),
+                ),
+              ),
+            ),
+            if (root) ...[
+              const SizedBox(height: 12),
+              _rootControls(task, pending),
+            ] else ...[
+              _forwardRuleOption(pending),
+              const SizedBox(height: 12),
+              Wrap(
+                alignment: WrapAlignment.end,
+                spacing: 8,
+                runSpacing: 8,
+                children: [
+                  TextButton(
+                    onPressed: () => _approve(task, pending, false),
+                    child: const Text('取消'),
+                  ),
+                  FilledButton.tonal(
+                    onPressed: () => _approve(task, pending, true),
+                    child: const Text('批准并执行'),
+                  ),
+                ],
+              ),
+            ],
+          ],
+        ),
+      ),
+    );
+  }
+
+  /// Password entry and the privileged decision for one exact `request_root`
+  /// call.
+  ///
+  /// The field lives on this panel's state, so a rebuild never loses what the
+  /// user typed; its text is cleared when the pending call changes and the
+  /// instant it is submitted. Everything is disabled while a verification is
+  /// in flight, and the fixed controller error stays next to the field so the
+  /// same button can retry.
+  Widget _rootControls(AiTaskController task, AiToolCall pending) {
+    final theme = Theme.of(context);
+    final colors = theme.colorScheme;
+    final authorizing = task.authorizingRoot;
+    final error = task.privilegeError;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        TextField(
+          key: const ValueKey('ai-root-password'),
+          controller: _rootPassword,
+          enabled: !authorizing,
+          obscureText: true,
+          autocorrect: false,
+          enableSuggestions: false,
+          enableIMEPersonalizedLearning: false,
+          autofillHints: const <String>[],
+          keyboardType: TextInputType.visiblePassword,
+          textInputAction: TextInputAction.done,
+          onSubmitted: authorizing
+              ? null
+              : (_) => _authorizeRoot(task, pending),
+          decoration: InputDecoration(
+            hintText: 'sudo 密码；免密 sudo 可留空',
+            prefixIcon: Icon(Icons.lock_outline_rounded, color: colors.primary),
+            filled: true,
+            fillColor: colors.surfaceContainerLow,
+            isDense: true,
+            contentPadding: const EdgeInsets.symmetric(
+              horizontal: 12,
+              vertical: 12,
+            ),
+          ),
+        ),
+        if (authorizing) ...[
+          const SizedBox(height: 10),
+          Row(
+            children: [
+              const SizedBox.square(
+                dimension: 16,
+                child: CircularProgressIndicator(strokeWidth: 2),
+              ),
+              const SizedBox(width: 10),
+              Expanded(
+                child: Text(
+                  '正在验证 root 权限…',
+                  key: const ValueKey('ai-root-progress'),
+                  style: theme.textTheme.bodySmall?.copyWith(
+                    color: colors.onSurfaceVariant,
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ],
+        if (error != null) ...[
+          const SizedBox(height: 8),
+          Text(
+            error,
+            key: const ValueKey('ai-root-error'),
+            style: theme.textTheme.bodySmall?.copyWith(color: colors.error),
+          ),
+        ],
+        const SizedBox(height: 12),
+        Wrap(
+          alignment: WrapAlignment.end,
+          spacing: 8,
+          runSpacing: 8,
+          children: [
+            TextButton(
+              key: const ValueKey('ai-root-cancel'),
+              onPressed: () => _cancelRoot(task, pending),
+              child: const Text('取消'),
+            ),
+            FilledButton(
+              key: const ValueKey('ai-root-authorize'),
+              onPressed: authorizing
+                  ? null
+                  : () => _authorizeRoot(task, pending),
+              child: Text(
+                authorizing
+                    ? '正在验证…'
+                    : error == null
+                    ? '授权本轮 root'
+                    : '重试授权',
+              ),
+            ),
+          ],
+        ),
+      ],
+    );
+  }
+
+  /// Keeps [_rootPendingId] in step with the visible request and drops the
+  /// secret as soon as that request is replaced or answered.
+  void _syncRootPending() {
+    final pending = widget.task.pending;
+    final id = _isRoot(pending) ? pending!.id : null;
+    if (id == _rootPendingId) return;
+    _rootPendingId = id;
+    if (_rootPassword.text.isNotEmpty) _rootPassword.clear();
+  }
+
+  /// Sends the password for the exact request this card was built for, then
+  /// clears the field immediately. A stale card (the controller already moved
+  /// on) never authorizes the call that replaced it.
+  void _authorizeRoot(AiTaskController task, AiToolCall pending) {
+    if (task.authorizingRoot) return;
+    if (!_isRoot(pending) || _rootPendingId != pending.id) return;
+    if (pending.id != task.pending?.id) return;
+    final password = _rootPassword.text;
+    _rootPassword.clear();
+    unawaited(task.authorizeRoot(password, expectedCallId: pending.id));
+  }
+
+  /// Rejects this root request, including an in-flight authentication, while
+  /// leaving the conversation running so the model can acknowledge refusal.
+  void _cancelRoot(AiTaskController task, AiToolCall pending) {
+    _rootPassword.clear();
+    _approve(task, pending, false);
+  }
+
+  /// Persistent reminder that this turn runs as root. It states the scope and
+  /// offers the only exit: ending the elevation also stops the turn, so the
+  /// task never continues at a different privilege level by surprise.
+  Widget _rootBanner(AiTaskController task) {
+    final theme = Theme.of(context);
+    final colors = theme.colorScheme;
+    return Material(
+      key: const ValueKey('ai-root-banner'),
+      color: colors.tertiaryContainer,
+      shape: HarborShapes.superellipse(const BorderRadius.all(HarborShapes.md)),
+      clipBehavior: Clip.antiAlias,
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(12, 6, 8, 6),
+        child: Wrap(
+          spacing: 8,
+          runSpacing: 4,
+          crossAxisAlignment: WrapCrossAlignment.center,
+          children: [
+            Icon(
+              Icons.admin_panel_settings_rounded,
+              size: 18,
+              color: colors.onTertiaryContainer,
+            ),
+            Text(
+              'root · 仅本轮',
+              style: theme.textTheme.labelLarge?.copyWith(
+                color: colors.onTertiaryContainer,
+                fontWeight: FontWeight.w600,
+              ),
+            ),
+            TextButton(
+              key: const ValueKey('ai-root-end'),
+              onPressed: task.endRoot,
+              style: TextButton.styleFrom(
+                foregroundColor: colors.onTertiaryContainer,
+                minimumSize: const Size(0, 36),
+                padding: const EdgeInsets.symmetric(horizontal: 8),
+                tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+              ),
+              child: const Text('结束提权并停止'),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  /// Saves the shown forward as a host rule. Saving never pre-approves later
+  /// calls: each new `create_port_forward` still asks. The flag is keyed by the
+  /// pending call id, so every new prompt starts off.
   Widget _forwardRuleOption(AiToolCall pending) {
     if (!_isForward(pending)) return const SizedBox.shrink();
-    return CheckboxListTile(
-      key: const ValueKey('ai-save-forward-rule'),
-      value: _forwardChecked(pending),
-      onChanged: (value) => _setForwardChecked(pending, value ?? false),
-      dense: true,
-      contentPadding: EdgeInsets.zero,
-      controlAffinity: ListTileControlAffinity.leading,
-      title: const Text('保存到主机规则'),
-      subtitle: const Text('仅将规则保存到主机列表，AI 每次创建转发仍会单独询问'),
+    final colors = Theme.of(context).colorScheme;
+    return Padding(
+      padding: const EdgeInsets.only(top: 8),
+      child: Material(
+        color: colors.surfaceContainerHighest,
+        shape: HarborShapes.superellipse(
+          const BorderRadius.all(HarborShapes.md),
+        ),
+        clipBehavior: Clip.antiAlias,
+        child: SwitchListTile(
+          key: const ValueKey('ai-save-forward-rule'),
+          value: _forwardChecked(pending),
+          onChanged: (value) => _setForwardChecked(pending, value),
+          contentPadding: const EdgeInsets.fromLTRB(12, 2, 8, 2),
+          title: const Text('保存到主机规则'),
+          subtitle: const Text('只记住配置，之后 AI 创建转发仍需确认'),
+        ),
+      ),
     );
   }
 
@@ -384,6 +890,7 @@ class _TerminalAiPanelState extends State<TerminalAiPanel> {
     // back to it). That is not a new accepted send, so the first notification
     // must not clear the draft that was just restored.
     _wasRunning = widget.task.running;
+    _syncRootPending();
     _input.addListener(_reportDraft);
     _scroll.addListener(_reportDraft);
     widget.task.addListener(_changed);
@@ -428,6 +935,8 @@ class _TerminalAiPanelState extends State<TerminalAiPanel> {
         widget.sessionSelection?.sessionId != _sessionId) {
       return;
     }
+    // A replaced or answered request must never keep the previous password.
+    _syncRootPending();
     final running = widget.task.running;
     if (running && !_wasRunning) {
       // The message is accepted only once the turn starts; a rejected start
@@ -464,6 +973,7 @@ class _TerminalAiPanelState extends State<TerminalAiPanel> {
     _input.removeListener(_reportDraft);
     _scroll.removeListener(_reportDraft);
     _input.dispose();
+    _rootPassword.dispose();
     _scroll.dispose();
     super.dispose();
   }
@@ -1235,16 +1745,17 @@ class _TerminalAiPanelState extends State<TerminalAiPanel> {
               ),
             ],
           ),
+          if (task.rootActive) ...[
+            const SizedBox(height: 8),
+            _rootBanner(task),
+          ],
           if (task.historyFailure != null) _historyNotice(task),
           const SizedBox(height: 12),
           Expanded(
             child: LayoutBuilder(
               builder: (context, constraints) => SingleChildScrollView(
                 child: SizedBox(
-                  height: math.max(
-                    constraints.maxHeight,
-                    300 * MediaQuery.textScalerOf(context).scale(14) / 14,
-                  ),
+                  height: _embeddedCanvasHeight(constraints),
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.stretch,
                     children: [
@@ -1319,38 +1830,24 @@ class _TerminalAiPanelState extends State<TerminalAiPanel> {
                         ],
                         if (pending != null) ...[
                           const SizedBox(height: 10),
-                          Row(
-                            children: [
-                              Expanded(child: Text(pending.reason)),
-                              _approvalMode(task, compact: compact),
-                            ],
-                          ),
-                          const SizedBox(height: 4),
+                          // The same approval card the workbench shows, inside
+                          // one height-capped scroll region: on a short panel or
+                          // at large text it scrolls instead of overflowing, and
+                          // both decisions stay reachable.
                           ConstrainedBox(
-                            constraints: const BoxConstraints(maxHeight: 160),
+                            constraints: BoxConstraints(
+                              maxHeight:
+                                  _embeddedCanvasHeight(constraints) *
+                                  _embeddedPromptShare,
+                            ),
                             child: SingleChildScrollView(
-                              child: Column(
-                                crossAxisAlignment: CrossAxisAlignment.stretch,
-                                children: [_pendingContent(pending)],
+                              child: _approvalCard(
+                                task,
+                                pending,
+                                compactMode: compact,
+                                showModeSwitch: true,
                               ),
                             ),
-                          ),
-                          _forwardRuleOption(pending),
-                          const SizedBox(height: 8),
-                          Wrap(
-                            alignment: WrapAlignment.end,
-                            spacing: 8,
-                            runSpacing: 8,
-                            children: [
-                              TextButton(
-                                onPressed: () => _approve(task, pending, false),
-                                child: const Text('取消'),
-                              ),
-                              FilledButton.tonal(
-                                onPressed: () => _approve(task, pending, true),
-                                child: const Text('批准并执行'),
-                              ),
-                            ],
                           ),
                         ] else ...[
                           const SizedBox(height: 12),
@@ -1476,6 +1973,10 @@ class _TerminalAiPanelState extends State<TerminalAiPanel> {
               ),
             ],
           ),
+          if (task.rootActive) ...[
+            const SizedBox(height: 8),
+            _rootBanner(task),
+          ],
           if (!showRail) ...[
             const SizedBox(height: 4),
             _workspaceToolbar(context, task),
@@ -1490,7 +1991,9 @@ class _TerminalAiPanelState extends State<TerminalAiPanel> {
   /// approval facts.
   String _workspaceStatus(AiTaskController task, bool configured) {
     if (!configured) return '未配置模型服务';
-    if (task.pending != null) return '等待审批';
+    if (task.pending != null) {
+      return _isRoot(task.pending) ? '等待 root 授权' : '等待审批';
+    }
     if (task.running) {
       final status = task.status.trim();
       return status.isEmpty ? '执行中' : status;
@@ -1888,7 +2391,7 @@ class _TerminalAiPanelState extends State<TerminalAiPanel> {
         ],
         if (task.pending != null) ...[
           const SizedBox(height: 12),
-          _workspaceApproval(context, task),
+          _approvalCard(task, task.pending!),
         ],
         const SizedBox(height: 12),
         _composer(task),
@@ -2013,81 +2516,6 @@ class _TerminalAiPanelState extends State<TerminalAiPanel> {
           },
         ),
       ],
-    );
-  }
-
-  /// Approval prompt in its own tonal area above the composer: the command
-  /// scrolls on its own while both decisions stay visible. The approval mode
-  /// itself stays in the composer's options row, so only one mode control is
-  /// ever on screen.
-  Widget _workspaceApproval(BuildContext context, AiTaskController task) {
-    final theme = Theme.of(context);
-    final colors = theme.colorScheme;
-    final pending = task.pending!;
-    return Material(
-      color: colors.surfaceContainerHigh,
-      shape: HarborShapes.superellipse(const BorderRadius.all(HarborShapes.xl)),
-      clipBehavior: Clip.antiAlias,
-      child: Padding(
-        padding: const EdgeInsets.all(16),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            Row(
-              children: [
-                Icon(Icons.gpp_maybe_outlined, size: 20, color: colors.primary),
-                const SizedBox(width: 8),
-                Expanded(
-                  child: Text(
-                    '需要审批',
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: theme.textTheme.titleSmall,
-                  ),
-                ),
-              ],
-            ),
-            const SizedBox(height: 10),
-            Text(pending.reason, style: theme.textTheme.bodyMedium),
-            const SizedBox(height: 10),
-            DecoratedBox(
-              decoration: ShapeDecoration(
-                color: colors.surfaceContainerLow,
-                shape: HarborShapes.superellipse(
-                  const BorderRadius.all(HarborShapes.sm),
-                ),
-              ),
-              child: ConstrainedBox(
-                constraints: const BoxConstraints(maxHeight: 160),
-                child: SingleChildScrollView(
-                  padding: const EdgeInsets.all(12),
-                  child: SizedBox(
-                    width: double.infinity,
-                    child: _pendingContent(pending),
-                  ),
-                ),
-              ),
-            ),
-            _forwardRuleOption(pending),
-            const SizedBox(height: 12),
-            Wrap(
-              alignment: WrapAlignment.end,
-              spacing: 8,
-              runSpacing: 8,
-              children: [
-                TextButton(
-                  onPressed: () => _approve(task, pending, false),
-                  child: const Text('取消'),
-                ),
-                FilledButton.tonal(
-                  onPressed: () => _approve(task, pending, true),
-                  child: const Text('批准并执行'),
-                ),
-              ],
-            ),
-          ],
-        ),
-      ),
     );
   }
 
@@ -2324,8 +2752,7 @@ class _AiMessageBubbleState extends State<_AiMessageBubble> {
     final shape = HarborShapes.superellipse(BorderRadius.circular(20));
     final expanded = _expandedTools[entry] ?? false;
     final isMcp = entry.text.startsWith('MCP');
-    final isForward =
-        entry.text.startsWith('本地') && entry.text.contains('转发');
+    final isForward = entry.text.startsWith('本地') && entry.text.contains('转发');
     final shell = !isMcp && !isForward;
     return ExpansionTile(
       key: ObjectKey(entry),
@@ -3436,7 +3863,6 @@ class _TerminalAiLayoutState extends State<TerminalAiLayout> {
       final terminalWidth = horizontal && widget.panel != null
           ? maxWidth - panelWidth - _aiPanelHandleWidth
           : maxWidth;
-
 
       void nudge(double delta) {
         final next = clampWidth(panelWidth + delta);
