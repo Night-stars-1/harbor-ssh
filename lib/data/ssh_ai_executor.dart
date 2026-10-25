@@ -5,9 +5,38 @@ import 'package:dartssh2/dartssh2.dart';
 
 import 'terminal_ai.dart';
 
-class SshAiExecutor implements AiCommandExecutor {
-  SshAiExecutor(this.open);
+class SshAiExecutor implements AiSessionExecutor {
+  SshAiExecutor(
+    this.open, {
+    this.systemContext = '',
+    Future<AiForwardResult> Function(
+      AiForwardRequest request, {
+      required bool save,
+    })?
+    startForward,
+    Future<void> Function(String ruleId)? stopForward,
+  }) : startForward = startForward ?? _noForward,
+       stopForward = stopForward ?? _ignoreStop;
   final Future<SSHSession> Function(String) open;
+
+  /// Snapshot of the connected endpoint, regenerated for every AI turn.
+  @override
+  final String systemContext;
+
+  final Future<AiForwardResult> Function(
+    AiForwardRequest request, {
+    required bool save,
+  })
+  startForward;
+  final Future<void> Function(String ruleId) stopForward;
+
+  static Future<AiForwardResult> _noForward(
+    AiForwardRequest request, {
+    required bool save,
+  }) async => throw const AiFailure('当前会话未配置端口转发');
+
+  static Future<void> _ignoreStop(String ruleId) async {}
+
   final _cancelled = Completer<void>();
   SSHSession? _active;
 
@@ -106,5 +135,25 @@ class SshAiExecutor implements AiCommandExecutor {
       session?.close();
       _active = null;
     }
+  }
+
+  @override
+  Future<AiForwardResult> createPortForward(
+    AiForwardRequest request, {
+    required bool save,
+  }) async {
+    if (_cancelled.isCompleted) throw const AiFailure('任务已停止');
+    request.validate();
+    final result = await startForward(request, save: save);
+    // The user can stop the turn while the listener is being bound. The
+    // tunnel must not outlive a cancelled turn unless the model received its
+    // result, so undo it here and report the cancellation truthfully.
+    if (_cancelled.isCompleted) {
+      try {
+        await stopForward(result.ruleId);
+      } catch (_) {}
+      throw const AiFailure('任务已停止，端口转发已撤销');
+    }
+    return result;
   }
 }

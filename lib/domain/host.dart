@@ -182,4 +182,12 @@ class Credentials {
     privateKey: json['privateKey'] as String? ?? '',
     passphrase: json['passphrase'] as String? ?? '',
   );
+  @override
+  bool operator ==(Object other) =>
+      other is Credentials &&
+      other.password == password &&
+      other.privateKey == privateKey &&
+      other.passphrase == passphrase;
+  @override
+  int get hashCode => Object.hash(password, privateKey, passphrase);
 }

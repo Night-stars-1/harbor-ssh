@@ -35,7 +35,7 @@ class WorkspaceModel extends ChangeNotifier {
   Future<void> _aiWrite = Future.value();
 
   Future<void> saveAiSettings(AiSettings settings) {
-    settings.endpoint;
+    settings.modelsEndpoint;
     final operation = _aiWrite.then((_) async {
       await repository.secrets.write(_aiKey, jsonEncode(settings.toJson()));
       if (_disposed) return;
@@ -61,6 +61,12 @@ class WorkspaceModel extends ChangeNotifier {
   static const _appearanceKey = 'harbor.appearance.v1';
   Future<void> _appearanceWrite = Future.value();
 
+  /// Bumped each time saved appearance prefs replace the in-memory defaults.
+  /// Views that own a live drag use it to adopt a late restore exactly once,
+  /// while ordinary [saveAppearance] notifications leave their local width
+  /// alone.
+  int appearanceRevision = 0;
+
   Future<void> saveAppearance(AppearancePreferences value) {
     final operation = _appearanceWrite.then((_) async {
       await repository.preferences.write(
@@ -77,7 +83,10 @@ class WorkspaceModel extends ChangeNotifier {
 
   Future<void> _loadAppearance() async {
     final saved = await readAppearance(repository.preferences);
-    if (saved != null && !_disposed) appearance.value = saved;
+    if (saved != null && !_disposed) {
+      appearance.value = saved;
+      appearanceRevision++;
+    }
   }
 
   /// The saved appearance, or null when none is stored or it is unreadable.
@@ -548,32 +557,101 @@ class WorkspaceModel extends ChangeNotifier {
     }
   }
 
-  Future<void> saveHost(Host host, Credentials? credentials) async {
-    if (saving) throw StateError('正在保存，请稍后重试');
-    _saving = true;
-    _notify();
-    try {
-      final previousCredentials = await repository.credentials(host.id);
-      await repository.saveCredentials(host.id, credentials);
-      final next = [..._hosts];
-      final index = next.indexWhere((h) => h.id == host.id);
-      if (index < 0) {
-        next.add(host);
-      } else {
-        next[index] = host;
-      }
-      try {
-        await repository.saveHosts(next);
-      } catch (_) {
-        await repository.saveCredentials(host.id, previousCredentials);
-        rethrow;
-      }
-      _hosts = next;
-      _scheduleSync();
-    } finally {
-      _saving = false;
+  /// Saves one edited connection without ever waiting for the network.
+  ///
+  /// [originalHost] and [originalCredentials] are the values the editor opened
+  /// with; both are null for a new connection. They describe this save's
+  /// intent, so only what the user actually changed is applied to the host as
+  /// it exists on disk now: a bookmark, a password or a field written by a
+  /// concurrent sync or another save survives instead of being replaced by the
+  /// stale copy the editor was showing.
+  ///
+  /// Writes queue behind other local commits instead of waiting for the
+  /// network: a save that lands while an automatic sync is uploading is folded
+  /// back into the sync's final local commit, so the edit is neither blocked
+  /// for seconds nor overwritten by the sync it raced with. Deriving from the
+  /// on-disk state inside the repository lock keeps a queued edit from
+  /// clobbering whatever the sync or another save just wrote, and a connection
+  /// deleted underneath the open editor is reported as [SyncConflict] instead
+  /// of being resurrected.
+  Future<void> saveHost(
+    Host host,
+    Credentials? credentials, {
+    required Host? originalHost,
+    required Credentials? originalCredentials,
+  }) {
+    final id = 'host:${host.id}';
+    final operation = _bookmarkWrite.then((_) async {
+      await _waitForIdle();
+      if (_disposed) throw StateError('工作区已关闭，未保存');
+      _saving = true;
       _notify();
-    }
+      try {
+        await repository.withLocalData(() async {
+          final latest = await repository.loadHosts();
+          final index = latest.indexWhere((h) => h.id == host.id);
+          final latestCredentials = index < 0
+              ? null
+              : await repository.credentials(host.id);
+          if (index < 0 && originalHost != null) {
+            // The host this editor shows was deleted meanwhile; writing it
+            // back would undo that deletion.
+            throw SyncConflict([host.name]);
+          }
+          final merged =
+              SyncSnapshot({
+                if (index >= 0)
+                  id: SyncSnapshot.hostRecord(latest[index], latestCredentials),
+              }).rebaseLocalChanges(
+                started: SyncSnapshot({
+                  if (originalHost != null)
+                    id: SyncSnapshot.hostRecord(
+                      originalHost,
+                      originalCredentials,
+                    ),
+                }),
+                current: SyncSnapshot({
+                  id: SyncSnapshot.hostRecord(host, credentials),
+                }),
+              );
+          final record = merged.records[id];
+          if (record == null) throw SyncConflict([host.name]);
+          final nextHost = Host.fromJson(
+            Map<String, dynamic>.from(record['data'] as Map),
+          );
+          final secret = record['secret'] as Map?;
+          final nextCredentials = secret == null
+              ? null
+              : Credentials.fromJson(Map<String, dynamic>.from(secret));
+          final next = [...latest];
+          if (index < 0) {
+            next.add(nextHost);
+          } else {
+            next[index] = nextHost;
+          }
+          final credentialsChanged = nextCredentials != latestCredentials;
+          if (credentialsChanged) {
+            await repository.saveCredentials(host.id, nextCredentials);
+          }
+          try {
+            await repository.saveHosts(next);
+          } catch (_) {
+            if (credentialsChanged) {
+              await repository.saveCredentials(host.id, latestCredentials);
+            }
+            rethrow;
+          }
+          if (_disposed) return;
+          _hosts = next;
+          _scheduleSync();
+        });
+      } finally {
+        _saving = false;
+        _notify();
+      }
+    });
+    _bookmarkWrite = operation.catchError((Object _) {});
+    return operation;
   }
 
   Future<void> deleteHost(Host host) async {

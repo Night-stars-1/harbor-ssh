@@ -44,6 +44,8 @@ class _PortForwardWorkspaceState extends State<PortForwardWorkspace> {
   final _operationErrors = <(String, String), String>{};
   final _disposed = Completer<void>();
   Set<String> _knownHostIds = {};
+  final _watchedSessions = <SshConnection>{};
+  Map<String, int> _ruleRevisions = const {};
   int _loadVersion = 0;
   bool _loading = true, _saving = false;
   String? _error;
@@ -59,6 +61,7 @@ class _PortForwardWorkspaceState extends State<PortForwardWorkspace> {
   void initState() {
     super.initState();
     _useRequestedSession();
+    _watchSessions();
     unawaited(_load());
   }
 
@@ -72,13 +75,38 @@ class _PortForwardWorkspaceState extends State<PortForwardWorkspace> {
   @override
   void didUpdateWidget(PortForwardWorkspace oldWidget) {
     super.didUpdateWidget(oldWidget);
+    _watchSessions();
     if (oldWidget.request != widget.request ||
         oldWidget.requestedSessionId != widget.requestedSessionId) {
       _useRequestedSession();
     }
-    if (!setEquals(_knownHostIds, _hosts.map((h) => h.id).toSet())) {
+    if (!setEquals(_knownHostIds, _hosts.map((h) => h.id).toSet()) ||
+        !mapEquals(_ruleRevisions, _currentRuleRevisions)) {
       unawaited(_load());
     }
+  }
+
+  Map<String, int> get _currentRuleRevisions => {
+    for (final session in widget.sessions)
+      session.id: session.savedPortForwardRevision,
+  };
+
+  void _watchSessions() {
+    final current = widget.sessions.toSet();
+    for (final session in _watchedSessions.difference(current)) {
+      session.removeListener(_savedRulesChanged);
+    }
+    for (final session in current.difference(_watchedSessions)) {
+      session.addListener(_savedRulesChanged);
+    }
+    _watchedSessions
+      ..clear()
+      ..addAll(current);
+  }
+
+  void _savedRulesChanged() {
+    if (!mounted || mapEquals(_ruleRevisions, _currentRuleRevisions)) return;
+    unawaited(_load());
   }
 
   void _useRequestedSession() {
@@ -93,6 +121,10 @@ class _PortForwardWorkspaceState extends State<PortForwardWorkspace> {
 
   @override
   void dispose() {
+    for (final session in _watchedSessions) {
+      session.removeListener(_savedRulesChanged);
+    }
+    _watchedSessions.clear();
     _disposed.complete();
     super.dispose();
   }
@@ -101,6 +133,7 @@ class _PortForwardWorkspaceState extends State<PortForwardWorkspace> {
     final version = ++_loadVersion;
     final hosts = _hosts;
     _knownHostIds = hosts.map((h) => h.id).toSet();
+    _ruleRevisions = _currentRuleRevisions;
     setState(() {
       _loading = true;
       if (clearError) _error = null;
@@ -234,23 +267,19 @@ class _PortForwardWorkspaceState extends State<PortForwardWorkspace> {
         if (!previousTarget.any((r) => r.id == current.rule.id)) {
           throw StateError('规则已被移除，请重新添加。');
         }
-        await target.save([
-          for (final r in previousTarget)
-            if (r.id == current.rule.id) rule else r,
-        ]);
+        await target.upsert(rule);
       } else {
-        final source = moving ? _store(current.host.id) : null;
-        final previousSource = source == null ? null : await source.load();
-        await target.save([...previousTarget, rule]);
-        if (source != null) {
+        final movingRule = current;
+        final source = movingRule == null ? null : _store(movingRule.host.id);
+        final movingRuleId = movingRule?.rule.id;
+        await target.upsert(rule);
+        if (source != null && movingRuleId != null) {
           try {
-            await source.save(
-              previousSource!.where((r) => r.id != current!.rule.id).toList(),
-            );
+            await source.remove(movingRuleId);
           } catch (_) {
             // Preserve both configurations if rollback also fails; never drop a rule.
             try {
-              await target.save(previousTarget);
+              await target.remove(rule.id);
             } catch (_) {
               throw StateError('主机切换未完成，两台主机均保留了规则，请检查后重试。');
             }
@@ -279,9 +308,7 @@ class _PortForwardWorkspaceState extends State<PortForwardWorkspace> {
       _error = null;
     });
     try {
-      final store = _store(entry.host.id);
-      final rules = await store.load();
-      await store.save(rules.where((r) => r.id != entry.rule.id).toList());
+      await _store(entry.host.id).remove(entry.rule.id);
       _operationErrors.remove((entry.host.id, entry.rule.id));
     } catch (error) {
       if (mounted) _error = '删除失败：${_message(error)}';

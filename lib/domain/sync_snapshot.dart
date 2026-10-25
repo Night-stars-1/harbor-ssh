@@ -235,25 +235,168 @@ class SyncSnapshot {
       if (path is String && path.isNotEmpty) path,
   ];
 
-  /// Re-applies the local bookmark edits made while an upload was in flight on
+  /// Authentication travels as one atomic group: the endpoint, the account and
+  /// the secret must never be mixed from two different edits, or a new address
+  /// could end up paired with the old account's password.
+  static const _hostAuthentication = [
+    'address',
+    'port',
+    'username',
+    'authMethod',
+    'userId',
+  ];
+  static const _keyAuthentication = ['username', 'authMethod', 'publicKey'];
+
+  static List<String> _authentication(String id) => id.startsWith('key:')
+      ? _keyAuthentication
+      : id.startsWith('host:')
+      ? _hostAuthentication
+      : const [];
+
+  static Map<String, dynamic> _authenticationGroup(
+    Map<dynamic, dynamic> data,
+    Object? secret,
+    List<String> fields,
+  ) => {for (final field in fields) field: data[field], 'secret': secret};
+
+  static String _recordName(Map<String, dynamic>? record) =>
+      ((record?['data'] as Map?)?['name'] as String?) ?? '';
+
+  /// One sync record for a locally stored connection and its secret, in the
+  /// shape the sync snapshot capture stores.
+  static Map<String, dynamic> hostRecord(Host host, Credentials? secret) => {
+    'data': host.toJson(),
+    'secret': secret?.toJson(),
+  };
+
+  /// Folds one local edit onto [incoming], the record the caller is about to
+  /// write over.
+  ///
+  /// [original] is the record the editor opened — null when the record is new
+  /// locally — and [edited] is what the user now wants, null for a deletion.
+  /// Only the difference between those two is applied, so a field that somebody
+  /// else changed meanwhile keeps the newer value; a field, authentication
+  /// group or bookmark this edit really touched still wins when the other side
+  /// left it alone.
+  ///
+  /// Bookmarks keep their per-path intent: additions are appended to the
+  /// incoming list and removals are dropped from it, so unrelated paths from
+  /// either side survive. Authentication fields together with the secret, and
+  /// any other field both sides changed differently, are reported as
+  /// [SyncConflict]. A record that is gone from [incoming] is never
+  /// resurrected by an old edit either.
+  static Map<String, dynamic>? _mergeRecord({
+    required String id,
+    required Map<String, dynamic>? original,
+    required Map<String, dynamic>? edited,
+    required Map<String, dynamic>? incoming,
+  }) {
+    if (same(original, edited)) return incoming;
+    final name = _recordName(edited ?? original ?? incoming);
+    if (edited == null) {
+      // A deletion wins over an untouched incoming record only; there is no
+      // content left to merge into an edit made elsewhere.
+      if (incoming == null || same(incoming, original)) return null;
+      throw SyncConflict([name]);
+    }
+    if (original == null) {
+      // A locally created record has no earlier version to merge with, so any
+      // other record under the same id is a different one.
+      if (incoming == null || same(incoming, edited)) return edited;
+      throw SyncConflict([name]);
+    }
+    // The record this edit belongs to is gone: folding the edit back would
+    // resurrect something another device or the sync just deleted.
+    if (incoming == null) throw SyncConflict([name]);
+
+    final before = original['data'] as Map;
+    final local = edited['data'] as Map;
+    final remote = incoming['data'] as Map;
+    final authentication = _authentication(id);
+    final baseAuth = _authenticationGroup(
+      before,
+      original['secret'],
+      authentication,
+    );
+    final localAuth = _authenticationGroup(
+      local,
+      edited['secret'],
+      authentication,
+    );
+    final remoteAuth = _authenticationGroup(
+      remote,
+      incoming['secret'],
+      authentication,
+    );
+    final localAuthChanged = !same(localAuth, baseAuth);
+    if (localAuthChanged &&
+        !same(remoteAuth, baseAuth) &&
+        !same(localAuth, remoteAuth)) {
+      throw SyncConflict([name]);
+    }
+
+    final data = <String, dynamic>{};
+    final fields = <String>{
+      ...before.keys.cast<String>(),
+      ...local.keys.cast<String>(),
+      ...remote.keys.cast<String>(),
+    };
+    for (final field in fields) {
+      if (field == 'sftpBookmarks' || authentication.contains(field)) continue;
+      final previousValue = before[field];
+      final localValue = local[field];
+      final remoteValue = remote[field];
+      final localChanged = !same(previousValue, localValue);
+      if (localChanged &&
+          !same(previousValue, remoteValue) &&
+          !same(localValue, remoteValue)) {
+        throw SyncConflict([name]);
+      }
+      final value = localChanged ? localValue : remoteValue;
+      if (value != null) data[field] = value;
+    }
+    for (final field in authentication) {
+      final value = localAuthChanged ? local[field] : remote[field];
+      if (value != null) data[field] = value;
+    }
+
+    final previousPaths = _bookmarks(before);
+    final localPaths = _bookmarks(local);
+    final remotePaths = _bookmarks(remote);
+    final removed = previousPaths
+        .where((path) => !localPaths.contains(path))
+        .toSet();
+    final added = localPaths.where((path) => !previousPaths.contains(path));
+    final paths = <String>[
+      for (final path in remotePaths)
+        if (!removed.contains(path)) path,
+      for (final path in added)
+        if (!remotePaths.contains(path)) path,
+    ];
+    if (paths.isNotEmpty) data['sftpBookmarks'] = paths;
+
+    return {
+      'data': data,
+      'secret': localAuthChanged ? edited['secret'] : incoming['secret'],
+    };
+  }
+
+  /// Re-applies the local changes made while a cloud upload was in flight on
   /// top of the already merged cloud snapshot [this].
   ///
   /// [started] is the local snapshot the sync captured before it left for the
-  /// network, [current] the local snapshot read again at commit time. Only
-  /// concurrent `sftpBookmarks` deltas are carried over: additions are appended
-  /// to the incoming merged list and removals are dropped from it, so
-  /// remote-added paths, remote host fields and remote credentials all survive.
+  /// network, [current] the local snapshot read again at commit time. Only the
+  /// intent visible between the two is carried over, record by record through
+  /// [_mergeRecord]: remote field values, credentials, additions and deletions
+  /// all survive, and a record the merge dropped is never resurrected locally.
   ///
-  /// Nothing else local may be silently overwritten. Any other concurrent local
-  /// change to a host record — another field or its secret, or the host being
-  /// added/removed locally — and a remote deletion of a host whose bookmarks
-  /// changed locally are reported as [SyncConflict] instead.
+  /// The merge is deliberately not re-run: that would need a baseline this
+  /// rebase does not have and could undo a conflict choice the user already
+  /// approved, such as clearing a password.
   ///
   /// When [started] and [current] are equal the incoming merge is returned
-  /// untouched: re-running the merge or its credential validation could undo a
-  /// conflict choice the user already approved, such as clearing a password.
-  /// No input map is mutated.
-  SyncSnapshot rebaseLocalBookmarks({
+  /// untouched. No input map is mutated.
+  SyncSnapshot rebaseLocalChanges({
     required SyncSnapshot started,
     required SyncSnapshot current,
   }) {
@@ -261,61 +404,23 @@ class SyncSnapshot {
     final result = <String, Map<String, dynamic>>{...records};
     final conflicts = <String>[];
     for (final id in {...started.records.keys, ...current.records.keys}) {
-      final before = started.records[id];
-      final after = current.records[id];
-      if (same(before, after)) continue;
-      final name = ((after ?? before)!['data'] as Map)['name'] as String;
-      if (!id.startsWith('host:') || before == null || after == null) {
-        conflicts.add(name);
-        continue;
-      }
-      final beforeData = before['data'] as Map;
-      final afterData = after['data'] as Map;
-      // Restore the original field presence of the one field this rebase is
-      // allowed to change, so everything else can be compared verbatim.
-      final normalized = <String, dynamic>{...afterData};
-      if (beforeData.containsKey('sftpBookmarks')) {
-        normalized['sftpBookmarks'] = beforeData['sftpBookmarks'];
-      } else {
-        normalized.remove('sftpBookmarks');
-      }
-      if (!same(normalized, beforeData) ||
-          !same(after['secret'], before['secret'])) {
-        conflicts.add(name);
-        continue;
-      }
-      final incoming = records[id];
-      if (incoming == null) {
-        // The merge dropped this host (remote deletion): applying it would
-        // throw away the bookmarks the user just edited.
-        conflicts.add(name);
-        continue;
-      }
-      final beforePaths = _bookmarks(beforeData);
-      final afterPaths = _bookmarks(afterData);
-      final removals = beforePaths
-          .where((path) => !afterPaths.contains(path))
-          .toSet();
-      final incomingData = incoming['data'] as Map;
-      final incomingPaths = _bookmarks(incomingData);
-      final paths = <String>[
-        for (final path in incomingPaths)
-          if (!removals.contains(path)) path,
-      ];
-      for (final path in afterPaths) {
-        if (!beforePaths.contains(path) && !paths.contains(path)) {
-          paths.add(path);
+      final edited = current.records[id];
+      if (same(started.records[id], edited)) continue;
+      try {
+        final merged = _mergeRecord(
+          id: id,
+          original: started.records[id],
+          edited: edited,
+          incoming: records[id],
+        );
+        if (merged == null) {
+          result.remove(id);
+        } else {
+          result[id] = merged;
         }
+      } on SyncConflict catch (error) {
+        conflicts.addAll(error.names);
       }
-      final data = <String, dynamic>{...incomingData};
-      if (paths.isEmpty) {
-        // An empty list is the same as no bookmarks: keep the optional JSON
-        // field absent, exactly like Host.toJson.
-        data.remove('sftpBookmarks');
-      } else {
-        data['sftpBookmarks'] = paths;
-      }
-      result[id] = {...incoming, 'data': data};
     }
     if (conflicts.isNotEmpty) throw SyncConflict(conflicts);
     return SyncSnapshot(result);

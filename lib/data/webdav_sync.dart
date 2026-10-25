@@ -549,25 +549,25 @@ class CloudSync extends ChangeNotifier {
       }
       final baselineKey = config.baselineKey;
       // The final local commit runs under the local lock: read the local state
-      // as it is now, fold any bookmark edit made during the upload back onto
-      // the merged result, and only then write. The baseline records the
-      // uploaded [encrypted] payload — never the rebased local changes — so the
-      // next sync uploads those edits from a clean three-way base. Rollback and
-      // journal recovery stay inside this critical section.
+      // as it is now, fold the changes made since this sync started back onto
+      // the merged result, and only then write. [local] — captured before any
+      // network work — is the only three-way base this fold uses, so a save
+      // never has to wait for the network and never gets overwritten by the
+      // sync it raced with. The baseline records the uploaded [encrypted]
+      // payload — never the rebased local changes — so the next sync uploads
+      // those edits from a clean base. Rollback and journal recovery stay
+      // inside this critical section.
       await repository.withLocalData(() async {
         final current = await storage.capture();
         final SyncSnapshot rebased;
         try {
-          rebased = merged.rebaseLocalBookmarks(
-            started: local,
-            current: current,
-          );
+          rebased = merged.rebaseLocalChanges(started: local, current: current);
         } on SyncConflict {
           // Publish the same review state as a merge conflict, so the user's
           // version choice can be applied by the next sync instead of being
-          // rejected as "冲突内容已发生变化". The remote review snapshot is the
-          // archive the server now holds — the uploaded one when this sync
-          // wrote, not the stale body it read before.
+          // rejected as "冲突内容已发生变化". The remote review snapshot is
+          // the archive the server now holds — the uploaded one when this
+          // sync wrote, not the stale body it read before.
           _reviewedRemote = encrypted;
           _reviewedLocal = current;
           rethrow;

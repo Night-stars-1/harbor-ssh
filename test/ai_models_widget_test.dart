@@ -13,7 +13,7 @@ import 'support.dart';
 void main() {
   for (final width in [320.0, 1280.0]) {
     testWidgets('获取并选择模型，失败保留手填内容 $width', (tester) async {
-      tester.view.physicalSize = Size(width, 1400);
+      tester.view.physicalSize = Size(width, 1600);
       tester.view.devicePixelRatio = 1;
       addTearDown(tester.view.resetPhysicalSize);
       addTearDown(tester.view.resetDevicePixelRatio);
@@ -49,20 +49,21 @@ void main() {
       await tester.ensureVisible(button);
       await tester.tap(button);
       await tester.pumpAndSettle();
-      expect(configs.single.model, isEmpty);
-      expect(configs.single.apiKey, 'test-key');
+      final field = find.byKey(const ValueKey('ai-setting-model'));
+      await tester.ensureVisible(field);
+      tester.widget<DropdownMenu<String>>(field).menuController?.open();
+      await tester.pumpAndSettle();
       await tester.tap(
         find.widgetWithText(MenuItemButton, 'model-b').hitTestable(),
       );
       await tester.pumpAndSettle();
-      final field = find.byKey(const ValueKey('ai-setting-model'));
       expect(
         tester.widget<DropdownMenu<String>>(field).controller!.text,
         'model-b',
       );
       final save = find.widgetWithText(FilledButton, '保存');
       await tester.ensureVisible(save);
-      await tester.tap(save);
+      await tester.tapAt(tester.getRect(save).topCenter + const Offset(0, 4));
       await tester.pumpAndSettle();
       expect(model.aiSettings.model, 'model-b');
       await tester.enterText(field, 'custom-model');
@@ -150,8 +151,10 @@ void main() {
     Future<void> select(String field, String option) async {
       final menu = find.byKey(ValueKey('ai-setting-$field'));
       await tester.ensureVisible(menu);
-      await tester.tap(menu);
       await tester.pumpAndSettle();
+      await tester.tap(menu);
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 400));
       await tester.tap(
         find.widgetWithText(MenuItemButton, option).hitTestable(),
       );

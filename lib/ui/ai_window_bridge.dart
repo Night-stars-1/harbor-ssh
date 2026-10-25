@@ -562,7 +562,16 @@ class _DetachedSession {
         case AiWindowOp.stop:
           task.stop(message: arguments['message'] as String?);
         case AiWindowOp.approve:
-          task.approve(arguments['allowed'] == true);
+          final expected = arguments['callId'];
+          // The click carries the call id the window rendered. A late or
+          // duplicated action from an earlier prompt must never decide the
+          // call that replaced it (neither grant nor cancel).
+          if (expected is! String || expected != task.pending?.id) return null;
+          task.approve(
+            arguments['allowed'] == true,
+            saveForward: arguments['saveForward'] == true,
+            expectedCallId: expected,
+          );
         case AiWindowOp.setModel:
           task.setModel(arguments['model'] as String?);
         case AiWindowOp.setReasoningEffort:
@@ -784,8 +793,10 @@ AiReasoningEffort _reasoningFrom(Object? value) {
   return AiReasoningEffort.automatic;
 }
 
-/// Values the detached window is allowed to know. The API key and the provider
-/// profiles (they embed keys) never leave the main engine.
+/// Values the detached window is allowed to know. The API key, the provider
+/// profiles (they embed keys), the prompt and the MCP servers never leave the
+/// main engine: MCP headers can carry bearer tokens, and the detached window
+/// needs neither to render or approve a tool call.
 Map<String, Object?> _publicSettings(
   AiSettings settings, {
   AiReasoningEffort? reasoningEffort,
@@ -1002,10 +1013,18 @@ class RemoteAiTaskController extends AiTaskController
   }
 
   @override
-  void approve(bool allowed) {
+  void approve(
+    bool allowed, {
+    bool saveForward = false,
+    String? expectedCallId,
+  }) {
     if (_disposed) return;
     unawaited(
-      _forward(AiWindowOp.approve, <String, Object?>{'allowed': allowed}),
+      _forward(AiWindowOp.approve, <String, Object?>{
+        'allowed': allowed,
+        'saveForward': saveForward,
+        'callId': expectedCallId,
+      }),
     );
   }
 

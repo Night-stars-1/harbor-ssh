@@ -97,13 +97,14 @@ class _PortForwardRulesState extends State<PortForwardRules> {
     }
   }
 
-  Future<void> _save(List<PortForwardRule> rules) async {
+  Future<void> _save(Future<void> Function() write) async {
     setState(() {
       _saving = true;
       _error = null;
     });
     try {
-      await widget.store.save(rules);
+      await write();
+      final rules = await widget.store.load();
       if (mounted) setState(() => _rules = rules);
     } catch (_) {
       if (mounted) setState(() => _error = '保存失败，规则尚未更改，请重试。');
@@ -118,14 +119,7 @@ class _PortForwardRulesState extends State<PortForwardRules> {
       builder: (_) => PortForwardEditor(rule: current),
     );
     if (result == null || !mounted) return;
-    await _save(
-      current == null
-          ? [..._rules, result]
-          : [
-              for (final rule in _rules)
-                if (rule.id == current.id) result else rule,
-            ],
-    );
+    await _save(() => widget.store.upsert(result));
   }
 
   Future<void> _start(PortForwardRule rule) async {
@@ -157,8 +151,7 @@ class _PortForwardRulesState extends State<PortForwardRules> {
       onRetry: _loadFailed ? _load : null,
       onAdd: _edit,
       onEdit: _edit,
-      onDelete: (rule) =>
-          _save(_rules.where((item) => item.id != rule.id).toList()),
+      onDelete: (rule) => _save(() => widget.store.remove(rule.id)),
       onStart: _start,
       onStop: (rule) => widget.session?.portForwards.stop(rule.id),
       onClose: widget.onClose,

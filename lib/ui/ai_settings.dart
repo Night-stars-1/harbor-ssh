@@ -1,8 +1,11 @@
 import 'package:flutter/material.dart';
 
+import '../data/mcp_client.dart';
 import '../data/terminal_ai.dart';
 import '../data/sync_config.dart';
 import 'ai_approval_mode_menu.dart';
+import 'ai_mcp_settings.dart';
+import 'ai_prompt_settings.dart';
 import 'expressive_widgets.dart';
 import 'settings_widgets.dart';
 import 'sync_settings_controller.dart';
@@ -13,9 +16,14 @@ class AiSettingsPage extends StatefulWidget {
     super.key,
     required this.controller,
     this.modelClientFactory,
+    this.mcpClientFactory,
   });
   final SyncSettingsController controller;
   final TerminalAiClient Function()? modelClientFactory;
+
+  /// Creates the transport used by the MCP connection test. Null uses the real
+  /// HTTP Streamable client; tests inject a fake here.
+  final McpClient Function(AiMcpServer server)? mcpClientFactory;
   @override
   State<AiSettingsPage> createState() => _AiSettingsPageState();
 }
@@ -33,6 +41,14 @@ class _AiSettingsPageState extends State<AiSettingsPage> {
   late final _approvalModel = TextEditingController(
     text: widget.controller.aiSettings.approvalModel,
   );
+  /// User supplement appended to the built-in prompt. Page-scoped, so changing
+  /// the provider (which swaps every credential draft) never touches it.
+  late final _prompt = TextEditingController(
+    text: widget.controller.aiSettings.systemPrompt,
+  );
+  late List<AiMcpServer> _mcpServers = [
+    ...widget.controller.aiSettings.mcpServers,
+  ];
   bool _visible = false, _saving = false;
   late String _provider = widget.controller.aiSettings.provider ?? 'custom';
   late AiProtocol _protocol =
@@ -54,10 +70,58 @@ class _AiSettingsPageState extends State<AiSettingsPage> {
   TerminalAiClient? _modelsClient;
   final _modelsMenu = MenuController();
   final _approvalModelsMenu = MenuController();
+  final _providerMenu = MenuController();
+  final _modelProviderMenu = MenuController();
+  final _approvalProviderMenu = MenuController();
+  final _protocolMenu = MenuController();
+  int _labelRevision = 0;
 
+  void _closeMenus() {
+    for (final menu in [
+      _providerMenu,
+      _modelProviderMenu,
+      _approvalProviderMenu,
+      _protocolMenu,
+      _modelsMenu,
+      _approvalModelsMenu,
+    ]) {
+      if (menu.isOpen) menu.close();
+    }
+  }
+
+  void _collapseModelMenu() => _collapseAfterEdit(_modelsMenu);
+
+  void _collapseApprovalMenu() => _collapseAfterEdit(_approvalModelsMenu);
+
+  void _collapseAfterEdit(MenuController menu) {
+    Future<void>.microtask(() {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted && menu.isOpen) menu.close();
+      });
+    });
+  }
+
+
+
+  void _closeMenusLater() {
+    _closeMenus();
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      _closeMenus();
+    });
+  }
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      _model.addListener(_collapseModelMenu);
+      _approvalModel.addListener(_collapseApprovalMenu);
+    });
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      ScaffoldMessenger.maybeOf(context)?.clearSnackBars();
+    });
     for (final profile in widget.controller.aiSettings.profiles) {
       _providerNames[profile.id] = profile.name;
       _drafts[profile.id] = AiSettings(
@@ -95,6 +159,8 @@ class _AiSettingsPageState extends State<AiSettingsPage> {
     protocol: draft.protocol,
     provider: draft.provider,
     reasoningEffort: draft.reasoningEffort,
+    systemPrompt: _prompt.text,
+    mcpServers: List.unmodifiable(_mcpServers),
   );
 
   AiSettings _editingCredentials() => AiSettings(
@@ -111,6 +177,8 @@ class _AiSettingsPageState extends State<AiSettingsPage> {
     reasoningEffort:
         _drafts[_provider]?.reasoningEffort ??
         widget.controller.aiSettings.reasoningEffort,
+    systemPrompt: _prompt.text,
+    mcpServers: List.unmodifiable(_mcpServers),
   );
 
   AiSettings _credentialsOf(String providerId) {
@@ -125,6 +193,8 @@ class _AiSettingsPageState extends State<AiSettingsPage> {
       protocol: preset?.protocol ?? AiProtocol.openai,
       provider: providerId,
       reasoningEffort: widget.controller.aiSettings.reasoningEffort,
+      systemPrompt: _prompt.text,
+      mcpServers: List.unmodifiable(_mcpServers),
     );
   }
 
@@ -199,6 +269,7 @@ class _AiSettingsPageState extends State<AiSettingsPage> {
 
   void _selectProvider(String provider) {
     if (provider == _provider) return;
+    _closeMenus();
     _storeEditing();
     final previousProvider = _provider;
     final preset = aiProviderPresets
@@ -214,6 +285,8 @@ class _AiSettingsPageState extends State<AiSettingsPage> {
                 baseUrl: preset.baseUrl,
                 protocol: preset.protocol,
                 provider: provider,
+                systemPrompt: _prompt.text,
+                mcpServers: List.unmodifiable(_mcpServers),
               ));
     final followModel = _modelProvider == previousProvider;
     final followApproval = _approvalProvider == previousProvider;
@@ -268,8 +341,11 @@ class _AiSettingsPageState extends State<AiSettingsPage> {
     _modelsClient?.cancel();
     _url.dispose();
     _key.dispose();
+    _model.removeListener(_collapseModelMenu);
+    _approvalModel.removeListener(_collapseApprovalMenu);
     _model.dispose();
     _approvalModel.dispose();
+    _prompt.dispose();
     super.dispose();
   }
 
@@ -337,7 +413,10 @@ class _AiSettingsPageState extends State<AiSettingsPage> {
       initial: current,
     );
     if (!mounted || name == null || name.isEmpty || name == current) return;
-    setState(() => _providerNames[_provider] = name);
+    setState(() {
+      _providerNames[_provider] = name;
+      _labelRevision++;
+    });
   }
 
   bool _isCustomProvider(String id) =>
@@ -425,6 +504,9 @@ class _AiSettingsPageState extends State<AiSettingsPage> {
   Future<void> _save() async {
     setState(() => _saving = true);
     try {
+      for (final server in _mcpServers) {
+        server.validate();
+      }
       _storeEditing();
       final selected = _credentialsOf(_modelProvider);
       await widget.controller.saveAiSettings(
@@ -439,12 +521,16 @@ class _AiSettingsPageState extends State<AiSettingsPage> {
           provider: _modelProvider,
           profiles: _profilesForSave(),
           reasoningEffort: selected.reasoningEffort,
+          systemPrompt: _prompt.text.trim(),
+          mcpServers: List.unmodifiable(_mcpServers),
         ),
       );
       if (mounted) showSettingsNotice(context, 'AI 设置已保存');
     } catch (error) {
       if (mounted) {
         showSettingsNotice(context, switch (error) {
+          McpFailure() => error.message,
+          FormatException() => error.message,
           AiFailure() => error.message,
           SyncFailure() => error.message,
           _ => '无法保存 AI 设置，请重试',
@@ -498,6 +584,7 @@ class _AiSettingsPageState extends State<AiSettingsPage> {
     required String fetchKey,
     required String fetchProviderId,
     bool clearable = false,
+    required MenuController providerMenu,
   }) {
     final models = <String, String>{
       if (clearable) '__unset__': '未设置',
@@ -508,14 +595,13 @@ class _AiSettingsPageState extends State<AiSettingsPage> {
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
         KeyedSubtree(
-          key: ValueKey(
-            '$providerField-label-${providerOptions[providerValue] ?? providerValue}',
-          ),
+          key: ValueKey('$providerField-label-$_labelRevision'),
           child: _dropdown(
             providerField,
             providerValue,
             providerOptions,
             onProvider,
+            menuController: providerMenu,
           ),
         ),
         const SizedBox(height: 8),
@@ -585,24 +671,25 @@ class _AiSettingsPageState extends State<AiSettingsPage> {
         _fetchingProvider == fetchProviderId;
     return LayoutBuilder(
       builder: (context, constraints) => DropdownMenu<T>(
-        key: ValueKey('ai-setting-$name'),
         width: constraints.maxWidth,
+        key: ValueKey('ai-setting-$name'),
         initialSelection: value,
         controller: controller,
-        menuController: controller == null
-            ? null
-            : (menuController ?? _modelsMenu),
+        menuController: menuController,
         hintText: fetchKey != null || controller == null ? null : '输入或选择模型',
         enabled: !_saving,
         selectOnly: controller == null,
-        requestFocusOnTap: true,
+        requestFocusOnTap: controller != null,
         enableSearch: false,
-        enableFilter: controller != null,
+        enableFilter: fetchKey != null,
         filterCallback: controller == null
             ? null
             : (entries, query) {
+                final fetchedQuery = _modelsQueryAtFetch;
                 if (options.containsKey(query) ||
-                    query == _modelsQueryAtFetch ||
+                    (fetchedQuery != null &&
+                        (query == fetchedQuery ||
+                            query.trim() == fetchedQuery.trim())) ||
                     query.trim().isEmpty) {
                   return entries;
                 }
@@ -673,7 +760,7 @@ class _AiSettingsPageState extends State<AiSettingsPage> {
             DropdownMenuEntry(
               value: entry.key,
               label: entry.value,
-              trailingIcon: entry.key == (controller?.text ?? value)
+              trailingIcon: controller == null && entry.key == value
                   ? const Icon(Icons.check_rounded, size: 20)
                   : null,
               style: MenuItemButton.styleFrom(
@@ -685,10 +772,10 @@ class _AiSettingsPageState extends State<AiSettingsPage> {
                 shape: HarborShapes.superellipse(
                   const BorderRadius.all(HarborShapes.sm),
                 ),
-                backgroundColor: entry.key == (controller?.text ?? value)
+                backgroundColor: controller == null && entry.key == value
                     ? colors.secondaryContainer
                     : null,
-                foregroundColor: entry.key == (controller?.text ?? value)
+                foregroundColor: controller == null && entry.key == value
                     ? colors.onSecondaryContainer
                     : colors.onSurface,
                 textStyle: theme.textTheme.bodyLarge,
@@ -696,7 +783,9 @@ class _AiSettingsPageState extends State<AiSettingsPage> {
             ),
         ]),
         onSelected: (next) {
-          if (next != null) onChanged(next);
+          if (next == null) return;
+          onChanged(next);
+          _closeMenusLater();
         },
       ),
     );
@@ -729,14 +818,13 @@ class _AiSettingsPageState extends State<AiSettingsPage> {
                 children: [
                   Expanded(
                     child: KeyedSubtree(
-                      key: ValueKey(
-                        'provider-label-${_providerNames[_provider] ?? _provider}',
-                      ),
+                      key: ValueKey('provider-label-$_labelRevision'),
                       child: _dropdown(
                         'provider',
                         providerSelection,
                         providerOptions,
                         _selectProvider,
+                        menuController: _providerMenu,
                       ),
                     ),
                   ),
@@ -765,6 +853,7 @@ class _AiSettingsPageState extends State<AiSettingsPage> {
                   _invalidateModels();
                   setState(() => _protocol = value);
                 },
+                menuController: _protocolMenu,
               ),
             ),
             SettingsRow(
@@ -793,6 +882,7 @@ class _AiSettingsPageState extends State<AiSettingsPage> {
                 onProvider: _selectModelProvider,
                 modelController: _model,
                 modelMenu: _modelsMenu,
+                providerMenu: _modelProviderMenu,
                 onModel: (value) => setState(() => _model.text = value),
                 fetchKey: 'ai-fetch-models',
                 fetchProviderId: _modelProvider,
@@ -809,6 +899,7 @@ class _AiSettingsPageState extends State<AiSettingsPage> {
                 onProvider: _selectApprovalProvider,
                 modelController: _approvalModel,
                 modelMenu: _approvalModelsMenu,
+                providerMenu: _approvalProviderMenu,
                 onModel: _setApprovalModel,
                 fetchKey: 'ai-fetch-approval-models',
                 fetchProviderId: _approvalProvider,
@@ -855,6 +946,15 @@ class _AiSettingsPageState extends State<AiSettingsPage> {
               ),
             ),
           ],
+        ),
+        const SizedBox(height: 24),
+        AiPromptSettings(controller: _prompt, enabled: !_saving),
+        const SizedBox(height: 24),
+        AiMcpSettingsEditor(
+          servers: _mcpServers,
+          enabled: !_saving,
+          onChanged: (servers) => setState(() => _mcpServers = [...servers]),
+          clientFactory: widget.mcpClientFactory,
         ),
         const SizedBox(height: 20),
         Align(

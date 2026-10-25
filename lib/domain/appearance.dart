@@ -28,10 +28,36 @@ class AppearancePreferences {
     this.titleBarSessions = false,
     this.windowAcrylic = false,
     this.frostedSurfaces = false,
+    this.aiPanelWidth,
+    this.sidebarWidth = defaultSidebarWidth,
+    this.terminalSplitRatio = defaultTerminalSplitRatio,
   });
   final AppThemeMode mode;
   final AppThemeColor color;
   final int terminalFontSize;
+
+  /// Width the AI side panel was last dragged (or nudged) to, or null while
+  /// the panel keeps its automatic share of the terminal pane. Stored only on
+  /// this device.
+  final double? aiPanelWidth;
+
+  /// Width of the desktop navigation sidebar. Renderers clamp the value they
+  /// draw against the window, but keep this preference intact so shrinking a
+  /// window and widening it again restores the width the user chose.
+  final double sidebarWidth;
+
+  /// Share of a fresh terminal split given to its first pane, 0.1 - 0.9.
+  /// Changing it never recreates an existing split.
+  final double terminalSplitRatio;
+
+  /// Defaults for [sidebarWidth] and [terminalSplitRatio]; also the values a
+  /// double-click reset returns to.
+  static const double defaultSidebarWidth = 264;
+  static const double defaultTerminalSplitRatio = .5;
+  static const double minSidebarWidth = 220;
+  static const double maxSidebarWidth = 400;
+  static const double minAiPanelWidth = 320;
+  static const double maxAiPanelWidth = 720;
 
   /// When false, the terminal keeps each logical line intact and scrolls
   /// horizontally. Stored only on this device.
@@ -72,6 +98,10 @@ class AppearancePreferences {
     bool? titleBarSessions,
     bool? windowAcrylic,
     bool? frostedSurfaces,
+    double? aiPanelWidth,
+    bool clearAiPanelWidth = false,
+    double? sidebarWidth,
+    double? terminalSplitRatio,
   }) => AppearancePreferences(
     mode: mode ?? this.mode,
     color: color ?? this.color,
@@ -82,6 +112,12 @@ class AppearancePreferences {
     titleBarSessions: titleBarSessions ?? this.titleBarSessions,
     windowAcrylic: windowAcrylic ?? this.windowAcrylic,
     frostedSurfaces: frostedSurfaces ?? this.frostedSurfaces,
+    aiPanelWidth: clearAiPanelWidth
+        ? null
+        : _aiPanelWidth(aiPanelWidth) ?? this.aiPanelWidth,
+    sidebarWidth: _sidebarWidth(sidebarWidth) ?? this.sidebarWidth,
+    terminalSplitRatio:
+        _terminalSplitRatio(terminalSplitRatio) ?? this.terminalSplitRatio,
   );
 
   Map<String, Object> toJson() => {
@@ -94,6 +130,13 @@ class AppearancePreferences {
     'titleBarSessions': titleBarSessions,
     'windowAcrylic': windowAcrylic,
     'frostedSurfaces': frostedSurfaces,
+    // Layout widths are written only once the user settles them, so the
+    // default-valued entries are omitted and older builds read these files
+    // unchanged.
+    'aiPanelWidth': ?aiPanelWidth,
+    if (sidebarWidth != defaultSidebarWidth) 'sidebarWidth': sidebarWidth,
+    if (terminalSplitRatio != defaultTerminalSplitRatio)
+      'terminalSplitRatio': terminalSplitRatio,
   };
 
   factory AppearancePreferences.fromJson(
@@ -114,10 +157,35 @@ class AppearancePreferences {
     titleBarSessions: json['titleBarSessions'] == true,
     windowAcrylic: json['windowAcrylic'] == true,
     frostedSurfaces: json['frostedSurfaces'] == true,
+    aiPanelWidth: _aiPanelWidth(json['aiPanelWidth']),
+    sidebarWidth: _sidebarWidth(json['sidebarWidth']) ?? defaultSidebarWidth,
+    terminalSplitRatio:
+        _terminalSplitRatio(json['terminalSplitRatio']) ??
+        defaultTerminalSplitRatio,
   );
   static int _fontSize(Object? value) {
     final size = value is num ? value.round() : int.tryParse('$value');
     return size == null ? 14 : size.clamp(10, 24).toInt();
+  }
+
+  static double? _aiPanelWidth(Object? value) {
+    final width = _dimension(value);
+    return width?.clamp(minAiPanelWidth, maxAiPanelWidth).toDouble();
+  }
+
+  static double? _sidebarWidth(Object? value) {
+    final width = _dimension(value);
+    return width?.clamp(minSidebarWidth, maxSidebarWidth).toDouble();
+  }
+
+  static double? _terminalSplitRatio(Object? value) {
+    final ratio = _dimension(value);
+    return ratio?.clamp(.1, .9).toDouble();
+  }
+
+  static double? _dimension(Object? value) {
+    final number = value is num ? value.toDouble() : double.tryParse('$value');
+    return number == null || !number.isFinite ? null : number;
   }
 
   static int _statusRefreshSeconds(Object? value) {

@@ -47,6 +47,9 @@ class TerminalPane extends StatefulWidget {
     this.aiHistoryStore,
     this.aiWindow,
     this.aiRetention,
+    this.aiPanelWidth,
+    this.aiPanelWidthRevision = 0,
+    this.onAiPanelWidthChanged,
   });
   final SshConnection session;
   final VoidCallback onReconnect;
@@ -76,6 +79,13 @@ class TerminalPane extends StatefulWidget {
   /// When set, the assistant controller and whether its panel is open survive
   /// this pane being unmounted, so switching back to the session restores them.
   final TerminalAiRetention? aiRetention;
+
+  /// Saved width of the embedded assistant panel, and the revision of the
+  /// appearance prefs it came from. A pane adopts a restored value only once,
+  /// and never while the user is dragging its handle.
+  final double? aiPanelWidth;
+  final int aiPanelWidthRevision;
+  final ValueChanged<double?>? onAiPanelWidthChanged;
   @override
   State<TerminalPane> createState() => _TerminalPaneState();
 }
@@ -821,6 +831,9 @@ class _TerminalPaneState extends State<TerminalPane> {
 
   @override
   Widget build(BuildContext context) => TerminalAiLayout(
+    preferredPanelWidth: widget.aiPanelWidth,
+    preferenceRevision: widget.aiPanelWidthRevision,
+    onPanelWidthChanged: widget.onAiPanelWidthChanged,
     terminal: _buildTerminal(context),
     panel: _aiOpen && !_aiDetached && _ai != null
         ? TerminalAiPanel(

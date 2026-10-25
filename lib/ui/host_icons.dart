@@ -22,16 +22,8 @@ const hostIconOptions = <({String id, String label, IconData icon})>[
   (id: 'bolt', label: '高性能', icon: Icons.bolt_rounded),
 ];
 
-/// `Host.icon` 对应的图标；空值或本版本不认识的 id 显示 [fallback]。
-/// 会话传入终端图标，未设置图标时不会和侧栏的「所有连接」混淆。
-IconData hostIcon(String id, {IconData? fallback}) =>
-    hostIconOptions
-        .where((option) => option.id == id && id.isNotEmpty)
-        .firstOrNull
-        ?.icon ??
-    fallback ??
+/// `Host.icon` 对应的图标；空值（选择器里的「服务器」）或本版本不认识的 id
+/// 都显示服务器图标，连接卡片、编辑器和会话保持一致。
+IconData hostIcon(String id) =>
+    hostIconOptions.where((option) => option.id == id).firstOrNull?.icon ??
     hostIconOptions.first.icon;
-
-/// 会话的图标：未设置时沿用终端图标。
-IconData sessionIcon(String id) =>
-    hostIcon(id, fallback: Icons.terminal_rounded);

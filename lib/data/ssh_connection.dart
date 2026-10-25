@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:io' show InternetAddress, InternetAddressType;
 import 'dart:typed_data';
 
 import 'package:dartssh2/dartssh2.dart';
@@ -9,6 +10,7 @@ import 'package:xterm/xterm.dart';
 import '../domain/host.dart';
 import '../domain/command_history.dart';
 import '../domain/path_completion.dart';
+import '../domain/port_forward.dart';
 import 'host_repository.dart';
 import 'ssh_algorithms.dart';
 import 'public_key_install.dart';
@@ -22,6 +24,10 @@ import 'ssh_port_forward.dart';
 import '../domain/remote_file.dart';
 
 enum ConnectionStatus { connecting, connected, closed, failed }
+
+/// How a literal endpoint address may be reached from this device. Only used
+/// to word model guidance; it is never treated as proof of availability.
+enum _AiReachability { public, private, unknown }
 
 class SshConnection extends ChangeNotifier {
   SshConnection({required this.id, required Host host}) {
@@ -40,13 +46,18 @@ class SshConnection extends ChangeNotifier {
           portForwards.reportConnectionError(rule.id, error),
     );
   });
-  AiCommandExecutor createAiExecutor() => SshAiExecutor((command) async {
-    final client = _client;
-    if (client == null || status != ConnectionStatus.connected || _closed) {
-      throw const AiFailure('SSH 已断开，请重新连接');
-    }
-    return client.execute(command);
-  });
+  AiCommandExecutor createAiExecutor() => SshAiExecutor(
+    (command) async {
+      final client = _client;
+      if (client == null || status != ConnectionStatus.connected || _closed) {
+        throw const AiFailure('SSH 已断开，请重新连接');
+      }
+      return client.execute(command);
+    },
+    systemContext: _aiSystemContext(),
+    startForward: _aiCreatePortForward,
+    stopForward: (ruleId) => portForwards.stop(ruleId),
+  );
   RemoteFileSystem get files => SftpFiles(_openSftp);
   late Host _host;
   Host get host => _host;
@@ -66,11 +77,33 @@ class SshConnection extends ChangeNotifier {
   Future<void>? _historyLoad;
   Future<List<String>>? _availableCommands;
   DateTime? _commandsLoadedAt;
+  HostRepository? _repository;
+  String _endpointAddress = '';
+  int? _endpointPort;
+  String _networkLabel = '';
+  int _savedPortForwardRevision = 0;
+  static int _aiForwardSequence = 0;
   bool _closed = false;
   bool _disposed = false;
   int _generation = 0;
   int _openOutputStreams = 0;
   final List<StreamSubscription<String>> _subscriptions = [];
+
+  /// Address and port actually dialled for [host], after the active network
+  /// identity's overrides. Null before the target hop is resolved.
+  (String, int)? get connectedEndpoint =>
+      _endpointPort == null ? null : (_endpointAddress, _endpointPort!);
+
+  /// Preferences-backed rule store for this host's current connection.
+  PortForwardStore? get portForwardStore {
+    final repository = _repository;
+    return repository == null
+        ? null
+        : PortForwardStore(repository.preferences, host.id);
+  }
+
+  /// Incremented after a rule is durably saved, so workspaces can refresh.
+  int get savedPortForwardRevision => _savedPortForwardRevision;
   String get statusLabel => switch (status) {
     ConnectionStatus.connecting => '正在连接',
     ConnectionStatus.connected => '已连接',
@@ -144,6 +177,8 @@ class SshConnection extends ChangeNotifier {
       // reconnects included, without touching sessions already open.
       final network = await repository.loadNetworkIdentities();
       if (!_current(generation)) return;
+      _repository = repository;
+      _networkLabel = network.active?.name ?? '';
       final credentialsByHost = <String, Credentials>{host.id: credentials};
       for (final hop in route.take(route.length - 1)) {
         final stored = await repository.loginCredentials(hop);
@@ -167,6 +202,10 @@ class SshConnection extends ChangeNotifier {
               )
             : null;
         final (address, port) = network.endpointOf(hop);
+        if (isTarget) {
+          _endpointAddress = address;
+          _endpointPort = port;
+        }
         final socket = previous == null
             ? await SSHSocket.connect(
                 address,
@@ -604,6 +643,205 @@ class SshConnection extends ChangeNotifier {
     }
   }
 
+  /// Persists [rule] for this host and bumps [savedPortForwardRevision] only
+  /// after the write succeeds. Throws with the real storage reason otherwise.
+  Future<void> savePortForwardRule(PortForwardRule rule) async {
+    final store = portForwardStore;
+    if (store == null) {
+      throw StateError('尚未读取主机配置，无法保存端口转发规则');
+    }
+    rule.validate();
+    await store.upsert(rule);
+    _savedPortForwardRevision++;
+    _notify();
+  }
+
+  Future<AiForwardResult> _aiCreatePortForward(
+    AiForwardRequest request, {
+    required bool save,
+  }) async {
+    if (_client == null ||
+        _closed ||
+        status != ConnectionStatus.connected) {
+      throw const AiFailure('SSH 已断开，请重新连接');
+    }
+    request.validate();
+    final rule = PortForwardRule(
+      id:
+          'ai-${DateTime.now().microsecondsSinceEpoch.toRadixString(36)}-'
+          '${_aiForwardSequence++}',
+      name: request.name.trim(),
+      type: PortForwardType.local,
+      bindHost: '127.0.0.1',
+      bindPort: request.localPort,
+      targetHost: request.targetHost.trim(),
+      targetPort: request.targetPort,
+    );
+    await portForwards.start(rule);
+    final state = portForwards.state(rule.id);
+    final actualPort = state.port;
+    if (state.status != PortForwardStatus.running ||
+        actualPort == null ||
+        actualPort < 1 ||
+        actualPort > 65535) {
+      await portForwards.stop(rule.id);
+      throw AiFailure(
+        state.error == null
+            ? '端口转发启动失败'
+            : '端口转发启动失败：${_forwardMessage(state.error!)}',
+      );
+    }
+    final uri = rule.browserUri(actualPort: actualPort);
+    if (uri == null) {
+      await portForwards.stop(rule.id);
+      throw const AiFailure('无法生成本机回环浏览器地址');
+    }
+    var saved = false;
+    if (save) {
+      try {
+        await savePortForwardRule(rule);
+        saved = true;
+      } catch (error) {
+        // The rule is not durable, so do not leave an untracked listener.
+        await portForwards.stop(rule.id);
+        final state = portForwards.state(rule.id);
+        throw AiFailure(
+          '转发已建立但保存规则失败：${_forwardMessage(error)}；'
+          '${state.active ? '撤销转发失败：${_forwardMessage(state.error ?? '未知原因')}' : '转发已停止'}',
+        );
+      }
+    }
+    return AiForwardResult(
+      ruleId: rule.id,
+      name: rule.name,
+      localPort: actualPort,
+      targetHost: rule.targetHost,
+      targetPort: rule.targetPort,
+      url: uri.toString(),
+      saved: saved,
+    );
+  }
+
+  /// Host metadata for the model. Every host-provided value is JSON-quoted so
+  /// a crafted hostname can never read as an instruction, and reachability is
+  /// only ever described from the address literal, never asserted.
+  String _aiSystemContext() {
+    final endpoint = connectedEndpoint;
+    final reachability = _addressReachability(endpoint?.$1);
+    final buffer = StringBuffer()
+      ..writeln('主机名称：${jsonEncode(host.name)}');
+    if (endpoint == null) {
+      buffer.writeln('实际 SSH 地址：未知（连接尚未完成）');
+    } else {
+      buffer
+        ..writeln('实际 SSH 地址：${jsonEncode(endpoint.$1)}')
+        ..writeln('实际 SSH 端口：${endpoint.$2}');
+    }
+    if (_networkLabel.isNotEmpty) {
+      buffer.writeln('当前网络身份：${jsonEncode(_networkLabel)}');
+    }
+    final urlHost = _safeUrlHost(endpoint?.$1);
+    buffer.writeln(
+      '地址类型：${switch (reachability) {
+        _AiReachability.public => '按字面属于公网地址',
+        _AiReachability.private => '私有、回环、链路本地、CGNAT 地址或本地名称',
+        _AiReachability.unknown => '无法从地址字面判断',
+      }}。该判断不代表主机已开机、服务已监听或防火墙已放行。',
+    );
+    switch (reachability) {
+      case _AiReachability.private:
+        buffer.write(
+          '浏览器通常无法直接打开该地址，不要声称 http://$urlHost:<服务端口> 可直接访问。'
+          '需要访问服务器上的 HTTP 服务时，'
+          '调用 $aiPortForwardToolName 把目标端口映射到本机 127.0.0.1，'
+          '并只使用工具结果中实际分配的端口和 URL。',
+        );
+      case _AiReachability.public:
+        buffer.write(
+          '如需浏览器访问服务器上的服务，可按 http://$urlHost:<服务端口> 组织地址'
+          '（例如服务监听 8080 时使用 http://$urlHost:8080，IPv6 地址已加方括号），'
+          '但必须说明是否真正可达取决于监听和防火墙，未验证前不要断言可用。'
+          '实际不可达时，经用户确认后可调用 $aiPortForwardToolName。',
+        );
+      case _AiReachability.unknown:
+        buffer.write(
+          '不要臆测该地址能否从本机直接访问，也不要断言 http://$urlHost:<服务端口> 可用。'
+          '需要浏览器访问时先验证；无法直接访问时，经用户确认后调用 $aiPortForwardToolName，'
+          '并使用工具结果中实际分配的端口和 URL。',
+        );
+    }
+    buffer.write('\n每次 $aiPortForwardToolName 调用都必须等待用户确认；是否保存规则只由用户决定。');
+    return buffer.toString();
+  }
+
+  static String _safeUrlHost(String? address) {
+    final value = address?.trim() ?? '';
+    // Only a conservative host literal is echoed into prose. Anything else is
+    // replaced so host data can never read as an instruction or inject text.
+    if (!RegExp(r'^[A-Za-z0-9._:-]+$').hasMatch(value)) return '<该地址>';
+    return value.contains(':') ? '[$value]' : value;
+  }
+
+  static String _forwardMessage(Object error) {
+    final text = error is FormatException
+        ? error.message
+        : error.toString().replaceFirst(
+            RegExp(r'^(Bad state: |Exception: |FormatException: )'),
+            '',
+          );
+    return text.length <= 300 ? text : '${text.substring(0, 300)}…';
+  }
+
+  static _AiReachability _addressReachability(String? address) {
+    final value = address?.trim().toLowerCase() ?? '';
+    if (value.isEmpty) return _AiReachability.unknown;
+    final literal = value.startsWith('[') && value.endsWith(']')
+        ? value.substring(1, value.length - 1)
+        : value;
+    final ip = InternetAddress.tryParse(literal);
+    if (ip == null) {
+      if (value == 'localhost' ||
+          const ['.local', '.lan', '.internal', '.home', '.localhost'].any(
+            (suffix) => value.endsWith(suffix),
+          )) {
+        return _AiReachability.private;
+      }
+      return _AiReachability.unknown;
+    }
+    if (ip.isLoopback || ip.isLinkLocal) return _AiReachability.private;
+    if (ip.type == InternetAddressType.IPv6) {
+      final bytes = ip.rawAddress;
+      if (bytes.length == 16 &&
+          bytes[10] == 0xff &&
+          bytes[11] == 0xff &&
+          bytes.take(10).every((byte) => byte == 0)) {
+        return _ipv4Reachability(bytes.sublist(12));
+      }
+      if (bytes.isNotEmpty && (bytes[0] & 0xfe) == 0xfc) {
+        return _AiReachability.private;
+      }
+      return ip.isMulticast || bytes.every((byte) => byte == 0)
+          ? _AiReachability.unknown
+          : _AiReachability.public;
+    }
+    final bytes = ip.rawAddress;
+    return _ipv4Reachability(bytes);
+  }
+
+  static _AiReachability _ipv4Reachability(List<int> bytes) {
+    if (bytes.length != 4) return _AiReachability.unknown;
+    if (bytes[0] == 10 ||
+        bytes[0] == 127 ||
+        (bytes[0] == 172 && bytes[1] >= 16 && bytes[1] <= 31) ||
+        (bytes[0] == 192 && bytes[1] == 168) ||
+        (bytes[0] == 100 && bytes[1] >= 64 && bytes[1] <= 127) ||
+        (bytes[0] == 169 && bytes[1] == 254)) {
+      return _AiReachability.private;
+    }
+    if (bytes[0] == 0 || bytes[0] >= 224) return _AiReachability.unknown;
+    return _AiReachability.public;
+  }
+
   void _remoteClosed() {
     if (_closed || status != ConnectionStatus.connected) return;
     close();
@@ -627,6 +865,8 @@ class SshConnection extends ChangeNotifier {
   void _release() {
     _generation++;
     _closed = true;
+    _endpointAddress = '';
+    _endpointPort = null;
     unawaited(portForwards.close());
     final sftp = _sftp;
     _sftp = null;

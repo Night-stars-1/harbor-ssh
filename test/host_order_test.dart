@@ -64,7 +64,12 @@ void main() {
       address: 'zeta.example.com',
       username: 'root',
     );
-    await reloaded.saveHost(zeta, null);
+    await reloaded.saveHost(
+      zeta,
+      null,
+      originalHost: null,
+      originalCredentials: null,
+    );
     expect(_ids(reloaded), ['charlie', 'bravo', 'alpha', 'zeta']);
   });
 

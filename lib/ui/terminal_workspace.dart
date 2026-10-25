@@ -36,6 +36,11 @@ class TerminalWorkspace extends StatefulWidget {
     this.fontSize = 14,
     this.terminalWrap = true,
     this.statusRefreshSeconds = 5,
+    this.aiPanelWidth,
+    this.aiPanelWidthRevision = 0,
+    this.onAiPanelWidthChanged,
+    this.splitRatio = .5,
+    this.onSplitRatioChanged,
   });
 
   final List<SshConnection> sessions;
@@ -56,6 +61,17 @@ class TerminalWorkspace extends StatefulWidget {
   final bool terminalWrap;
   final int statusRefreshSeconds;
 
+  /// Saved assistant-panel width shared by every pane: a newly mounted pane
+  /// starts from it, and a pane only re-reads it when [aiPanelWidthRevision]
+  /// changes, so resizing one pane leaves its neighbours alone.
+  final double? aiPanelWidth;
+  final int aiPanelWidthRevision;
+  final ValueChanged<double?>? onAiPanelWidthChanged;
+
+  /// Share of a new split given to its first pane: the remembered default.
+  final double splitRatio;
+  final ValueChanged<double>? onSplitRatioChanged;
+
   @override
   State<TerminalWorkspace> createState() => _TerminalWorkspaceState();
 }
@@ -64,6 +80,9 @@ class _TerminalWorkspaceState extends State<TerminalWorkspace> {
   final _slots = <String?>[null];
   final _keys = <String, GlobalKey>{};
   final _paneKeys = <int, GlobalKey>{};
+  bool _dragging = false;
+  bool _dragMoved = false;
+  DateTime? _lastTap;
   final _controllers = <String, TerminalPaneController>{};
   final _aiWatched = <SshConnection>{};
   late final _aiRetention = TerminalAiRetention(
@@ -89,11 +108,15 @@ class _TerminalWorkspaceState extends State<TerminalWorkspace> {
           Axis.horizontal,
           _root!,
           _TerminalLeaf(side),
+          ratio: _defaultRatio,
         );
       }
     }
     return _root!;
   }
+
+  /// Remembered share for a fresh split; existing splits keep their own.
+  double get _defaultRatio => widget.splitRatio.clamp(.1, .9).toDouble();
 
   Map<String, SshConnection> get _sessions => {
     for (final session in widget.sessions) session.id: session,
@@ -319,13 +342,18 @@ class _TerminalWorkspaceState extends State<TerminalWorkspace> {
         _slots.add(
           _sessions.keys.where((id) => !_slots.contains(id)).firstOrNull,
         );
+        final used = _layout.splits.map((split) => split.id).toSet();
+        final id = Iterable<int>.generate(
+          used.length + 1,
+        ).firstWhere((value) => !used.contains(value));
         _root = _layout.replace(
           side,
           _TerminalSplit(
-            _nextSplit++,
+            id,
             action == 'horizontal' ? Axis.horizontal : Axis.vertical,
             _TerminalLeaf(side),
             _TerminalLeaf(next),
+            ratio: _defaultRatio,
           ),
         );
         _focused = next;
@@ -390,7 +418,7 @@ class _TerminalWorkspaceState extends State<TerminalWorkspace> {
           value: session,
           child: Row(
             children: [
-              Icon(sessionIcon(session.host.icon), size: 18),
+              Icon(hostIcon(session.host.icon), size: 18),
               const SizedBox(width: 10),
               Flexible(
                 child: Text(
@@ -507,6 +535,9 @@ class _TerminalWorkspaceState extends State<TerminalWorkspace> {
                   aiHistoryStore: widget.aiHistoryStore,
                   aiWindow: widget.aiWindow,
                   aiRetention: _aiRetention,
+                  aiPanelWidth: widget.aiPanelWidth,
+                  aiPanelWidthRevision: widget.aiPanelWidthRevision,
+                  onAiPanelWidthChanged: widget.onAiPanelWidthChanged,
                   controller: !widget.desktop && _focused == side
                       ? widget.mobileController
                       : _controllers.putIfAbsent(
@@ -571,25 +602,69 @@ class _TerminalWorkspaceState extends State<TerminalWorkspace> {
         1 - secondMin / available,
       );
     });
+    // Disk writes happen when a gesture lands, never per pixel.
+    void settle() =>
+        widget.onSplitRatioChanged?.call(split.ratio.clamp(.1, .9).toDouble());
+    void nudge(double delta) {
+      final next = (split.ratio + delta).clamp(.1, .9).toDouble();
+      if (next != split.ratio) setState(() => split.ratio = next);
+      settle();
+    }
+
+    void reset() {
+      setState(() => split.ratio = .5);
+      settle();
+    }
+
     return Positioned.fromRect(
       key: ValueKey('terminal-divider-${split.id}'),
       rect: horizontal
           ? Rect.fromLTWH(rect.left + extent, rect.top, 12, rect.height)
           : Rect.fromLTWH(rect.left, rect.top + extent, rect.width, 12),
-      child: MouseRegion(
-        cursor: horizontal
-            ? SystemMouseCursors.resizeLeftRight
-            : SystemMouseCursors.resizeUpDown,
-        child: GestureDetector(
+      child: Semantics(
+        label: horizontal ? '调整左右分屏比例' : '调整上下分屏比例',
+        value: '${(split.ratio * 100).round()}%',
+        increasedValue: '${((split.ratio + .05).clamp(.1, .9) * 100).round()}%',
+        decreasedValue: '${((split.ratio - .05).clamp(.1, .9) * 100).round()}%',
+        onIncrease: () => nudge(.05),
+        onDecrease: () => nudge(-.05),
+        child: Listener(
           key: ValueKey('terminal-split-handle-${split.id}'),
           behavior: HitTestBehavior.opaque,
-          onHorizontalDragUpdate: horizontal
-              ? (event) => drag(event.delta.dx)
-              : null,
-          onVerticalDragUpdate: horizontal
-              ? null
-              : (event) => drag(event.delta.dy),
-          onDoubleTap: () => setState(() => split.ratio = .5),
+          onPointerDown: (_) {
+            if (_lastTap != null &&
+                DateTime.now().difference(_lastTap!) <=
+                    const Duration(milliseconds: 300)) {
+              _lastTap = null;
+              reset();
+              return;
+            }
+            _dragging = true;
+            _dragMoved = false;
+          },
+          onPointerMove: (event) {
+            if (!_dragging) return;
+            final delta = horizontal ? event.delta.dx : event.delta.dy;
+            if (delta != 0) _dragMoved = true;
+            drag(delta);
+          },
+          onPointerUp: (_) {
+            if (!_dragging) return;
+            _dragging = false;
+            if (_dragMoved) {
+              _lastTap = null;
+              settle();
+            } else {
+              _lastTap = DateTime.now();
+            }
+          },
+          onPointerCancel: (_) {
+            if (!_dragging) return;
+            _dragging = false;
+            _dragMoved = false;
+            _lastTap = null;
+            settle();
+          },
           child: Center(
             child: Container(
               width: horizontal ? 3 : 32,
@@ -720,6 +795,7 @@ class _TerminalWorkspaceState extends State<TerminalWorkspace> {
 
 sealed class _TerminalLayout {
   Iterable<int> get panes;
+  Iterable<_TerminalSplit> get splits;
   Size get minimum;
   _TerminalLayout replace(int side, _TerminalLayout replacement);
   _TerminalLayout? without(int side);
@@ -731,6 +807,8 @@ class _TerminalLeaf extends _TerminalLayout {
   @override
   Iterable<int> get panes => [side];
   @override
+  Iterable<_TerminalSplit> get splits => const [];
+  @override
   Size get minimum => const Size(240, 160);
   @override
   _TerminalLayout replace(int side, _TerminalLayout replacement) =>
@@ -740,15 +818,28 @@ class _TerminalLeaf extends _TerminalLayout {
 }
 
 class _TerminalSplit extends _TerminalLayout {
-  _TerminalSplit(this.id, this.axis, this.first, this.second);
+  _TerminalSplit(
+    this.id,
+    this.axis,
+    this.first,
+    this.second, {
+    double ratio = .5,
+  }) : ratio = ratio.clamp(.1, .9).toDouble();
   final int id;
   final Axis axis;
   _TerminalLayout first, second;
-  double ratio = .5;
+  double ratio;
   @override
   Iterable<int> get panes sync* {
     yield* first.panes;
     yield* second.panes;
+  }
+
+  @override
+  Iterable<_TerminalSplit> get splits sync* {
+    yield this;
+    yield* first.splits;
+    yield* second.splits;
   }
 
   @override

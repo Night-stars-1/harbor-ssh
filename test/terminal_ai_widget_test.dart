@@ -140,6 +140,9 @@ void main() {
     Future<void> select(String field, String option) async {
       final menu = find.byKey(ValueKey('ai-setting-$field'));
       await tester.ensureVisible(menu);
+      // Filling the model field focuses it and scrolls. That scroll ignores
+      // pointer events until it settles, so wait before tapping the next menu.
+      await tester.pumpAndSettle();
       await tester.tap(menu);
       await tester.pumpAndSettle();
       await tester.tap(

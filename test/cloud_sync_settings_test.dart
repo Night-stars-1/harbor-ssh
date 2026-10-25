@@ -22,7 +22,12 @@ void main() {
       automatic: true,
     );
     await model.configureSync(settings);
-    await model.saveHost(testHost, null);
+    await model.saveHost(
+      testHost,
+      null,
+      originalHost: null,
+      originalCredentials: null,
+    );
     await tester.pump(const Duration(seconds: 1));
     expect(model.syncCalls, 0);
     await tester.pump(const Duration(seconds: 1));

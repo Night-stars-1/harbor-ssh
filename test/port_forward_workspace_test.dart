@@ -46,6 +46,9 @@ class _Session extends SshConnection {
     notifyListeners();
   }
 
+  PortForwardStore? ruleStore;
+  @override
+  PortForwardStore? get portForwardStore => ruleStore;
   final handle = _Handle();
   late final _manager = PortForwardManager((_) async => handle);
   @override
@@ -184,6 +187,29 @@ void main() {
     );
     await tester.pumpAndSettle();
   }
+
+  testWidgets('AI 保存的新规则立即加入已打开的端口转发页', (tester) async {
+    final preferences = MemoryStore();
+    final session = _Session(id: 'ai-session', host: testHost)
+      ..ruleStore = PortForwardStore(preferences, testHost.id);
+    addTearDown(session.dispose);
+    await page(tester, preferences: preferences, sessions: [session]);
+    expect(find.text('数据库隧道'), findsNothing);
+
+    // The session publishes a revision only after its real rule store writes.
+    // The page is not rebuilt or navigated away and back to notice it.
+    await session.savePortForwardRule(_rule);
+    await tester.pumpAndSettle();
+    expect(find.text('数据库隧道'), findsOneWidget);
+    await tester.tap(find.byTooltip('启动'));
+    await tester.pumpAndSettle();
+    expect(find.text('运行中'), findsOneWidget);
+    await tester.tap(find.byTooltip('停止'));
+    await tester.pumpAndSettle();
+    expect(session.handle.closed, isTrue);
+    expect((await session.ruleStore!.load()).single.id, _rule.id);
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
 
   Future<void> choose(WidgetTester tester, String key, String label) async {
     final field = find.byKey(ValueKey(key));

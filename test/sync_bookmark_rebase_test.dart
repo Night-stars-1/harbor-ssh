@@ -71,7 +71,7 @@ void main() {
     );
     expect((incoming.records['host:host-1']!['data'] as Map)['name'], '云端改名');
 
-    final rebased = incoming.rebaseLocalBookmarks(
+    final rebased = incoming.rebaseLocalChanges(
       started: started,
       current: _snapshot(_host(bookmarks: ['/srv/b'])),
     );
@@ -87,7 +87,7 @@ void main() {
     final started = _snapshot(_host());
     final incoming = _snapshot(_host(bookmarks: ['/srv/a', '/srv/remote']));
 
-    final partial = incoming.rebaseLocalBookmarks(
+    final partial = incoming.rebaseLocalChanges(
       started: started,
       current: _snapshot(_host(bookmarks: const [])),
     );
@@ -96,7 +96,7 @@ void main() {
     ]);
 
     final unchanged = _snapshot(_host());
-    final emptied = unchanged.rebaseLocalBookmarks(
+    final emptied = unchanged.rebaseLocalChanges(
       started: started,
       current: _snapshot(_host(bookmarks: const [])),
     );
@@ -113,7 +113,7 @@ void main() {
     final currentBefore = current.encode();
     final incomingBefore = incoming.encode();
 
-    final rebased = incoming.rebaseLocalBookmarks(
+    final rebased = incoming.rebaseLocalChanges(
       started: started,
       current: current,
     );
@@ -133,10 +133,7 @@ void main() {
     );
     expect(accepted.records['host:host-1']!['secret'], isNull);
 
-    final rebased = accepted.rebaseLocalBookmarks(
-      started: local,
-      current: local,
-    );
+    final rebased = accepted.rebaseLocalChanges(started: local, current: local);
     expect(rebased.records, accepted.records);
     expect(rebased.records['host:host-1']!['secret'], isNull);
 
@@ -158,7 +155,7 @@ void main() {
       throwsA(isA<SyncCredentialMissing>()),
     );
     expect(
-      incomplete.rebaseLocalBookmarks(started: local, current: local).records,
+      incomplete.rebaseLocalChanges(started: local, current: local).records,
       incomplete.records,
     );
   });
@@ -183,7 +180,7 @@ void main() {
     );
     expect(merged.records, isEmpty);
     expect(
-      () => merged.rebaseLocalBookmarks(
+      () => merged.rebaseLocalChanges(
         started: started,
         current: _snapshot(_host(bookmarks: ['/srv/a', '/srv/b'])),
       ),
@@ -193,87 +190,231 @@ void main() {
     );
   });
 
-  test('其他并发字段、凭证与记录增删不会被静默覆盖', () {
+  test('并发字段互不相干时各自保留，同字段不同值才冲突', () {
     final started = _snapshot(_host());
     final incoming = _snapshot(_host(name: '云端改名'));
 
+    // 收藏与云端改名互不影响：两边都保留。
+    final merged = incoming.rebaseLocalChanges(
+      started: started,
+      current: _snapshot(_host(favorite: true)),
+    );
+    final data = merged.records['host:host-1']!['data'] as Map;
+    expect(data['name'], '云端改名');
+    expect(data['favorite'], isTrue);
+
+    // 同一字段两边都改了：必须由用户选择，不能静默覆盖。
     expect(
-      () => incoming.rebaseLocalBookmarks(
+      () => incoming.rebaseLocalChanges(
         started: started,
         current: _snapshot(_host(name: '本地改名')),
       ),
       throwsA(isA<SyncConflict>()),
     );
+
+    // 本地完全未变时云端改动原样保留。
     expect(
-      () => incoming.rebaseLocalBookmarks(
-        started: started,
-        current: _snapshot(_host(), secret: const Credentials(password: '新')),
-      ),
-      throwsA(isA<SyncConflict>()),
+      incoming.rebaseLocalChanges(started: started, current: started).records,
+      incoming.records,
     );
-    expect(
-      () => incoming.rebaseLocalBookmarks(
-        started: started,
-        current: _snapshot(_host(favorite: true)),
-      ),
-      throwsA(isA<SyncConflict>()),
+  });
+
+  test('本地改密码与云端改其它字段同时发生时各自保留', () {
+    final started = _snapshot(_host());
+    final incoming = SyncSnapshot.merge(
+      local: started,
+      remote: _snapshot(_host(name: '云端改名')),
+      base: _snapshot(_host()),
     );
+    final merged = incoming.rebaseLocalChanges(
+      started: started,
+      current: _snapshot(_host(), secret: const Credentials(password: '新密码')),
+    );
+    final record = merged.records['host:host-1']!;
+    expect((record['data'] as Map)['name'], '云端改名');
+    expect(record['secret'], const Credentials(password: '新密码').toJson());
+  });
+
+  test('认证字段与密码作为整体：两边都改但不同就报冲突', () {
+    final started = _snapshot(_host());
+    // 云端换了地址和密码。
+    final moved = Host.fromJson({..._host().toJson(), 'address': 'other'});
+    final incoming = _snapshot(
+      moved,
+      secret: const Credentials(password: '云端密码'),
+    );
+    // 本地改了用户名和密码：绝不允许把旧账号套到新地址上。
+    final renamed = Host.fromJson({..._host().toJson(), 'username': 'ops'});
     expect(
-      () => incoming.rebaseLocalBookmarks(
+      () => incoming.rebaseLocalChanges(
         started: started,
-        current: SyncSnapshot.empty(),
+        current: _snapshot(
+          renamed,
+          secret: const Credentials(password: '本地密码'),
+        ),
       ),
-      throwsA(isA<SyncConflict>()),
+      throwsA(
+        isA<SyncConflict>().having((error) => error.names, 'names', ['开发服务器']),
+      ),
     );
 
+    // 云端没碰认证组时，本地的整组认证改动整体生效。
+    final merged = _snapshot(_host(name: '云端改名')).rebaseLocalChanges(
+      started: started,
+      current: _snapshot(_host(), secret: const Credentials(password: '本地密码')),
+    );
+    final record = merged.records['host:host-1']!;
+    expect((record['data'] as Map)['name'], '云端改名');
+    expect((record['data'] as Map)['address'], 'dev.example.com');
+    expect(record['secret'], const Credentials(password: '本地密码').toJson());
+  });
+
+  test('本地新增与删除按记录存在语义生效', () {
+    final started = _snapshot(_host());
     const addedHost = Host(
       id: 'host-2',
-      name: '新主机',
-      address: 'new.example.com',
+      name: '云端新增',
+      address: 'cloud.example.com',
       username: 'root',
     );
-    final added = SyncSnapshot({
+    final incoming = SyncSnapshot({
       ...started.records,
       'host:host-2': <String, dynamic>{
         'data': addedHost.toJson(),
         'secret': null,
       },
     });
+    const localHost = Host(
+      id: 'host-3',
+      name: '本地新增',
+      address: 'local.example.com',
+      username: 'root',
+    );
+    final added = SyncSnapshot({
+      ...started.records,
+      'host:host-3': <String, dynamic>{
+        'data': localHost.toJson(),
+        'secret': null,
+      },
+    });
+
+    // 上传期间本地新增的连接写回，云端新增的连接保留。
+    final merged = incoming.rebaseLocalChanges(
+      started: started,
+      current: added,
+    );
+    expect(merged.records.keys.toSet(), {
+      'host:host-1',
+      'host:host-2',
+      'host:host-3',
+    });
+
+    // 本地删除一条云端没动过的记录直接生效。
     expect(
-      () => incoming.rebaseLocalBookmarks(started: started, current: added),
-      throwsA(isA<SyncConflict>()),
+      started
+          .rebaseLocalChanges(started: started, current: SyncSnapshot.empty())
+          .records,
+      isEmpty,
     );
 
+    // 云端改过的记录不能被本地并发删除静默丢弃。
+    expect(
+      () => _snapshot(_host(name: '云端改名'))
+          .rebaseLocalChanges(started: started, current: SyncSnapshot.empty()),
+      throwsA(
+        isA<SyncConflict>().having((error) => error.names, 'names', ['开发服务器']),
+      ),
+    );
+  });
+
+  test('凭证记录的名称等非认证字段同样按字段合并', () {
     final keyData = const SshUser(
       id: 'user-1',
       name: '运维',
       username: 'deploy',
     ).toJson();
     final withKey = SyncSnapshot({
-      ...started.records,
       'key:user-1': <String, dynamic>{
         'data': keyData,
         'secret': _password.toJson(),
       },
     });
     final changedKey = SyncSnapshot({
-      ...started.records,
       'key:user-1': <String, dynamic>{
         'data': {...keyData, 'name': '改名'},
         'secret': _password.toJson(),
       },
     });
+    final merged = withKey.rebaseLocalChanges(
+      started: withKey,
+      current: changedKey,
+    );
+    expect((merged.records['key:user-1']!['data'] as Map)['name'], '改名');
+
+    // 认证字段两边都改但不同：冲突。
+    final movedKey = SyncSnapshot({
+      'key:user-1': <String, dynamic>{
+        'data': {...keyData, 'username': 'ops'},
+        'secret': _password.toJson(),
+      },
+    });
+    final renamedKey = SyncSnapshot({
+      'key:user-1': <String, dynamic>{
+        'data': {...keyData, 'name': '改名', 'username': 'root'},
+        'secret': _password.toJson(),
+      },
+    });
     expect(
-      () =>
-          incoming.rebaseLocalBookmarks(started: withKey, current: changedKey),
+      () => movedKey.rebaseLocalChanges(started: withKey, current: renamedKey),
       throwsA(isA<SyncConflict>()),
     );
+  });
 
-    // 本地完全未变时云端改动原样保留。
-    expect(
-      incoming.rebaseLocalBookmarks(started: started, current: started).records,
-      incoming.records,
+  test('其他记录的并发改动不会重新触发已批准的密码清空冲突', () {
+    const otherHost = Host(
+      id: 'host-2',
+      name: '其他主机',
+      address: 'other.example.com',
+      username: 'root',
     );
+    final started = SyncSnapshot({
+      ..._snapshot(_host()).records,
+      'host:host-2': <String, dynamic>{
+        'data': otherHost.toJson(),
+        'secret': null,
+      },
+    });
+    // 用户在冲突面板里选择保留云端已经清空密码的版本。
+    final accepted = SyncSnapshot.merge(
+      local: started,
+      remote: SyncSnapshot({
+        'host:host-1': <String, dynamic>{
+          'data': _host().toJson(),
+          'secret': null,
+        },
+        'host:host-2': <String, dynamic>{
+          'data': otherHost.toJson(),
+          'secret': null,
+        },
+      }),
+      base: started,
+      choice: SyncConflictChoice.remote,
+    );
+    expect(accepted.records['host:host-1']!['secret'], isNull);
+
+    // 上传期间只编辑了另一条记录：已批准的清空不能被重新判定为冲突。
+    final merged = accepted.rebaseLocalChanges(
+      started: started,
+      current: SyncSnapshot({
+        ...started.records,
+        'host:host-2': <String, dynamic>{
+          'data': otherHost.withFavorite(true).toJson(),
+          'secret': null,
+        },
+      }),
+    );
+    expect(merged.records['host:host-1']!['secret'], isNull);
+    expect((merged.records['host:host-2']!['data'] as Map)['favorite'], isTrue);
   });
 
   test('本地提交持锁期间排队的逐条书签编辑会等待并保留', () async {

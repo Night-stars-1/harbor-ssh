@@ -230,6 +230,8 @@ void main() {
           tags: ['开发'],
         ),
         null,
+        originalHost: bare,
+        originalCredentials: null,
       );
       await tester.pumpAndSettle();
       expect(find.text(bare.name), findsNothing);
@@ -343,22 +345,13 @@ void main() {
     expect(tester.getSize(sidebar).width, 220);
     await tester.tap(toggle);
     await tester.pumpAndSettle();
-    await tester.tap(
-      find.descendant(of: sidebar, matching: find.byIcon(Icons.star_rounded)),
-    );
+    await tester.tap(find.byKey(const ValueKey('sidebar-favorites')));
     await tester.pumpAndSettle();
     expect(model.favoritesOnly, isTrue);
-    await tester.tap(
-      find.descendant(
-        of: sidebar,
-        matching: find.byIcon(Icons.vpn_key_rounded),
-      ),
-    );
+    await tester.tap(find.byKey(const ValueKey('sidebar-users')));
     await tester.pumpAndSettle();
     expect(model.showingUsers, isTrue);
-    await tester.tap(
-      find.descendant(of: sidebar, matching: find.byIcon(Icons.dns_rounded)),
-    );
+    await tester.tap(find.byKey(const ValueKey('sidebar-all-hosts')));
     await tester.pumpAndSettle();
     expect(model.showingUsers, isFalse);
     expect(model.favoritesOnly, isFalse);
@@ -726,7 +719,12 @@ void main() {
       tags: ['开发'],
       icon: 'router',
     );
-    await model.saveHost(renamedFirst, null);
+    await model.saveHost(
+      renamedFirst,
+      null,
+      originalHost: null,
+      originalCredentials: null,
+    );
     await tester.pumpAndSettle();
     expect(first.host, same(testHost));
     expect(first.host.icon, '');
@@ -761,7 +759,7 @@ void main() {
     expect(
       find.descendant(
         of: tab('first'),
-        matching: find.byIcon(Icons.terminal_rounded),
+        matching: find.byIcon(Icons.dns_rounded),
       ),
       findsNothing,
     );
@@ -771,22 +769,25 @@ void main() {
     );
     expect(tester.state(find.byType(TerminalView)), same(terminalState));
 
-    // 清空图标恢复默认终端图标，再换图标也立即生效。
+    // 清空图标（选择器里的「服务器」）显示服务器图标，再换图标也立即生效。
+    const clearedFirst = Host(
+      id: 'host-1',
+      name: '改名后的主机',
+      address: 'dev.example.com',
+      username: 'deploy',
+      tags: ['开发'],
+    );
     await model.saveHost(
-      const Host(
-        id: 'host-1',
-        name: '改名后的主机',
-        address: 'dev.example.com',
-        username: 'deploy',
-        tags: ['开发'],
-      ),
+      clearedFirst,
       null,
+      originalHost: renamedFirst,
+      originalCredentials: null,
     );
     await tester.pumpAndSettle();
     expect(
       find.descendant(
         of: tab('first'),
-        matching: find.byIcon(Icons.terminal_rounded),
+        matching: find.byIcon(Icons.dns_rounded),
       ),
       findsOneWidget,
     );
@@ -807,6 +808,8 @@ void main() {
         icon: 'web',
       ),
       null,
+      originalHost: clearedFirst,
+      originalCredentials: null,
     );
     await tester.pumpAndSettle();
     expect(

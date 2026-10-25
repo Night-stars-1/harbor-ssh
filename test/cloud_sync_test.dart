@@ -1424,9 +1424,7 @@ void main() {
     const newOffice = NetworkIdentity(
       id: 'identity-office',
       name: '公司内网（新）',
-      overrides: {
-        'host-1': EndpointOverride(address: '10.0.0.6', port: 2224),
-      },
+      overrides: {'host-1': EndpointOverride(address: '10.0.0.6', port: 2224)},
     );
     await a.saveNetworkIdentities(
       const NetworkIdentities(
@@ -1490,17 +1488,14 @@ void main() {
     await syncB.synchronize();
     final bFinal = await b.loadNetworkIdentities();
     expect(puts, putsBeforeDelete + 1);
-    expect(bFinal.identities.map((identity) => identity.id), [
-      'identity-home',
-    ]);
+    expect(bFinal.identities.map((identity) => identity.id), ['identity-home']);
     expect(bFinal.activeId, isEmpty);
     expect(bFinal.endpointOf(testHost), (testHost.address, testHost.port));
     expect((await b.loadHosts()).single.name, testHost.name);
     expect((await a.loadHosts()).single.name, testHost.name);
     expect(
-      SyncSnapshot.decode(
-        await decryptSync(remote!, password),
-      ).records.containsKey('identity:identity-office'),
+      SyncSnapshot.decode(await decryptSync(remote!, password)).records
+          .containsKey('identity:identity-office'),
       isFalse,
     );
   }, timeout: const Timeout(Duration(minutes: 3)));
@@ -1648,11 +1643,277 @@ void main() {
       'identity-office',
     ]);
     expect(model.networkIdentities.activeId, 'identity-home');
+    expect(model.networkIdentities.endpointOf(testHost), (
+      '192.168.10.88',
+      2222,
+    ));
+  }, timeout: const Timeout(Duration(minutes: 3)));
+
+  test('首次同步的网络阶段保存图标立即成功，不报虚假冲突且下次同步上传', () async {
+    const password = 'shared-encryption-password';
+    final server = await _GatedWebDavServer.start();
+    addTearDown(server.close);
+    final repository = memoryRepository();
+    await repository.saveHosts([testHost]);
+    final settings = WebDavSettings(
+      url: 'http://127.0.0.1:${server.port}/dav/',
+      username: 'test',
+      password: 'app-password',
+      encryptionPassword: password,
+    );
+    final model = WorkspaceModel(repository);
+    addTearDown(model.dispose);
+    await model.initialize();
+    await model.cloudSync.saveSettings(settings);
+
+    // 首次同步：本机没有基线，云端也还没有文件。
+    server.blockGet();
+    final syncing = model.syncNow();
+    await server.getReached.future;
+    final edited = Host.fromJson({...testHost.toJson(), 'icon': 'database'});
+    await model.saveHost(
+      edited,
+      null,
+      originalHost: testHost,
+      originalCredentials: null,
+    );
+    expect(model.hosts.single.icon, 'database');
+    expect((await repository.loadHosts()).single.icon, 'database');
+
+    // 收尾只折回本次真正的本地改动，不因为缺少基线凭空报冲突。
+    server.releaseGet();
+    await syncing;
+    expect(model.cloudSync.failed, isFalse);
+    expect(model.hosts.single.icon, 'database');
+    expect((await repository.loadHosts()).single.icon, 'database');
+
+    // 这次上传的是同步开始时看到的版本，随后的同步补上新图标。
+    await model.syncNow();
+    final remote = SyncSnapshot.decode(
+      await decryptSync(server.content!, password),
+    );
     expect(
-      model.networkIdentities.endpointOf(testHost),
-      ('192.168.10.88', 2222),
+      (remote.records['host:${testHost.id}']!['data'] as Map)['icon'],
+      'database',
     );
   }, timeout: const Timeout(Duration(minutes: 3)));
+
+  test('本地改名尚未上传时网络阶段再保存图标，两个改动都保留并随后上传', () async {
+    const password = 'shared-encryption-password';
+    final server = await _GatedWebDavServer.start();
+    addTearDown(server.close);
+    final repository = memoryRepository();
+    await repository.saveHosts([testHost]);
+    final settings = WebDavSettings(
+      url: 'http://127.0.0.1:${server.port}/dav/',
+      username: 'test',
+      password: 'app-password',
+      encryptionPassword: password,
+    );
+    final model = WorkspaceModel(repository);
+    addTearDown(model.dispose);
+    await model.initialize();
+    await model.cloudSync.saveSettings(settings);
+    // 先让云端和基线停在旧名字。
+    await model.syncNow();
+    expect(server.puts, 1);
+
+    // 本地改名还没有上传。
+    final renamed = Host.fromJson({...testHost.toJson(), 'name': '改名的服务器'});
+    await model.saveHost(
+      renamed,
+      null,
+      originalHost: testHost,
+      originalCredentials: null,
+    );
+
+    // 同步上传期间又保存了图标：不能因为基线落后于本地而误报冲突。
+    server.blockGet();
+    final syncing = model.syncNow();
+    await server.getReached.future;
+    final edited = Host.fromJson({...renamed.toJson(), 'icon': 'database'});
+    await model.saveHost(
+      edited,
+      null,
+      originalHost: renamed,
+      originalCredentials: null,
+    );
+    expect((await repository.loadHosts()).single.icon, 'database');
+
+    server.releaseGet();
+    await syncing;
+    expect(model.cloudSync.failed, isFalse);
+    final saved = (await repository.loadHosts()).single;
+    expect(saved.name, '改名的服务器');
+    expect(saved.icon, 'database');
+
+    await model.syncNow();
+    final remote = SyncSnapshot.decode(
+      await decryptSync(server.content!, password),
+    );
+    final data = remote.records['host:${testHost.id}']!['data'] as Map;
+    expect(data['name'], '改名的服务器');
+    expect(data['icon'], 'database');
+  }, timeout: const Timeout(Duration(minutes: 3)));
+
+  test('同步提交持锁写入云端改名、书签与凭据时，排队的旧编辑只叠加自己的图标', () async {
+    const password = 'shared-encryption-password';
+    final server = await _GatedWebDavServer.start();
+    addTearDown(server.close);
+    const localCredentials = Credentials(password: 'ssh-password');
+    final preferences = _GatedPreferences();
+    final repository = HostRepository(
+      preferences: preferences,
+      secrets: MemoryStore(),
+    );
+    await repository.saveHosts([testHost]);
+    await repository.saveCredentials(testHost.id, localCredentials);
+    final settings = WebDavSettings(
+      url: 'http://127.0.0.1:${server.port}/dav/',
+      username: 'test',
+      password: 'app-password',
+      encryptionPassword: password,
+    );
+    final model = WorkspaceModel(repository);
+    addTearDown(model.dispose);
+    await model.initialize();
+    await model.cloudSync.saveSettings(settings);
+    await model.syncNow();
+    expect(server.puts, 1);
+
+    // 云端换了名字、加了书签并换了密码。
+    final cloudHost = Host.fromJson({
+      ...testHost.toJson(),
+      'name': '云端改名',
+      'sftpBookmarks': ['/srv/cloud'],
+    });
+    server.content = await encryptSync(
+      SyncSnapshot({
+        'host:${testHost.id}': <String, dynamic>{
+          'data': cloudHost.toJson(),
+          'secret': const Credentials(password: 'cloud-password').toJson(),
+        },
+      }).encode(),
+      password,
+    );
+    server.revision++;
+
+    // 同步收尾持锁落盘期间，同步开始前就打开的编辑窗口提交保存。
+    final gate = Completer<void>();
+    preferences.hostsGate = gate;
+    final syncing = model.syncNow();
+    await preferences.entered.future;
+    var saved = false;
+    final edited = Host.fromJson({...testHost.toJson(), 'icon': 'database'});
+    final queued = model
+        .saveHost(
+          edited,
+          localCredentials,
+          originalHost: testHost,
+          originalCredentials: localCredentials,
+        )
+        .then((_) => saved = true);
+    await Future<void>.delayed(Duration.zero);
+    expect(saved, isFalse);
+    gate.complete();
+    await syncing;
+    await queued;
+    expect(saved, isTrue);
+
+    final host = (await repository.loadHosts()).single;
+    expect(host.name, '云端改名');
+    expect(host.sftpBookmarks, ['/srv/cloud']);
+    expect(host.icon, 'database');
+    expect(host.address, testHost.address);
+    expect(
+      (await repository.credentials(testHost.id))!.password,
+      'cloud-password',
+    );
+    expect(model.hosts.single.icon, 'database');
+  }, timeout: const Timeout(Duration(minutes: 3)));
+
+  test('云端删除主机后旧编辑不能复活记录', () async {
+    const password = 'shared-encryption-password';
+    final server = await _GatedWebDavServer.start();
+    addTearDown(server.close);
+    final repository = memoryRepository();
+    await repository.saveHosts([testHost]);
+    final settings = WebDavSettings(
+      url: 'http://127.0.0.1:${server.port}/dav/',
+      username: 'test',
+      password: 'app-password',
+      encryptionPassword: password,
+    );
+    final model = WorkspaceModel(repository);
+    addTearDown(model.dispose);
+    await model.initialize();
+    await model.cloudSync.saveSettings(settings);
+    await model.syncNow();
+
+    // 云端删除了这条连接，本地随同步一起删除。
+    server.content = await encryptSync(SyncSnapshot.empty().encode(), password);
+    server.revision++;
+    await model.syncNow();
+    expect(await repository.loadHosts(), isEmpty);
+    expect(model.hosts, isEmpty);
+
+    // 编辑窗口仍是删除前打开的：保存必须被拒绝，而不是把记录写回本地。
+    final stale = Host.fromJson({...testHost.toJson(), 'icon': 'database'});
+    await expectLater(
+      model.saveHost(
+        stale,
+        null,
+        originalHost: testHost,
+        originalCredentials: null,
+      ),
+      throwsA(isA<SyncConflict>()),
+    );
+    expect(await repository.loadHosts(), isEmpty);
+    expect(model.hosts, isEmpty);
+  }, timeout: const Timeout(Duration(minutes: 3)));
+
+  test('认证组并发真实冲突时不写入任何字段或凭据', () async {
+    const original = Credentials(password: 'ssh-password');
+    final repository = memoryRepository();
+    await repository.saveHosts([testHost]);
+    await repository.saveCredentials(testHost.id, original);
+    final model = WorkspaceModel(repository);
+    addTearDown(model.dispose);
+    await model.initialize();
+
+    // 另一个窗口把地址和密码一起换掉了。
+    final moved = Host.fromJson({
+      ...testHost.toJson(),
+      'address': 'new.example.com',
+    });
+    await model.saveHost(
+      moved,
+      const Credentials(password: 'new-password'),
+      originalHost: testHost,
+      originalCredentials: original,
+    );
+
+    // 这个窗口还显示旧地址，却把用户名和密码改成了另一组：整组认证必须
+    // 报冲突，绝不能把旧账号的密码套到新地址上。
+    final renamed = Host.fromJson({...testHost.toJson(), 'username': 'ops'});
+    await expectLater(
+      model.saveHost(
+        renamed,
+        const Credentials(password: 'other-password'),
+        originalHost: testHost,
+        originalCredentials: original,
+      ),
+      throwsA(isA<SyncConflict>()),
+    );
+    final host = (await repository.loadHosts()).single;
+    expect(host.address, 'new.example.com');
+    expect(host.username, 'deploy');
+    expect(
+      (await repository.credentials(testHost.id))!.password,
+      'new-password',
+    );
+    expect(model.hosts.single.address, 'new.example.com');
+  });
 
   test('启动恢复未完成的身份写入后主界面按恢复的当前身份拨号', () async {
     final secrets = MemoryStore();
@@ -1890,6 +2151,22 @@ class _FailOnceStore extends MemoryStore {
 }
 
 /// 真实回环 WebDAV 服务器：GET 可被闸门停住，用来观察同步进行中的本地写入。
+class _GatedPreferences extends MemoryStore {
+  Completer<void>? hostsGate;
+  final entered = Completer<void>();
+
+  @override
+  Future<void> write(String key, String value) async {
+    final gate = hostsGate;
+    if (key == 'harbor.hosts.v1' && gate != null) {
+      hostsGate = null;
+      if (!entered.isCompleted) entered.complete();
+      await gate.future;
+    }
+    await super.write(key, value);
+  }
+}
+
 class _GatedWebDavServer {
   _GatedWebDavServer._(this._server);
 

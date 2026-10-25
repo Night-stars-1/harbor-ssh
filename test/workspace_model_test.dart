@@ -67,18 +67,26 @@ void main() {
     });
 
     model.filter(ungrouped: true);
+    const tagged = Host(
+      id: 'bare',
+      name: '未标记主机',
+      address: 'bare.example.com',
+      username: 'root',
+      tags: ['开发'],
+    );
     await model.saveHost(
-      const Host(
-        id: 'bare',
-        name: '未标记主机',
-        address: 'bare.example.com',
-        username: 'root',
-        tags: ['开发'],
-      ),
+      tagged,
       null,
+      originalHost: bare,
+      originalCredentials: null,
     );
     expect(model.filteredHosts, isEmpty);
-    await model.saveHost(bare, null);
+    await model.saveHost(
+      bare,
+      null,
+      originalHost: tagged,
+      originalCredentials: null,
+    );
     expect(model.filteredHosts.single.id, 'bare');
     expect(
       (await repository.loadHosts()).firstWhere((h) => h.id == 'bare').tags,
@@ -90,10 +98,21 @@ void main() {
     final repository = memoryRepository();
     final model = WorkspaceModel(repository);
     await model.initialize();
-    await model.saveHost(testHost, const Credentials(password: 'original'));
+    const original = Credentials(password: 'original');
+    await model.saveHost(
+      testHost,
+      original,
+      originalHost: null,
+      originalCredentials: null,
+    );
     (repository.preferences as MemoryStore).failWrites = true;
     await expectLater(
-      model.saveHost(testHost, const Credentials(password: 'replacement')),
+      model.saveHost(
+        testHost,
+        const Credentials(password: 'replacement'),
+        originalHost: testHost,
+        originalCredentials: original,
+      ),
       throwsStateError,
     );
     expect((await repository.credentials(testHost.id))!.password, 'original');
@@ -103,7 +122,12 @@ void main() {
     final repository = memoryRepository();
     final model = WorkspaceModel(repository);
     await model.initialize();
-    await model.saveHost(testHost, const Credentials(password: 'example'));
+    await model.saveHost(
+      testHost,
+      const Credentials(password: 'example'),
+      originalHost: null,
+      originalCredentials: null,
+    );
     expect(model.tags, ['开发']);
     model.search('DEV.EXAMPLE');
     expect(model.filteredHosts.single.id, testHost.id);
@@ -170,7 +194,12 @@ void main() {
         username: 'deploy',
       ),
     ]) {
-      await model.saveHost(host, null);
+      await model.saveHost(
+        host,
+        null,
+        originalHost: null,
+        originalCredentials: null,
+      );
     }
     expect(model.tags, ['dev', 'prod', 'test']);
     model.dispose();
@@ -193,8 +222,18 @@ void main() {
       username: 'deploy',
       tags: ['夜间构建'],
     );
-    await model.saveHost(multi, null);
-    await model.saveHost(ops, null);
+    await model.saveHost(
+      multi,
+      null,
+      originalHost: null,
+      originalCredentials: null,
+    );
+    await model.saveHost(
+      ops,
+      null,
+      originalHost: null,
+      originalCredentials: null,
+    );
     model.filter(tag: 'dev');
     expect(model.filteredHosts.single.id, multi.id);
     model.filter(tag: '夜间构建');
@@ -220,7 +259,15 @@ void main() {
     final model = WorkspaceModel(repository);
     await model.initialize();
     (repository.preferences as MemoryStore).failWrites = true;
-    await expectLater(model.saveHost(testHost, null), throwsStateError);
+    await expectLater(
+      model.saveHost(
+        testHost,
+        null,
+        originalHost: null,
+        originalCredentials: null,
+      ),
+      throwsStateError,
+    );
     expect(model.hosts, isEmpty);
     expect(model.saving, isFalse);
     model.dispose();
@@ -243,7 +290,12 @@ void main() {
     final repository = _gatedRepository(store);
     final model = WorkspaceModel(repository);
     await model.initialize();
-    await model.saveHost(testHost, null);
+    await model.saveHost(
+      testHost,
+      null,
+      originalHost: null,
+      originalCredentials: null,
+    );
 
     store.gate = Completer<void>();
     final addA = model.setSftpBookmark(testHost.id, '/srv/a', saved: true);
@@ -268,7 +320,12 @@ void main() {
     final repository = _gatedRepository(store);
     final model = WorkspaceModel(repository);
     await model.initialize();
-    await model.saveHost(testHost, const Credentials(password: 'original'));
+    await model.saveHost(
+      testHost,
+      const Credentials(password: 'original'),
+      originalHost: null,
+      originalCredentials: null,
+    );
 
     store.gate = Completer<void>();
     const edited = Host(
@@ -282,6 +339,8 @@ void main() {
     final pendingEdit = model.saveHost(
       edited,
       const Credentials(password: 'updated'),
+      originalHost: testHost,
+      originalCredentials: const Credentials(password: 'original'),
     );
     await store.entered.future;
     final bookmark = model.setSftpBookmark(
@@ -307,7 +366,12 @@ void main() {
     final repository = _gatedRepository(store);
     final model = WorkspaceModel(repository);
     await model.initialize();
-    await model.saveHost(testHost, null);
+    await model.saveHost(
+      testHost,
+      null,
+      originalHost: null,
+      originalCredentials: null,
+    );
     await model.setSftpBookmark(testHost.id, '/srv/a', saved: true);
     expect(model.hosts.single.sftpBookmarks, ['/srv/a']);
 
@@ -331,12 +395,19 @@ void main() {
     final repository = _gatedRepository(store);
     final model = WorkspaceModel(repository);
     await model.initialize();
-    await model.saveHost(testHost, null);
+    await model.saveHost(
+      testHost,
+      null,
+      originalHost: null,
+      originalCredentials: null,
+    );
 
     store.gate = Completer<void>();
     final pendingEdit = model.saveHost(
       testHost,
       const Credentials(password: 'updated'),
+      originalHost: testHost,
+      originalCredentials: null,
     );
     await store.entered.future;
     final bookmark = model.setSftpBookmark(testHost.id, '/srv/a', saved: true);

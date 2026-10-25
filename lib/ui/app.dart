@@ -338,7 +338,7 @@ Widget _settingsButton(
 /// 会话显示的图标。连接快照保留建连时的身份，图标以已保存的主机配置为准，
 /// 这样编辑图标后标题栏和侧栏无需重连即可更新；主机尚未保存时沿用快照。
 IconData _sessionHostIcon(WorkspaceModel model, SshConnection session) =>
-    sessionIcon(model.sessionHostIcon(session.host));
+    hostIcon(model.sessionHostIcon(session.host));
 
 /// Actions shared by a session's sidebar item and its title bar tab.
 List<Widget> _sessionMenuChildren(
@@ -517,7 +517,14 @@ class _WorkspaceState extends State<Workspace> {
   bool _portForwardsOpened = false;
   bool _sessionsOpen = false;
   final _settingsNavigation = SettingsNavigation();
-  double _sidebarWidth = 264;
+
+  /// Sidebar width the user settled on while this state lives. Null until the
+  /// user resizes, so a preference restored from disk still applies; the
+  /// rendered width clamps it without overwriting the preference.
+  double? _sidebarWidthOverride;
+  double _sidebarDragAnchor = 0;
+  double _sidebarDragDelta = 0;
+  bool _sidebarDragging = false;
 
   // 虚拟默认分组：无标签主机的入口，不写入真实标签。
   static const _ungroupedLabel = '未分组';
@@ -627,7 +634,15 @@ class _WorkspaceState extends State<Workspace> {
               if (session.status == ConnectionStatus.connected) session.host.id,
           },
           userCredentials: userCredentials,
-          onSave: model.saveHost,
+          // The editor's starting values decide what this save actually
+          // changes, so a concurrent sync or another save keeps everything the
+          // user did not touch in this window.
+          onSave: (saved, secret) => model.saveHost(
+            saved,
+            secret,
+            originalHost: host,
+            originalCredentials: credentials,
+          ),
           onTest: _testConnection,
         ),
       );
@@ -1207,7 +1222,9 @@ class _WorkspaceState extends State<Workspace> {
           220.0,
           400.0,
         );
-        final sidebarWidth = _sidebarWidth.clamp(220.0, maxSidebarWidth);
+        final sidebarWidth =
+            (_sidebarWidthOverride ?? model.appearance.value.sidebarWidth)
+                .clamp(220.0, maxSidebarWidth);
         final colors = Theme.of(context).colorScheme;
         if (model.showingSettings) _settingsOpened = true;
         if (model.showingPortForwards) _portForwardsOpened = true;
@@ -1522,6 +1539,33 @@ class _WorkspaceState extends State<Workspace> {
                                                 .appearance
                                                 .value
                                                 .statusRefreshSeconds,
+                                            aiPanelWidth: model
+                                                .appearance
+                                                .value
+                                                .aiPanelWidth,
+                                            aiPanelWidthRevision:
+                                                model.appearanceRevision,
+                                            onAiPanelWidthChanged: (width) =>
+                                                _saveAppearance(
+                                                  model.appearance.value
+                                                      .copyWith(
+                                                        aiPanelWidth: width,
+                                                        clearAiPanelWidth:
+                                                            width == null,
+                                                      ),
+                                                ),
+                                            splitRatio: model
+                                                .appearance
+                                                .value
+                                                .terminalSplitRatio,
+                                            onSplitRatioChanged: (ratio) =>
+                                                _saveAppearance(
+                                                  model.appearance.value
+                                                      .copyWith(
+                                                        terminalSplitRatio:
+                                                            ratio,
+                                                      ),
+                                                ),
                                             desktop: wide,
                                             visible: model.showsTerminal,
                                             mobileController:
@@ -1609,26 +1653,70 @@ class _WorkspaceState extends State<Workspace> {
     ),
   );
 
+  /// Persists a settled layout preference. The rendered width already follows
+  /// the local choice, but a failed write must tell the user it will not
+  /// survive a restart. Called only when a gesture settles, never per pixel.
+  void _saveAppearance(AppearancePreferences value) {
+    unawaited(
+      model.saveAppearance(value).catchError((Object _) {
+        if (!mounted) return;
+        showSettingsNotice(context, '布局大小保存失败，请重试', error: true);
+      }),
+    );
+  }
+
   Widget _sidebarResizeHandle(double width, double maxWidth) {
-    void resize(double next) => setState(() {
-      _sidebarWidth = next.clamp(220.0, maxWidth);
-    });
+    final minWidth = AppearancePreferences.minSidebarWidth;
+    final maxPreference = AppearancePreferences.maxSidebarWidth;
+    // Settling updates this state and writes the preference once.
+    void commit(double next) {
+      final value = next.clamp(minWidth, maxPreference).toDouble();
+      if (value != _sidebarWidthOverride) {
+        setState(() => _sidebarWidthOverride = value);
+      }
+      _saveAppearance(model.appearance.value.copyWith(sidebarWidth: value));
+    }
+
     return Semantics(
       label: '调整侧栏宽度',
       value: '${width.round()}',
       increasedValue: '${(width + 16).clamp(220.0, maxWidth).round()}',
       decreasedValue: '${(width - 16).clamp(220.0, maxWidth).round()}',
-      onIncrease: () => resize(width + 16),
-      onDecrease: () => resize(width - 16),
-      child: MouseRegion(
-        cursor: SystemMouseCursors.resizeLeftRight,
+      onIncrease: () => commit((width + 16).clamp(220.0, maxWidth)),
+      onDecrease: () => commit((width - 16).clamp(220.0, maxWidth)),
+      child: Listener(
+        behavior: HitTestBehavior.opaque,
+        onPointerDown: (event) {
+          _sidebarDragging = true;
+          _sidebarDragAnchor =
+              _sidebarWidthOverride ?? model.appearance.value.sidebarWidth;
+          _sidebarDragDelta = 0;
+        },
+        onPointerMove: (event) {
+          _sidebarDragDelta += event.delta.dx;
+          final next = (_sidebarDragAnchor + _sidebarDragDelta).clamp(
+            minWidth,
+            maxPreference,
+          );
+          if (next == _sidebarWidthOverride) return;
+          setState(() => _sidebarWidthOverride = next);
+        },
+        onPointerUp: (_) {
+          if (!_sidebarDragging) return;
+          _sidebarDragging = false;
+          final settled = _sidebarWidthOverride;
+          if (settled != null) commit(settled);
+        },
+        onPointerCancel: (_) {
+          if (!_sidebarDragging) return;
+          _sidebarDragging = false;
+          final settled = _sidebarWidthOverride;
+          if (settled != null) commit(settled);
+        },
         child: GestureDetector(
           key: const ValueKey('sidebar-resize-handle'),
           behavior: HitTestBehavior.opaque,
-          onHorizontalDragStart: (_) => _sidebarWidth = width,
-          onHorizontalDragUpdate: (details) =>
-              resize(_sidebarWidth + details.delta.dx),
-          onDoubleTap: () => resize(264),
+          onDoubleTap: () => commit(AppearancePreferences.defaultSidebarWidth),
           child: SizedBox(
             width: 8,
             height: double.infinity,
@@ -1704,9 +1792,7 @@ class _WorkspaceState extends State<Workspace> {
                       destination.count,
                       destination.selected,
                       destination.open,
-                      key: destination.id == 'port-forwards'
-                          ? const ValueKey('sidebar-port-forwards')
-                          : null,
+                      key: ValueKey('sidebar-${destination.id}'),
                       bottomSpacing: destination.count.isEmpty ? 4 : 0,
                     ),
                   _sectionLabel('标签'),

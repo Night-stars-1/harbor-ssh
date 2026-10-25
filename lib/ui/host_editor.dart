@@ -6,6 +6,7 @@ import 'package:flutter/services.dart';
 import '../data/key_file.dart';
 import '../data/ssh_keys.dart';
 import '../domain/host.dart';
+import '../domain/sync_snapshot.dart';
 import 'expressive_widgets.dart';
 import 'host_icons.dart';
 import 'settings_widgets.dart';
@@ -271,6 +272,15 @@ class _HostEditorState extends State<HostEditor> {
           host.authMethod == AuthMethod.password ? credentials : null,
         );
         if (mounted) Navigator.of(context).pop();
+      }
+    } on SyncConflict {
+      // 保存被拒绝而不是覆盖：这条连接已被云同步或另一处操作改过或删除。
+      if (mounted) {
+        setState(
+          () => _error = test
+              ? '测试连接失败：该连接已被其他操作修改或删除'
+              : '保存失败，该连接已被其他操作修改或删除，请重新打开编辑。',
+        );
       }
     } catch (error) {
       if (mounted) {

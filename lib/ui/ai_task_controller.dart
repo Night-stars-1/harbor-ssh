@@ -5,6 +5,7 @@ import 'dart:math';
 import 'package:flutter/foundation.dart';
 
 import '../data/ai_conversation_store.dart';
+import '../data/mcp_client.dart';
 import '../data/terminal_ai.dart';
 export '../data/terminal_ai.dart' show AiApprovalMode, AiReasoningEffort;
 import '../data/ai_image.dart';
@@ -76,6 +77,9 @@ class AiTaskController extends ChangeNotifier {
   Completer<bool>? _approval;
   TerminalAiClient? _client;
   AiCommandExecutor? _executor;
+  _AiTurn? _turn;
+  int _approvalSerial = 0;
+  String _systemContext = '';
   bool _disposed = false;
   int _revision = 0;
   final _history = <Map<String, dynamic>>[];
@@ -141,6 +145,252 @@ class AiTaskController extends ChangeNotifier {
 
   String get activeModel => _effectiveSettings().model;
 
+  /// Rebuilds the first system message for the current turn or restored
+  /// conversation. The host context is regenerated, never replayed stale.
+  void _refreshSystemPrompt(String hostContext) {
+    _history.removeWhere((message) => message['role'] == 'system');
+    _history.insert(0, {
+      'role': 'system',
+      'content': buildAiSystemPrompt(
+        supplement: settings().systemPrompt,
+        hostContext: hostContext,
+      ),
+    });
+  }
+
+  /// Only plain command calls may be auto-approved by an approval-mode switch.
+  /// Local forwards and MCP tools always need an explicit user decision.
+  static bool _autoApprovable(AiToolCall call) => call.name == 'run_command';
+
+  static String _forwardDescription(Map<String, dynamic> arguments) {
+    final local = arguments['local_port'];
+    final targetHost = arguments['target_host'] is String
+        ? (arguments['target_host'] as String).trim()
+        : '127.0.0.1';
+    final targetPort = arguments['target_port'];
+    final localText = local is int && local > 0
+        ? '127.0.0.1:$local'
+        : '127.0.0.1:自动分配';
+    return '本地端口转发：$localText → 服务器侧 $targetHost:'
+        '${targetPort is int ? targetPort : '?'}';
+  }
+
+  static String _argumentPreview(Map<String, dynamic> arguments) {
+    try {
+      final text = jsonEncode(arguments);
+      return text.length <= 300 ? text : '${text.substring(0, 300)}…';
+    } catch (_) {
+      return '（参数无法显示）';
+    }
+  }
+
+  static AiForwardRequest _forwardRequest(Map<String, dynamic> arguments) {
+    final name = arguments['name'];
+    final local = arguments['local_port'];
+    final targetHost = arguments['target_host'];
+    final targetPort = arguments['target_port'];
+    final reason = arguments['reason'];
+    if (name is! String || name.trim().isEmpty) {
+      throw const FormatException('缺少转发名称');
+    }
+    if (local is! int || local < 0 || local > 65535) {
+      throw const FormatException('本机端口须为 0–65535');
+    }
+    if (targetPort is! int || targetPort < 1 || targetPort > 65535) {
+      throw const FormatException('目标端口须为 1–65535');
+    }
+    if (reason is! String || reason.trim().isEmpty) {
+      throw const FormatException('缺少创建转发的原因');
+    }
+    final request = AiForwardRequest(
+      name: name.trim(),
+      localPort: local,
+      targetHost: targetHost is String && targetHost.trim().isNotEmpty
+          ? targetHost.trim()
+          : '127.0.0.1',
+      targetPort: targetPort,
+    );
+    request.validate();
+    return request;
+  }
+
+  static String _toolReason(Object error) {
+    final text = (error is FormatException
+            ? error.message
+            : error.toString().replaceFirst(
+                RegExp(r'^(Bad state: |Exception: |FormatException: )'),
+                '',
+              ))
+        .replaceAll(RegExp(r'[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]'), ' ');
+    return text.length <= 300 ? text : '${text.substring(0, 300)}…';
+  }
+
+  void _toolNotice(String message) {
+    if (_disposed) return;
+    entries.add(AiTaskEntry(message, notice: true));
+    _notify();
+  }
+
+  /// Builds the extra tool list for this turn and discovers MCP tools.
+  ///
+  /// In read-only mode no extra tool is advertised at all. A discovery
+  /// failure is reported as a visible notice with the server name and reason
+  /// instead of silently dropping the server.
+  Future<List<AiToolSpec>> _prepareExtraTools(
+    int revision,
+    _AiTurn turn,
+  ) async {
+    turn.mcpByModelName = const {};
+    if (approvalMode == AiApprovalMode.readOnly) return const [];
+    final specs = <AiToolSpec>[];
+    final executor = _executor;
+    if (executor is AiSessionExecutor) {
+      specs.add(
+        const AiToolSpec(
+          name: aiPortForwardToolName,
+          description: aiPortForwardDescription,
+          inputSchema: aiPortForwardInputSchema,
+        ),
+      );
+    }
+    final servers = settings().mcpServers
+        .where((server) => server.enabled)
+        .toList();
+    if (servers.isEmpty) return specs;
+    status = '获取 MCP 工具';
+    _notify();
+    final seen = <String>{};
+    for (final server in servers) {
+      final display = server.name.trim().isEmpty ? server.id : server.name;
+      if (!seen.add(server.id)) {
+        _toolNotice('MCP 服务器「$display」的 ID 重复，已跳过该配置');
+        continue;
+      }
+      try {
+        server.validate();
+      } catch (error) {
+        _toolNotice(
+          'MCP 服务器「$display」配置无效：${_toolReason(error)}。'
+          '请在设置中检查地址和请求头。',
+        );
+        continue;
+      }
+      final client = McpClient(server);
+      turn.mcpClients[server.id] = client;
+    }
+    final discovered = await Future.wait([
+      for (final entry in turn.mcpClients.entries)
+        () async {
+          try {
+            final tools = await entry.value
+                .listTools()
+                .timeout(const Duration(seconds: 20));
+            return (entry.key, tools, null);
+          } catch (error) {
+            return (entry.key, const <McpTool>[], _toolReason(error));
+          }
+        }(),
+    ]);
+    if (!_current(revision)) return specs;
+    final byId = {for (final server in servers) server.id: server};
+    final used = <String>{
+      'run_command',
+      'list_directory',
+      'read_file',
+      'search_text',
+      'system_info',
+      aiPortForwardToolName,
+    };
+    final bindings = <String, _AiMcpBinding>{};
+    for (final (serverId, tools, error) in discovered) {
+      final server = byId[serverId]!;
+      final display = server.name.trim().isEmpty ? server.id : server.name;
+      if (error != null) {
+        _toolNotice(
+          'MCP 服务器「$display」工具列表获取失败：$error。'
+          '请在设置中检查地址、鉴权头和网络后重试；本次对话已跳过该服务器。',
+        );
+        continue;
+      }
+      for (final tool in tools) {
+        final modelName = _modelToolName(serverId, tool.name, used);
+        final binding = _AiMcpBinding(
+          serverId: serverId,
+          serverName: display,
+          toolName: tool.name,
+        );
+        bindings[modelName] = binding;
+        specs.add(
+          AiToolSpec(
+            name: modelName,
+            description: tool.description,
+            inputSchema: tool.inputSchema.isEmpty
+                ? const {'type': 'object', 'properties': {}}
+                : Map<String, dynamic>.from(tool.inputSchema),
+          ),
+        );
+      }
+    }
+    turn.mcpByModelName = bindings;
+    return specs;
+  }
+
+  /// Provider tool names are limited to `[A-Za-z0-9_-]{1,64}`. Advertised
+  /// names are kept verbatim when they already satisfy that; otherwise they
+  /// are sanitized/namespaced and mapped back to the exact MCP name on call.
+  static String _modelToolName(
+    String serverId,
+    String toolName,
+    Set<String> used,
+  ) {
+    var base = toolName.replaceAll(RegExp(r'[^A-Za-z0-9_-]'), '_');
+    if (base.isEmpty) base = 'tool';
+    if (base.length > 64) base = base.substring(0, 64);
+    var candidate = base;
+    if (used.contains(candidate)) {
+      var prefix = serverId.replaceAll(RegExp(r'[^A-Za-z0-9_-]'), '_');
+      if (prefix.isEmpty) prefix = 'mcp';
+      candidate = '${prefix}__$base';
+      if (candidate.length > 64) candidate = candidate.substring(0, 64);
+    }
+    var serial = 2;
+    while (used.contains(candidate)) {
+      final suffix = '_$serial';
+      candidate = candidate.length + suffix.length > 64
+          ? '${candidate.substring(0, 64 - suffix.length)}$suffix'
+          : '$candidate$suffix';
+      serial++;
+    }
+    used.add(candidate);
+    return candidate;
+  }
+
+  /// Stops a tool and records the failure as the tool result, so the model can
+  /// recover instead of the whole turn being aborted.
+  void _completeToolFailure(
+    AiTaskEntry entry,
+    AiToolCall call,
+    List<Map<String, dynamic>> messages,
+    String message, {
+    bool untrusted = false,
+  }) {
+    entry.interruption = message;
+    entry.finished = true;
+    messages.add({
+      'role': 'tool',
+      'tool_call_id': call.id,
+      'content': jsonEncode({
+        'status': 'failed',
+        'output': '',
+        'exitCode': null,
+        'error': message,
+        if (untrusted) 'untrusted': true,
+      }),
+    });
+    _unresolved.remove(call.id);
+    _notify();
+  }
+
   /// Effort the next request of this conversation will ask for.
   AiReasoningEffort get reasoningEffort => _effectiveSettings().reasoningEffort;
 
@@ -180,7 +430,14 @@ class AiTaskController extends ChangeNotifier {
   void setApprovalMode(AiApprovalMode mode) {
     if (_disposed) return;
     approvalMode = mode;
-    if (mode == AiApprovalMode.auto && pending != null) approve(true);
+    final waiting = pending;
+    // A mode switch may auto-approve a plain command, never an MCP call or a
+    // local forward: those must keep waiting for an explicit user decision.
+    if (mode == AiApprovalMode.auto &&
+        waiting != null &&
+        _autoApprovable(waiting)) {
+      approve(true);
+    }
     if (mode == AiApprovalMode.readOnly && running) {
       stop(message: '已切换为只读模式，当前任务已停止');
       return;
@@ -296,6 +553,10 @@ class AiTaskController extends ChangeNotifier {
             Map<String, dynamic>.from(message),
         ]);
       _unresolved.clear();
+      _systemContext = '';
+      // The stored prompt may come from another host or an older custom
+      // prompt; rebuild it now. Current-host context is added on the next turn.
+      _refreshSystemPrompt('');
       _contextModel = conversation.contextModel;
       _modelOverride = _restoredModelOverride(conversation);
       _reasoningOverride = _restoredReasoningOverride(conversation);
@@ -629,6 +890,10 @@ class AiTaskController extends ChangeNotifier {
     _revision++;
     _history.clear();
     _unresolved.clear();
+    final turn = _turn;
+    _turn = null;
+    turn?.close();
+    _systemContext = '';
     entries.clear();
     failure = null;
     status = '';
@@ -671,8 +936,17 @@ class AiTaskController extends ChangeNotifier {
 
   bool _current(int revision) => !_disposed && running && revision == _revision;
 
-  void approve(bool allowed) {
+  void approve(
+    bool allowed, {
+    bool saveForward = false,
+    String? expectedCallId,
+  }) {
+    // A detached or delayed UI click names the call it was rendered for.
+    // Never let a stale approval grant a later, different call.
+    if (expectedCallId != null && pending?.id != expectedCallId) return;
     if (allowed) {
+      final turn = _turn;
+      if (turn != null) turn.saveForward = saveForward;
       if (_approval?.isCompleted == false) _approval!.complete(true);
       pending = null;
       _notify();
@@ -686,6 +960,9 @@ class AiTaskController extends ChangeNotifier {
     _revision++;
     _client?.cancel();
     _executor?.cancel();
+    final turn = _turn;
+    _turn = null;
+    turn?.close();
     if (_approval?.isCompleted == false) _approval!.complete(false);
     pending = null;
     running = false;
@@ -718,8 +995,13 @@ class AiTaskController extends ChangeNotifier {
       return;
     }
     final revision = ++_revision;
+    final turn = _AiTurn(revision);
+    _turn = turn;
     final client = _client = clientFactory();
     final executor = _executor = executorFactory();
+    _systemContext = executor is AiSessionExecutor
+        ? executor.systemContext
+        : '';
     final contextModel =
         '${config.endpoint}|${config.protocol}|${config.model}';
     if (_contextModel != null && _contextModel != contextModel) {
@@ -729,9 +1011,9 @@ class AiTaskController extends ChangeNotifier {
       }
     }
     _contextModel = contextModel;
-    if (_history.isEmpty) {
-      _history.add({'role': 'system', 'content': aiSystemPrompt});
-    }
+    // Always rebuilt: a resumed conversation must not reuse a stale host
+    // address, and settings edits apply from the next turn.
+    _refreshSystemPrompt(_systemContext);
     final attachments = List<AiImage>.unmodifiable(images);
     entries.add(AiTaskEntry(goal.trim(), images: attachments, user: true));
     running = true;
@@ -748,6 +1030,8 @@ class AiTaskController extends ChangeNotifier {
     });
     var hasToolCalls = false;
     try {
+      final extraTools = await _prepareExtraTools(revision, turn);
+      if (!_current(revision)) return;
       while (_current(revision)) {
         if (!connected()) throw const AiFailure('SSH 已断开，任务已停止');
         status = hasToolCalls ? '整理结果' : '思考中';
@@ -762,6 +1046,7 @@ class AiTaskController extends ChangeNotifier {
               toolMode: approvalMode == AiApprovalMode.readOnly
                   ? AiToolMode.readOnly
                   : AiToolMode.command,
+              extraTools: extraTools,
               onText: (delta) {
                 if (!_current(revision)) return;
                 streamedReply ??= AiTaskEntry('', model: config.model.trim());
@@ -819,9 +1104,17 @@ class AiTaskController extends ChangeNotifier {
         for (final call in reply.calls) {
           if (!_current(revision)) return;
           hasToolCalls = true;
+          final mcp = turn.mcpByModelName[call.name];
+          final isForward = call.name == aiPortForwardToolName;
           final command = _commandForTool(call);
+          final readable = isForward
+              ? _forwardDescription(call.arguments)
+              : mcp != null
+              ? 'MCP「${mcp.serverName}」调用工具 ${mcp.toolName}\n'
+                    '参数：${_argumentPreview(call.arguments)}'
+              : command ?? call.command;
           final entry = AiTaskEntry(
-            command ?? call.command,
+            readable,
             command: true,
             model: config.model.trim(),
           )..reason = call.reason;
@@ -835,9 +1128,14 @@ class AiTaskController extends ChangeNotifier {
                 'search_text',
                 'system_info',
               ].contains(call.name);
-          if (command == null || blockedByReadOnly) {
+          final forwardUnavailable = isForward && executor is! AiSessionExecutor;
+          final unknownTool =
+              mcp == null && !isForward && command == null;
+          if (blockedByReadOnly || forwardUnavailable || unknownTool) {
             entry.interruption = blockedByReadOnly
                 ? '只读模式不允许此工具'
+                : forwardUnavailable
+                ? '当前会话不支持端口转发'
                 : '工具参数无效，未执行';
             entry.finished = true;
             messages.add({
@@ -854,19 +1152,157 @@ class AiTaskController extends ChangeNotifier {
             _notify();
             continue;
           }
-          if (aiCommandNeedsApproval(call) &&
-              approvalMode == AiApprovalMode.manual) {
-            pending = call;
+          // MCP calls and local forwards never inherit auto approval: every
+          // one of them needs the user to approve this exact call.
+          final explicitConsent = isForward || mcp != null;
+          if (explicitConsent ||
+              (aiCommandNeedsApproval(call) &&
+                  approvalMode == AiApprovalMode.manual)) {
+            pending = AiToolCall(
+              'approval-$revision-${_approvalSerial++}',
+              readable,
+              call.reason.trim().isEmpty
+                  ? (isForward ? '创建本地端口转发' : '调用 MCP 工具')
+                  : call.reason,
+              true,
+              name: call.name,
+              arguments: call.arguments,
+            );
+            turn.saveForward = false;
             status = '等待确认';
             final approval = _approval = Completer<bool>();
             _notify();
             if (!await approval.future || !_current(revision)) return;
           }
           if (!_current(revision)) return;
-          if (!connected()) throw const AiFailure('SSH 已断开，未执行命令');
-          status = '执行命令';
+          if (!connected()) throw const AiFailure('SSH 已断开，未执行操作');
+          final saveForward = isForward && turn.saveForward;
+          turn.saveForward = false;
+          status = isForward || mcp != null ? '执行工具' : '执行命令';
           entry.started = true;
           _notify();
+          if (isForward) {
+            final session = executor;
+            if (session is! AiSessionExecutor) {
+              _completeToolFailure(
+                entry,
+                call,
+                messages,
+                '当前会话不支持端口转发',
+              );
+              continue;
+            }
+            try {
+              final request = _forwardRequest(call.arguments);
+              final result = await session.createPortForward(
+                request,
+                save: saveForward,
+              );
+              if (!_current(revision)) return;
+              entry.output =
+                  '${result.route}\n本机浏览器地址：${result.url}\n'
+                  '${result.saved ? '规则已保存到主机端口转发列表' : '未保存为规则，仅本次会话有效'}';
+              entry.exitCode = 0;
+              entry.finished = true;
+              messages.add({
+                'role': 'tool',
+                'tool_call_id': call.id,
+                'content': jsonEncode(result.toJson()),
+              });
+            } on FormatException catch (error) {
+              if (!_current(revision)) return;
+              _completeToolFailure(
+                entry,
+                call,
+                messages,
+                '端口转发参数无效：${_toolReason(error)}',
+              );
+            } on AiFailure catch (error) {
+              if (!_current(revision)) return;
+              _completeToolFailure(entry, call, messages, error.message);
+            } catch (error) {
+              if (!_current(revision)) return;
+              _completeToolFailure(
+                entry,
+                call,
+                messages,
+                '端口转发失败：${_toolReason(error)}',
+              );
+            }
+            if (!_current(revision)) return;
+            _unresolved.remove(call.id);
+            _notify();
+            continue;
+          }
+          if (mcp != null) {
+            final mcpClient = turn.mcpClients[mcp.serverId];
+            if (mcpClient == null) {
+              _completeToolFailure(
+                entry,
+                call,
+                messages,
+                'MCP 连接已关闭，请重新发起对话',
+                untrusted: true,
+              );
+              continue;
+            }
+            try {
+              final result = await mcpClient
+                  .callTool(mcp.toolName, call.arguments)
+                  .timeout(const Duration(seconds: 120));
+              if (!_current(revision)) return;
+              final encoded = jsonEncode(result);
+              const limit = 64000;
+              final truncated = encoded.length > limit;
+              final raw = truncated
+                  ? encoded.substring(0, limit)
+                  : encoded;
+              final isError = result['isError'] == true;
+              entry.output = truncated ? '$raw\n…输出已截断' : raw;
+              if (isError) entry.interruption = 'MCP 工具返回错误';
+              entry.exitCode = isError ? 1 : 0;
+              entry.finished = true;
+              messages.add({
+                'role': 'tool',
+                'tool_call_id': call.id,
+                'content': jsonEncode({
+                  'status': isError ? 'tool_error' : 'ok',
+                  // MCP output is untrusted data and must stay data.
+                  'untrusted': true,
+                  'tool': mcp.toolName,
+                  if (truncated) 'truncated': true,
+                  'result': truncated ? raw : result,
+                }),
+              });
+            } on TimeoutException {
+              if (!_current(revision)) return;
+              mcpClient.cancel();
+              _completeToolFailure(
+                entry,
+                call,
+                messages,
+                'MCP 工具调用超时（120 秒），已取消',
+                untrusted: true,
+              );
+            } catch (error) {
+              if (!_current(revision)) return;
+              _completeToolFailure(
+                entry,
+                call,
+                messages,
+                'MCP 工具调用失败：${_toolReason(error)}',
+                untrusted: true,
+              );
+            }
+            if (!_current(revision)) return;
+            _unresolved.remove(call.id);
+            _notify();
+            continue;
+          }
+          if (command == null) {
+            _completeToolFailure(entry, call, messages, '工具参数无效，未执行');
+            continue;
+          }
           final result = await executor.execute(command, (output) {
             if (!_current(revision)) return;
             entry.output += output;
@@ -897,6 +1333,8 @@ class AiTaskController extends ChangeNotifier {
     } finally {
       client.cancel();
       executor.cancel();
+      turn.close();
+      if (identical(_turn, turn)) _turn = null;
       if (revision == _revision) {
         running = false;
         pending = null;
@@ -910,7 +1348,45 @@ class AiTaskController extends ChangeNotifier {
   @override
   void dispose() {
     stop();
+    final turn = _turn;
+    _turn = null;
+    turn?.close();
     _disposed = true;
     super.dispose();
   }
+}
+
+/// Per-turn MCP connections and the forward save choice.
+///
+/// Owned by exactly one [AiTaskController.start] run: a stopped turn can never
+/// close clients or clear choices created by a newer turn.
+class _AiTurn {
+  _AiTurn(this.revision);
+  final int revision;
+  final mcpClients = <String, McpClient>{};
+  var mcpByModelName = const <String, _AiMcpBinding>{};
+  bool saveForward = false;
+  bool _closed = false;
+
+  void close() {
+    if (_closed) return;
+    _closed = true;
+    for (final client in mcpClients.values) {
+      client.cancel();
+      unawaited(client.close().catchError((Object _) {}));
+    }
+    mcpClients.clear();
+    mcpByModelName = const {};
+    saveForward = false;
+  }
+}
+
+/// Maps the model-visible tool name back to the exact advertised MCP tool.
+class _AiMcpBinding {
+  const _AiMcpBinding({
+    required this.serverId,
+    required this.serverName,
+    required this.toolName,
+  });
+  final String serverId, serverName, toolName;
 }

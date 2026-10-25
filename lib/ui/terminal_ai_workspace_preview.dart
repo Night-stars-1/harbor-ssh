@@ -247,6 +247,63 @@ Widget aiWorkbenchRunningDarkPreview() => _workbench(
 );
 
 @Preview(
+  name: 'AI 工作台 · 本地转发审批 · 560',
+  group: 'Harbor SSH · AI',
+  size: Size(560, 720),
+)
+Widget aiWorkbenchForwardApprovalPreview() => _workbench(
+  brightness: Brightness.light,
+  textScale: 1,
+  scene: (task) {
+    _fillTranscript(task);
+    task
+      ..running = true
+      ..status = '等待确认'
+      ..pending = AiToolCall(
+        'preview-forward',
+        '本地端口转发：127.0.0.1:8080 → 服务器侧 127.0.0.1:80',
+        'AI 请求在你的电脑上建立到服务器的本地端口转发。',
+        true,
+        name: 'create_port_forward',
+        arguments: const {
+          'name': 'web',
+          'local_port': 8080,
+          'target_host': '127.0.0.1',
+          'target_port': 80,
+          'reason': '访问内网管理页',
+        },
+      );
+  },
+);
+
+@Preview(
+  name: 'AI 工作台 · MCP 工具审批 · 560',
+  group: 'Harbor SSH · AI',
+  size: Size(560, 720),
+)
+Widget aiWorkbenchMcpApprovalPreview() => _workbench(
+  brightness: Brightness.dark,
+  textScale: 1,
+  scene: (task) {
+    _fillTranscript(task);
+    task
+      ..running = true
+      ..status = '等待确认'
+      ..pending = AiToolCall(
+        'preview-mcp',
+        'MCP「GitHub」调用工具 search_issues',
+        'AI 请求调用 MCP 服务器上的工具，参数如下。',
+        true,
+        name: 'search_issues',
+        arguments: const {
+          'query': 'repo:flutter/flutter is:issue is:open',
+          'limit': 5,
+        },
+      );
+  },
+);
+
+@Preview(
   name: 'AI 工作台 · 未配置 · 480',
   group: 'Harbor SSH · AI',
   size: Size(480, 520),

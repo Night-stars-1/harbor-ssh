@@ -13,10 +13,10 @@ class SyncStorage {
   Future<SyncSnapshot> capture() async {
     final records = <String, Map<String, dynamic>>{};
     for (final host in await repository.loadHosts()) {
-      records['host:${host.id}'] = {
-        'data': host.toJson(),
-        'secret': (await repository.credentials(host.id))?.toJson(),
-      };
+      records['host:${host.id}'] = SyncSnapshot.hostRecord(
+        host,
+        await repository.credentials(host.id),
+      );
     }
     for (final user in await repository.loadUsers()) {
       records['key:${user.id}'] = {

@@ -55,9 +55,37 @@ void main() {
     await h.settle();
     expect(h.remote.pending!.command, 'rm -rf /tmp/x');
     expect(h.remote.pending!.reason, '清理');
-    h.remote.approve(true);
+    h.remote.approve(true, expectedCallId: 'c1');
     await h.settle();
     expect(h.task.approved, isTrue);
+    expect(h.task.approvedSaveForward, isFalse);
+    expect(h.task.approvedCallId, 'c1');
+
+    // A port-forward approval uses the single approve operation and carries the
+    // per-call rule choice through the extra saveForward flag.
+    h.task.pending = const AiToolCall(
+      'f1',
+      '本地转发：127.0.0.1:8080 → 服务器 127.0.0.1:80',
+      '允许建立本地端口转发？',
+      true,
+      name: 'create_port_forward',
+      arguments: {
+        'name': 'web',
+        'local_port': 8080,
+        'target_host': '127.0.0.1',
+        'target_port': 80,
+        'reason': '访问内网管理页',
+      },
+    );
+    h.task.poke();
+    await h.settle();
+    expect(h.remote.pending!.name, 'create_port_forward');
+    h.remote.approve(true, saveForward: true, expectedCallId: 'f1');
+    await h.settle();
+    expect(h.task.approved, isTrue);
+    expect(h.task.approvedSaveForward, isTrue);
+    expect(h.task.approvedCallId, 'f1');
+    expect(h.task.calls, contains('approve:true:1:f1'));
 
     await h.remote.start('列出文件');
     expect(h.task.calls, contains('start:列出文件'));
@@ -101,6 +129,45 @@ void main() {
     await h.host.handle(const MethodCall('closed'));
     expect(h.docks, 2);
     expect(h.task.stopCount, stopsBeforeClose, reason: '关闭窗口绝不停止任务');
+  });
+
+  test('迟到的审批不会作用于后来的调用', () async {
+    final h = _Harness();
+    addTearDown(h.dispose);
+    h.host.register('s1', h.task, '生产服务器', onDock: h.dock);
+    h.task.entries.add(AiTaskEntry('你好', user: true));
+    await h.host.open('s1');
+    await h.remote.initialize();
+
+    h.task.pending = const AiToolCall('old', 'rm -rf /tmp/old', '清理旧文件', true);
+    h.task.poke();
+    await h.settle();
+    expect(h.remote.pending!.id, 'old');
+
+    // The controller moves on before the user's click reaches the main engine.
+    h.task.pending = const AiToolCall('new', 'rm -rf /tmp/new', '清理新文件', true);
+    h.task.poke();
+    await h.settle();
+    expect(h.remote.pending!.id, 'new');
+
+    // The stale grant and the stale cancel are both ignored.
+    h.remote.approve(true, expectedCallId: 'old');
+    await h.settle();
+    expect(h.task.approved, isNull);
+    expect(
+      h.task.calls.where((call) => call.startsWith('approve')),
+      isEmpty,
+      reason: '主引擎没有收到旧调用的审批',
+    );
+    h.remote.approve(false, expectedCallId: 'old');
+    await h.settle();
+    expect(h.task.stopCount, 0, reason: '迟到的取消不停止新调用');
+
+    // A click carrying the current call id still works.
+    h.remote.approve(true, expectedCallId: 'new');
+    await h.settle();
+    expect(h.task.approved, isTrue);
+    expect(h.task.approvedCallId, 'new');
   });
 
   test('重复 open/close 复用同一窗口并重建条目镜像', () async {
@@ -241,13 +308,28 @@ void main() {
       model: 'model-z',
       provider: 'openai',
       protocol: AiProtocol.anthropic,
+      systemPrompt: 'supplement-never-mirrored',
+      mcpServers: [
+        AiMcpServer(
+          id: 'mcp-github',
+          name: 'github',
+          url: 'https://mcp.example.com/mcp',
+          headers: {'Authorization': 'Bearer mcp-github-secret'},
+        ),
+      ],
     );
     h.host.refresh();
     await h.settle();
     expect(h.remote.activeModel, 'model-z');
     expect(h.remote.settings().protocol, AiProtocol.anthropic);
     expect(h.remote.settings().apiKey, isEmpty);
+    expect(h.remote.settings().mcpServers, isEmpty);
     expect(jsonEncode(h.pushes.last), isNot(contains('sk-other')));
+    expect(jsonEncode(h.pushes.last), isNot(contains('mcp-github-secret')));
+    expect(
+      jsonEncode(h.pushes.last),
+      isNot(contains('supplement-never-mirrored')),
+    );
   });
 
   test('切换会话不串线，迟到的旧会话结果被丢弃', () async {
@@ -863,6 +945,8 @@ class _TestTask extends AiTaskController {
   final calls = <String>[];
   int stopCount = 0;
   bool? approved;
+  bool? approvedSaveForward;
+  String? approvedCallId;
   List<AiImage> lastImages = const [];
   Completer<void>? previewGate;
 
@@ -886,9 +970,15 @@ class _TestTask extends AiTaskController {
   }
 
   @override
-  void approve(bool allowed) {
-    calls.add('approve:$allowed');
+  void approve(
+    bool allowed, {
+    bool saveForward = false,
+    String? expectedCallId,
+  }) {
+    calls.add('approve:$allowed:${saveForward ? 1 : 0}:$expectedCallId');
     approved = allowed;
+    approvedSaveForward = saveForward;
+    approvedCallId = expectedCallId;
   }
 
   @override

@@ -1,6 +1,8 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:math' as math;
 
+import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:desktop_drop/desktop_drop.dart';
@@ -146,8 +148,125 @@ class _TerminalAiPanelState extends State<TerminalAiPanel> {
   final _approvalMenu = MenuController();
   bool _historyOpen = false;
   bool _wasRunning = false;
+
+  /// Forward approvals are remembered per pending call id, so every new
+  /// approval starts unchecked. The flag is only sent for
+  /// `create_port_forward` when the user approves.
+  String? _saveForwardPendingId;
+  bool _saveForwardChecked = false;
   AiImageInput get _imageInput =>
       widget.imageInput ?? const NativeAiImageInput();
+
+  bool _isForward(AiToolCall? call) => call?.name == 'create_port_forward';
+
+  /// MCP calls carry their server and tool in a readable command and the tool
+  /// arguments separately; everything else is a local command or tool.
+  bool _isMcp(AiToolCall call) =>
+      call.command.startsWith('MCP') ||
+      call.name.startsWith('mcp__') ||
+      call.name.startsWith('mcp.');
+
+  bool _forwardChecked(AiToolCall call) =>
+      _saveForwardPendingId == call.id && _saveForwardChecked;
+
+  void _setForwardChecked(AiToolCall call, bool value) {
+    setState(() {
+      _saveForwardPendingId = call.id;
+      _saveForwardChecked = value;
+    });
+  }
+
+  /// Sends one approval for the call displayed when the controls were built.
+  /// [pending] is captured by the closure, so a tap that lands after the
+  /// controller moved to another call cannot grant (or stop) that later call.
+  void _approve(AiTaskController task, AiToolCall pending, bool allowed) {
+    final save = allowed && _isForward(pending) && _forwardChecked(pending);
+    if (mounted) {
+      setState(() {
+        _saveForwardPendingId = null;
+        _saveForwardChecked = false;
+      });
+    }
+    task.approve(
+      allowed,
+      saveForward: save,
+      expectedCallId: pending.id,
+    );
+  }
+
+  String _argumentsText(AiToolCall call) {
+    if (call.arguments.isEmpty) return '';
+    try {
+      return const JsonEncoder.withIndent('  ').convert(call.arguments);
+    } catch (_) {
+      return call.arguments.toString();
+    }
+  }
+
+  /// Approval body. MCP calls show the server/tool line and their JSON
+  /// arguments; a forward shows the readable mapping; local commands keep the
+  /// monospace shell presentation.
+  Widget _pendingContent(AiToolCall pending) {
+    final theme = Theme.of(context);
+    final colors = theme.colorScheme;
+    if (_isMcp(pending)) {
+      final arguments = _argumentsText(pending);
+      return Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Row(
+            children: [
+              Icon(Icons.hub_outlined, size: 18, color: colors.primary),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Text(pending.command, style: theme.textTheme.bodyMedium),
+              ),
+            ],
+          ),
+          if (arguments.isNotEmpty) ...[
+            const SizedBox(height: 6),
+            Text('参数', style: theme.textTheme.labelSmall),
+            const SizedBox(height: 2),
+            SelectableText(
+              arguments,
+              style: theme.textTheme.bodySmall?.copyWith(
+                fontFamily: 'monospace',
+              ),
+            ),
+          ],
+        ],
+      );
+    }
+    if (_isForward(pending)) {
+      return Row(
+        children: [
+          Icon(Icons.alt_route_rounded, size: 18, color: colors.primary),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Text(pending.command, style: theme.textTheme.bodyMedium),
+          ),
+        ],
+      );
+    }
+    return SelectableText(
+      pending.command,
+      style: theme.textTheme.bodyMedium?.copyWith(fontFamily: 'monospace'),
+    );
+  }
+
+  Widget _forwardRuleOption(AiToolCall pending) {
+    if (!_isForward(pending)) return const SizedBox.shrink();
+    return CheckboxListTile(
+      key: const ValueKey('ai-save-forward-rule'),
+      value: _forwardChecked(pending),
+      onChanged: (value) => _setForwardChecked(pending, value ?? false),
+      dense: true,
+      contentPadding: EdgeInsets.zero,
+      controlAffinity: ListTileControlAffinity.leading,
+      title: const Text('保存到主机规则'),
+      subtitle: const Text('仅将规则保存到主机列表，AI 每次创建转发仍会单独询问'),
+    );
+  }
 
   void _notice(Object error) {
     if (!mounted) return;
@@ -1038,6 +1157,9 @@ class _TerminalAiPanelState extends State<TerminalAiPanel> {
   }) {
     final colors = Theme.of(context).colorScheme;
     final messages = _messageGroups(task.entries);
+    // Captured for this build: approval closures must target the call the user
+    // is looking at, never whatever the controller holds when the tap lands.
+    final pending = task.pending;
     // A window-mode entry point costs one more title-bar action. On
     // phone-width surfaces the decorative mark yields its slot so the
     // existing history/new/close actions keep their full-size layout and
@@ -1195,32 +1317,25 @@ class _TerminalAiPanelState extends State<TerminalAiPanel> {
                                 ),
                           ),
                         ],
-                        if (task.pending != null) ...[
+                        if (pending != null) ...[
                           const SizedBox(height: 10),
                           Row(
                             children: [
-                              Expanded(child: Text(task.pending!.reason)),
+                              Expanded(child: Text(pending.reason)),
                               _approvalMode(task, compact: compact),
                             ],
                           ),
                           const SizedBox(height: 4),
                           ConstrainedBox(
-                            constraints: const BoxConstraints(maxHeight: 120),
+                            constraints: const BoxConstraints(maxHeight: 160),
                             child: SingleChildScrollView(
                               child: Column(
                                 crossAxisAlignment: CrossAxisAlignment.stretch,
-                                children: [
-                                  SelectableText(
-                                    task.pending!.command,
-                                    style: Theme.of(context)
-                                        .textTheme
-                                        .bodyMedium
-                                        ?.copyWith(fontFamily: 'monospace'),
-                                  ),
-                                ],
+                                children: [_pendingContent(pending)],
                               ),
                             ),
                           ),
+                          _forwardRuleOption(pending),
                           const SizedBox(height: 8),
                           Wrap(
                             alignment: WrapAlignment.end,
@@ -1228,11 +1343,11 @@ class _TerminalAiPanelState extends State<TerminalAiPanel> {
                             runSpacing: 8,
                             children: [
                               TextButton(
-                                onPressed: () => task.approve(false),
+                                onPressed: () => _approve(task, pending, false),
                                 child: const Text('取消'),
                               ),
                               FilledButton.tonal(
-                                onPressed: () => task.approve(true),
+                                onPressed: () => _approve(task, pending, true),
                                 child: const Text('批准并执行'),
                               ),
                             ],
@@ -1948,16 +2063,12 @@ class _TerminalAiPanelState extends State<TerminalAiPanel> {
                   padding: const EdgeInsets.all(12),
                   child: SizedBox(
                     width: double.infinity,
-                    child: SelectableText(
-                      pending.command,
-                      style: theme.textTheme.bodyMedium?.copyWith(
-                        fontFamily: 'monospace',
-                      ),
-                    ),
+                    child: _pendingContent(pending),
                   ),
                 ),
               ),
             ),
+            _forwardRuleOption(pending),
             const SizedBox(height: 12),
             Wrap(
               alignment: WrapAlignment.end,
@@ -1965,11 +2076,11 @@ class _TerminalAiPanelState extends State<TerminalAiPanel> {
               runSpacing: 8,
               children: [
                 TextButton(
-                  onPressed: () => task.approve(false),
+                  onPressed: () => _approve(task, pending, false),
                   child: const Text('取消'),
                 ),
                 FilledButton.tonal(
-                  onPressed: () => task.approve(true),
+                  onPressed: () => _approve(task, pending, true),
                   child: const Text('批准并执行'),
                 ),
               ],
@@ -2212,6 +2323,10 @@ class _AiMessageBubbleState extends State<_AiMessageBubble> {
     final colors = theme.colorScheme;
     final shape = HarborShapes.superellipse(BorderRadius.circular(20));
     final expanded = _expandedTools[entry] ?? false;
+    final isMcp = entry.text.startsWith('MCP');
+    final isForward =
+        entry.text.startsWith('本地') && entry.text.contains('转发');
+    final shell = !isMcp && !isForward;
     return ExpansionTile(
       key: ObjectKey(entry),
       initiallyExpanded: expanded,
@@ -2233,13 +2348,25 @@ class _AiMessageBubbleState extends State<_AiMessageBubble> {
               child: Padding(
                 padding: const EdgeInsets.only(right: 8),
                 child: Icon(
-                  Icons.terminal_rounded,
+                  isMcp
+                      ? Icons.hub_outlined
+                      : isForward
+                      ? Icons.alt_route_rounded
+                      : Icons.terminal_rounded,
                   size: 18,
                   color: colors.primary,
                 ),
               ),
             ),
-            TextSpan(text: entry.reason ?? '执行命令'),
+            TextSpan(
+              text:
+                  entry.reason ??
+                  (isMcp
+                      ? '调用 MCP 工具'
+                      : isForward
+                      ? '本地端口转发'
+                      : '执行命令'),
+            ),
           ],
         ),
         style: theme.textTheme.labelLarge,
@@ -2256,7 +2383,7 @@ class _AiMessageBubbleState extends State<_AiMessageBubble> {
                     maxLines: 1,
                     overflow: TextOverflow.ellipsis,
                     style: theme.textTheme.bodySmall?.copyWith(
-                      fontFamily: 'monospace',
+                      fontFamily: shell ? 'monospace' : null,
                     ),
                   ),
                   const SizedBox(height: 4),
@@ -2268,7 +2395,7 @@ class _AiMessageBubbleState extends State<_AiMessageBubble> {
                     maxLines: 1,
                     overflow: TextOverflow.ellipsis,
                     style: theme.textTheme.bodySmall?.copyWith(
-                      fontFamily: 'monospace',
+                      fontFamily: shell ? 'monospace' : null,
                       color: colors.onSurfaceVariant,
                     ),
                   ),
@@ -2281,7 +2408,7 @@ class _AiMessageBubbleState extends State<_AiMessageBubble> {
           child: SelectableText(
             entry.text,
             style: theme.textTheme.bodyMedium?.copyWith(
-              fontFamily: 'monospace',
+              fontFamily: shell ? 'monospace' : null,
             ),
           ),
         ),
@@ -3187,19 +3314,102 @@ const _aiPanelResizeStep = 16.0;
 /// re-opening the panel, docking it, or crossing the compact breakpoint keeps
 /// the width the user chose.
 class TerminalAiLayout extends StatefulWidget {
-  const TerminalAiLayout({super.key, required this.terminal, this.panel});
+  const TerminalAiLayout({
+    super.key,
+    required this.terminal,
+    this.panel,
+    this.preferredPanelWidth,
+    this.preferenceRevision = 0,
+    this.onPanelWidthChanged,
+  });
 
   final Widget terminal;
   final Widget? panel;
+
+  /// The width the user last settled on, or null while the panel keeps the
+  /// automatic share of the pane. This element only reads it when it mounts
+  /// and when [preferenceRevision] changes, so resizing one pane never resizes
+  /// a sibling that shares the same saved preference.
+  final double? preferredPanelWidth;
+
+  /// Bumped when saved appearance prefs are restored from disk after startup.
+  final int preferenceRevision;
+
+  /// Reports the settled width once a drag ends, a reset runs or an
+  /// accessibility nudge lands; never per pixel.
+  final ValueChanged<double?>? onPanelWidthChanged;
 
   @override
   State<TerminalAiLayout> createState() => _TerminalAiLayoutState();
 }
 
 class _TerminalAiLayoutState extends State<TerminalAiLayout> {
-  /// Width the user dragged to, or null while the panel keeps the automatic
-  /// share of the pane (40%, clamped to 320..440).
+  /// Width the user settled on, or null while the panel keeps the automatic
+  /// share of the pane (40%, clamped to 320..440). The value stays as chosen
+  /// even when the current window clamps it, so widening restores it.
   double? _width;
+  int _revision = 0;
+  bool _dragging = false;
+  bool _dragMoved = false;
+  double _panelLower = _aiPanelMinWidth;
+  double _panelUpper = _aiPanelMaxWidth;
+  int? _activePointer;
+  bool _userResized = false;
+  double _dragAnchor = 0;
+  double _dragDelta = 0;
+  DateTime? _lastTap;
+
+  @override
+  void initState() {
+    super.initState();
+    _width = widget.preferredPanelWidth;
+    _revision = widget.preferenceRevision;
+  }
+
+  @override
+  void didUpdateWidget(TerminalAiLayout oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (widget.preferenceRevision == _revision) return;
+    _revision = widget.preferenceRevision;
+    // A restored preference may arrive after the layout mounted, but not
+    // unless the user is already sizing this panel themselves.
+    if (_dragging || _userResized) return;
+    _width = widget.preferredPanelWidth;
+  }
+
+  /// Tells whoever owns the preference about a settled width, then stops
+  /// adopting later restores that would undo the user's choice.
+  void _settle(double? width) {
+    _userResized = true;
+    widget.onPanelWidthChanged?.call(width);
+  }
+
+  void _trackPointer(PointerEvent event) {
+    if (event.pointer != _activePointer) return;
+    if (event is PointerMoveEvent) {
+      if (event.delta.dx != 0) _dragMoved = true;
+      _dragDelta += event.delta.dx;
+      final next = (_dragAnchor - _dragDelta)
+          .clamp(_panelLower, _panelUpper)
+          .toDouble();
+      if (next != _width) setState(() => _width = next);
+    } else if (event is PointerUpEvent || event is PointerCancelEvent) {
+      GestureBinding.instance.pointerRouter.removeRoute(
+        event.pointer,
+        _trackPointer,
+      );
+      final moved = _dragMoved;
+      _dragging = false;
+      _dragMoved = false;
+      _activePointer = null;
+      if (moved) {
+        _lastTap = null;
+        _settle(_width);
+      } else if (event is PointerUpEvent) {
+        _lastTap = DateTime.now();
+      }
+    }
+  }
 
   @override
   Widget build(BuildContext context) => LayoutBuilder(
@@ -3214,19 +3424,29 @@ class _TerminalAiLayoutState extends State<TerminalAiLayout> {
         maxWidth - _aiPanelHandleWidth - _aiPanelMinTerminalWidth,
       );
       final lower = math.min(_aiPanelMinWidth, upper);
+      _panelLower = lower;
+      _panelUpper = upper;
+      double clampWidth(double width) => width.clamp(lower, upper).toDouble();
+      // The automatic share is only a fallback; a settled width survives a
+      // shrinking window in [_width] and comes back when the window grows.
+      final automaticWidth = (maxWidth * .4).clamp(320.0, 440.0).toDouble();
       final panelWidth = horizontal
-          ? (_width ?? (maxWidth * .4).clamp(320.0, 440.0)).clamp(lower, upper)
+          ? clampWidth(_width ?? automaticWidth)
           : maxWidth;
       final terminalWidth = horizontal && widget.panel != null
           ? maxWidth - panelWidth - _aiPanelHandleWidth
           : maxWidth;
 
-      // Clamping the stored width keeps a drag that overshoots a boundary from
-      // sticking there: dragging back moves the panel on the next delta.
-      void resize(double next) {
-        final clamped = next.clamp(lower, upper);
-        if (clamped == _width) return;
-        setState(() => _width = clamped);
+
+      void nudge(double delta) {
+        final next = clampWidth(panelWidth + delta);
+        if (next != _width) setState(() => _width = next);
+        _settle(next);
+      }
+
+      void reset() {
+        if (_width != null) setState(() => _width = null);
+        _settle(null);
       }
 
       return Stack(
@@ -3263,28 +3483,46 @@ class _TerminalAiLayoutState extends State<TerminalAiLayout> {
                       '${(panelWidth + _aiPanelResizeStep).clamp(lower, upper).round()}',
                   decreasedValue:
                       '${(panelWidth - _aiPanelResizeStep).clamp(lower, upper).round()}',
-                  onIncrease: () => resize(panelWidth + _aiPanelResizeStep),
-                  onDecrease: () => resize(panelWidth - _aiPanelResizeStep),
-                  child: MouseRegion(
-                    cursor: SystemMouseCursors.resizeLeftRight,
-                    child: GestureDetector(
-                      key: const ValueKey('ai-panel-resize-handle'),
-                      behavior: HitTestBehavior.opaque,
-                      // Anchor on the width actually on screen, so a drag that
-                      // starts after a clamp continues from the visible edge.
-                      onHorizontalDragStart: (_) => _width = panelWidth,
-                      // The panel is on the right: dragging left widens it.
-                      onHorizontalDragUpdate: (details) =>
-                          resize((_width ?? panelWidth) - details.delta.dx),
-                      onDoubleTap: () => setState(() => _width = null),
-                      child: Align(
-                        alignment: Alignment.centerRight,
-                        child: SizedBox(
-                          width: 1,
-                          height: double.infinity,
-                          child: ColoredBox(
-                            color: Theme.of(context).colorScheme.outlineVariant,
-                          ),
+                  onIncrease: () => nudge(_aiPanelResizeStep),
+                  onDecrease: () => nudge(-_aiPanelResizeStep),
+                  child: Listener(
+                    key: const ValueKey('ai-panel-resize-handle'),
+                    behavior: HitTestBehavior.opaque,
+                    onPointerDown: (event) {
+                      if (_lastTap != null &&
+                          DateTime.now().difference(_lastTap!) <=
+                              const Duration(milliseconds: 300)) {
+                        _lastTap = null;
+                        if (_activePointer != null) {
+                          GestureBinding.instance.pointerRouter.removeRoute(
+                            _activePointer!,
+                            _trackPointer,
+                          );
+                          _activePointer = null;
+                          _dragging = false;
+                          _dragMoved = false;
+                        }
+                        reset();
+                        return;
+                      }
+                      if (_activePointer != null) return;
+                      _activePointer = event.pointer;
+                      _dragging = true;
+                      _dragMoved = false;
+                      _dragAnchor = panelWidth;
+                      _dragDelta = 0;
+                      GestureBinding.instance.pointerRouter.addRoute(
+                        event.pointer,
+                        _trackPointer,
+                      );
+                    },
+                    child: Align(
+                      alignment: Alignment.centerRight,
+                      child: SizedBox(
+                        width: 1,
+                        height: double.infinity,
+                        child: ColoredBox(
+                          color: Theme.of(context).colorScheme.outlineVariant,
                         ),
                       ),
                     ),
