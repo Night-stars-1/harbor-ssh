@@ -33,3 +33,20 @@ TerminalTheme harborTerminalTheme(ColorScheme colors) {
     searchHitForeground: colors.onTertiaryContainer,
   );
 }
+
+// An empty family or a family that is not installed falls back through the
+// platform monospace fonts, so a typo never renders a proportional font.
+TerminalStyle harborTerminalTextStyle({
+  required double fontSize,
+  String fontFamily = '',
+}) => TerminalStyle(
+  fontSize: fontSize,
+  fontFamily: fontFamily.isEmpty ? 'monospace' : fontFamily,
+  fontFamilyFallback: const [
+    'monospace',
+    'Consolas',
+    'Menlo',
+    'Noto Sans Mono',
+    'Courier New',
+  ],
+);

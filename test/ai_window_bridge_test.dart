@@ -91,7 +91,7 @@ void main() {
     await h.remote.start('列出文件');
     expect(h.task.calls, contains('start:列出文件'));
     h.remote.stop();
-    h.remote.setModel('model-y');
+    await h.remote.setModel('model-y');
     h.remote.setApprovalMode(AiApprovalMode.readOnly);
     h.remote.setAutoApprove(false);
     await h.remote.newConversation();
@@ -330,6 +330,92 @@ void main() {
     expect(
       jsonEncode(h.pushes.last),
       isNot(contains('supplement-never-mirrored')),
+    );
+  });
+
+  test('独立窗口切换模型后回显、保存一次，重开窗口仍用新模型', () async {
+    final persisted = <String>[];
+    final task = AiTaskController(
+      settings: () => const AiSettings(
+        baseUrl: 'https://ai.example.com/v1',
+        apiKey: 'sk-model-persist',
+        model: 'model-x',
+      ),
+      executorFactory: () => throw const AiFailure('no executor'),
+      connected: () => true,
+      clientFactory: () => throw const AiFailure('no client'),
+      persistModel: (model) async => persisted.add(model),
+    );
+    final h = _RealEngineHarness(task);
+    addTearDown(h.dispose);
+    h.host.register('s1', task, '生产服务器', onDock: () => h.docks++);
+    task.entries.add(AiTaskEntry('保留的对话', user: true));
+    task.status = '就绪';
+
+    await h.host.open('s1');
+    await h.remote.initialize();
+    expect(h.remote.activeModel, 'model-x');
+    expect(persisted, isEmpty, reason: '打开窗口不保存任何模型选择');
+
+    await h.remote.setModel('model-y');
+    await h.remote.applied;
+    expect(task.activeModel, 'model-y', reason: '主引擎下一轮将使用新模型');
+    expect(h.remote.activeModel, 'model-y', reason: '选择标签回显新模型');
+    expect(h.remote.settings().model, 'model-y');
+    expect(persisted, ['model-y'], reason: '一次显式选择只保存一次');
+    // The model switch must not disturb anything else in the mirror.
+    expect(h.remote.entries.single.text, '保留的对话');
+    expect(h.remote.status, '就绪');
+    expect(h.remote.settings().baseUrl, 'https://ai.example.com/v1');
+    expect(h.remote.settings().apiKey, isEmpty);
+    expect(jsonEncode(h.pushes.last), isNot(contains('sk-model-persist')));
+
+    // Docking and reattaching starts a fresh child engine from the host
+    // snapshot; the choice must survive without another save.
+    await h.host.handle(
+      const MethodCall('dock', <String, Object?>{'sessionId': 's1'}),
+    );
+    expect(h.host.isDetached('s1'), isFalse);
+    await h.host.open('s1');
+    expect(h.host.isDetached('s1'), isTrue);
+
+    final reopened = RemoteAiTaskController();
+    addTearDown(reopened.dispose);
+    await reopened.initialize();
+    expect(reopened.activeModel, 'model-y', reason: '重开窗口从快照恢复选择');
+    expect(reopened.settings().model, 'model-y');
+    expect(persisted, ['model-y'], reason: '重开窗口不会重复保存');
+  });
+
+  test('模型保存失败在独立窗口提示，不静默当作已保存', () async {
+    final task = AiTaskController(
+      settings: () => const AiSettings(
+        baseUrl: 'https://ai.example.com/v1',
+        apiKey: 'sk-model-failure',
+        model: 'model-x',
+      ),
+      executorFactory: () => throw const AiFailure('no executor'),
+      connected: () => true,
+      clientFactory: () => throw const AiFailure('no client'),
+      persistModel: (model) async => throw const AiFailure('磁盘写入失败'),
+    );
+    final h = _RealEngineHarness(task);
+    addTearDown(h.dispose);
+    h.host.register('s1', task, '生产服务器', onDock: () => h.docks++);
+    await h.host.open('s1');
+    await h.remote.initialize();
+    expect(h.remote.failure, isNull);
+
+    await h.remote.setModel('model-y');
+    await h.remote.applied;
+    expect(task.activeModel, 'model-y', reason: '本次会话仍使用新模型');
+    expect(h.remote.activeModel, 'model-y');
+    expect(task.failure, contains('未能保存'), reason: '保存失败必须记录明确原因');
+    expect(h.remote.failure, contains('未能保存'), reason: '保存失败必须提示，不能静默当作已保存');
+    expect(
+      jsonEncode(h.remote.failure),
+      isNot(contains('sk-model-failure')),
+      reason: '提示不泄露凭据',
     );
   });
 
@@ -1127,11 +1213,7 @@ bash deploy-marzban.sh 1
         'args': <String, Object?>{'turnStartedAt': '2026-10-25T10:00:00.000'},
       }),
     );
-    expect(
-      h.task.stopCount,
-      1,
-      reason: '上一轮的迟到点击不停止已再次 root 的新一轮',
-    );
+    expect(h.task.stopCount, 1, reason: '上一轮的迟到点击不停止已再次 root 的新一轮');
     expect(h.task.running, isTrue);
     expect(h.remote.rootActive, isTrue);
     expect(h.remote.running, isTrue);
@@ -1209,11 +1291,7 @@ bash deploy-marzban.sh 1
         'args': <String, Object?>{'password': secret, 'callId': 'root-9'},
       }),
     );
-    expect(
-      replacement.rootActive,
-      isFalse,
-      reason: '会话重开后旧 generation 不授权',
-    );
+    expect(replacement.rootActive, isFalse, reason: '会话重开后旧 generation 不授权');
     expect(replacement.pending?.id, 'root-9', reason: '重开后的请求保持待确认');
 
     // The password never reaches any mirror payload: status, failure, entries
@@ -1236,9 +1314,7 @@ bash deploy-marzban.sh 1
     );
   });
 
-  testWidgets('真实主引擎下独立窗口拒绝 root 与转发后模型继续，镜像恢复仍可输入', (
-    tester,
-  ) async {
+  testWidgets('真实主引擎下独立窗口拒绝 root 与转发后模型继续，镜像恢复仍可输入', (tester) async {
     tester.view.physicalSize = const Size(1000, 900);
     tester.view.devicePixelRatio = 1;
     addTearDown(tester.view.resetPhysicalSize);
@@ -1283,10 +1359,7 @@ bash deploy-marzban.sh 1
     );
     await tester.pumpAndSettle();
 
-    Future<void> pumpUntil(
-      bool Function() condition, {
-      String? reason,
-    }) async {
+    Future<void> pumpUntil(bool Function() condition, {String? reason}) async {
       for (var attempt = 0; attempt < 800; attempt++) {
         if (condition()) return;
         await tester.pump(const Duration(milliseconds: 5));
@@ -1447,9 +1520,7 @@ bash deploy-marzban.sh 1
     await tester.pumpAndSettle();
     await send('恢复后继续');
     await pumpUntil(
-      () => restored.entries.any(
-        (entry) => entry.text.contains('恢复后仍可继续'),
-      ),
+      () => restored.entries.any((entry) => entry.text.contains('恢复后仍可继续')),
       reason: '恢复后的窗口无法继续对话',
     );
     await pumpUntil(() => !restored.running);
@@ -1593,7 +1664,7 @@ class _TestTask extends AiTaskController {
   }
 
   @override
-  void setModel(String? model) => calls.add('setModel:$model');
+  Future<void> setModel(String? model) async => calls.add('setModel:$model');
 
   @override
   void setApprovalMode(AiApprovalMode mode) {
@@ -1830,10 +1901,7 @@ AiReply _denialForwardReply(String id) => AiReply(
   ],
 );
 
-Map<String, dynamic>? _denialResult(
-  _DenialEngineClient client,
-  String callId,
-) {
+Map<String, dynamic>? _denialResult(_DenialEngineClient client, String callId) {
   for (final request in client.requests) {
     for (final message in request) {
       if (message['role'] != 'tool' || message['tool_call_id'] != callId) {

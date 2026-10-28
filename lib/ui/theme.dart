@@ -464,6 +464,17 @@ ThemeData harborTheme({
         padding: const WidgetStatePropertyAll(EdgeInsets.all(8)),
       ),
     ),
+    dropdownMenuTheme: frosted
+        ? const DropdownMenuThemeData(
+            // Replaces DropdownMenu's default style, so keep its sizing.
+            menuStyle: MenuStyle(
+              padding: WidgetStatePropertyAll(EdgeInsets.zero),
+              minimumSize: WidgetStatePropertyAll(Size(112, 0)),
+              maximumSize: WidgetStatePropertyAll(Size.infinite),
+              visualDensity: VisualDensity.standard,
+            ),
+          )
+        : null,
     menuButtonTheme: MenuButtonThemeData(
       style: ButtonStyle(
         shape: WidgetStatePropertyAll(
@@ -673,6 +684,10 @@ class _HarborPopupMenuBackdropState<T>
 /// The button Material paints its fill before the builder, so the shared
 /// sample would capture (and smear) a highlighted row: row fills are painted
 /// above the blur instead, resolved the way DropdownMenu would.
+///
+/// A blur inside the menu's scroll view never reaches the panel padding, which
+/// would show as an unfrosted frame. Frosted themes zero that padding
+/// ([harborTheme]'s dropdownMenuTheme) and each row carries the inset instead.
 List<DropdownMenuEntry<T>> harborDropdownEntries<T>(
   BuildContext context,
   List<DropdownMenuEntry<T>> entries,
@@ -712,15 +727,18 @@ List<DropdownMenuEntry<T>> harborDropdownEntries<T>(
                 filter: filter,
                 blendMode: HarborSurfaceBlur.blendMode,
                 backdropGroupKey: key,
-                child: fill == null
-                    ? content
-                    : DecoratedBox(
-                        decoration: ShapeDecoration(
-                          color: fill,
-                          shape: shape ?? const RoundedRectangleBorder(),
+                child: Padding(
+                  padding: _frostedMenuRowInset,
+                  child: fill == null
+                      ? content
+                      : DecoratedBox(
+                          decoration: ShapeDecoration(
+                            color: fill,
+                            shape: shape ?? const RoundedRectangleBorder(),
+                          ),
+                          child: content,
                         ),
-                        child: content,
-                      ),
+                ),
               ),
             );
           },
@@ -728,6 +746,10 @@ List<DropdownMenuEntry<T>> harborDropdownEntries<T>(
       ),
   ];
 }
+
+/// Panel padding moved onto frosted dropdown rows: the same horizontal inset
+/// as [MenuThemeData] and the 2px row gap of [HarborPopupMenuItem].
+const _frostedMenuRowInset = EdgeInsets.symmetric(horizontal: 8, vertical: 2);
 
 /// A popup item with the same inset, rounded hover and focus treatment as
 /// [MenuItemButton]. Keep popup and anchored menus visually consistent.

@@ -30,10 +30,12 @@ class TerminalWorkspace extends StatefulWidget {
     required this.onFiles,
     this.onPortForward,
     this.aiSettings,
+    this.persistAiModel,
     this.onAiSettings,
     this.aiHistoryStore,
     this.aiWindow,
     this.fontSize = 14,
+    this.fontFamily = '',
     this.terminalWrap = true,
     this.statusRefreshSeconds = 5,
     this.aiPanelWidth,
@@ -54,10 +56,16 @@ class TerminalWorkspace extends StatefulWidget {
   final ValueChanged<SshConnection> onClose, onFiles;
   final ValueChanged<SshConnection>? onPortForward;
   final AiSettings Function()? aiSettings;
+
+  /// Saves an explicitly chosen assistant model as this machine's model. Also
+  /// used by a controller the workspace creates for the detached window before
+  /// its pane ever opened the panel.
+  final Future<void> Function(String model)? persistAiModel;
   final VoidCallback? onAiSettings;
   final AiConversationStore? aiHistoryStore;
   final AiWindowHost? aiWindow;
   final double fontSize;
+  final String fontFamily;
   final bool terminalWrap;
   final int statusRefreshSeconds;
 
@@ -194,6 +202,7 @@ class _TerminalWorkspaceState extends State<TerminalWorkspace> {
         connected: () => session.status == ConnectionStatus.connected,
         historyStore: historyStore,
         historyScope: historyScope,
+        persistModel: widget.persistAiModel,
       );
       // The pane is not mounted yet. Park the slot as the detached, open
       // panel so docking or switching away can restore it in the main window;
@@ -206,6 +215,7 @@ class _TerminalWorkspaceState extends State<TerminalWorkspace> {
         settings: settings,
         executorFactory: () => session.createAiExecutor(),
         connected: () => session.status == ConnectionStatus.connected,
+        persistModel: widget.persistAiModel,
       );
       host.register(
         id,
@@ -346,9 +356,8 @@ class _TerminalWorkspaceState extends State<TerminalWorkspace> {
           _sessions.keys.where((id) => !_slots.contains(id)).firstOrNull,
         );
         final used = _layout.splits.map((split) => split.id).toSet();
-        final id = Iterable<int>.generate(
-          used.length + 1,
-        ).firstWhere((value) => !used.contains(value));
+        final id = Iterable<int>.generate(used.length + 1)
+            .firstWhere((value) => !used.contains(value));
         _root = _layout.replace(
           side,
           _TerminalSplit(
@@ -534,6 +543,7 @@ class _TerminalWorkspaceState extends State<TerminalWorkspace> {
                   key: _keys.putIfAbsent(session.id, GlobalKey.new),
                   session: session,
                   aiSettings: widget.aiSettings,
+                  persistAiModel: widget.persistAiModel,
                   onAiSettings: widget.onAiSettings,
                   aiHistoryStore: widget.aiHistoryStore,
                   aiWindow: widget.aiWindow,
@@ -552,6 +562,7 @@ class _TerminalWorkspaceState extends State<TerminalWorkspace> {
                       widget.visible && (widget.desktop || side == _focused),
                   maxErrorHeight: (height - 160).clamp(0, 180),
                   fontSize: widget.fontSize,
+                  fontFamily: widget.fontFamily,
                   terminalWrap: widget.terminalWrap,
                   statusRefreshSeconds: widget.statusRefreshSeconds,
                   onFocused: () {

@@ -296,11 +296,7 @@ class _TerminalAiPanelState extends State<TerminalAiPanel> {
         '仅支持非交互 sudo -S',
         '免密 sudo 可留空。服务器强制 requiretty、MFA 或交互式 PAM 时无法提权。',
       ),
-      (
-        Icons.timer_off_rounded,
-        '结束后自动撤销',
-        '本轮完成、取消或点击“结束提权并停止”后立即撤销，不会留到下一轮。',
-      ),
+      (Icons.timer_off_rounded, '结束后自动撤销', '本轮完成、取消或点击“结束提权并停止”后立即撤销，不会留到下一轮。'),
     ];
     return Column(
       key: const ValueKey('ai-root-scope'),
@@ -1221,9 +1217,12 @@ class _TerminalAiPanelState extends State<TerminalAiPanel> {
                             : Icons.circle_outlined,
                         size: 18,
                       ),
-                      onPressed: () {
-                        task.setModel(model);
+                      onPressed: () async {
+                        // The choice is saved before this action reports
+                        // success; a failed save leaves a visible message
+                        // instead of silently pretending it stuck.
                         _modelMenu.close();
+                        await task.setModel(model);
                       },
                       child: Text(model, overflow: TextOverflow.ellipsis),
                     ),
@@ -3740,6 +3739,7 @@ const _aiPanelResizeStep = 16.0;
 /// The split width lives here for the life of the element, so closing and
 /// re-opening the panel, docking it, or crossing the compact breakpoint keeps
 /// the width the user chose.
+/// The desktop divider uses a horizontal-resize cursor over its full grab area.
 class TerminalAiLayout extends StatefulWidget {
   const TerminalAiLayout({
     super.key,
@@ -3911,44 +3911,47 @@ class _TerminalAiLayoutState extends State<TerminalAiLayout> {
                       '${(panelWidth - _aiPanelResizeStep).clamp(lower, upper).round()}',
                   onIncrease: () => nudge(_aiPanelResizeStep),
                   onDecrease: () => nudge(-_aiPanelResizeStep),
-                  child: Listener(
-                    key: const ValueKey('ai-panel-resize-handle'),
-                    behavior: HitTestBehavior.opaque,
-                    onPointerDown: (event) {
-                      if (_lastTap != null &&
-                          DateTime.now().difference(_lastTap!) <=
-                              const Duration(milliseconds: 300)) {
-                        _lastTap = null;
-                        if (_activePointer != null) {
-                          GestureBinding.instance.pointerRouter.removeRoute(
-                            _activePointer!,
-                            _trackPointer,
-                          );
-                          _activePointer = null;
-                          _dragging = false;
-                          _dragMoved = false;
+                  child: MouseRegion(
+                    cursor: SystemMouseCursors.resizeLeftRight,
+                    child: Listener(
+                      key: const ValueKey('ai-panel-resize-handle'),
+                      behavior: HitTestBehavior.opaque,
+                      onPointerDown: (event) {
+                        if (_lastTap != null &&
+                            DateTime.now().difference(_lastTap!) <=
+                                const Duration(milliseconds: 300)) {
+                          _lastTap = null;
+                          if (_activePointer != null) {
+                            GestureBinding.instance.pointerRouter.removeRoute(
+                              _activePointer!,
+                              _trackPointer,
+                            );
+                            _activePointer = null;
+                            _dragging = false;
+                            _dragMoved = false;
+                          }
+                          reset();
+                          return;
                         }
-                        reset();
-                        return;
-                      }
-                      if (_activePointer != null) return;
-                      _activePointer = event.pointer;
-                      _dragging = true;
-                      _dragMoved = false;
-                      _dragAnchor = panelWidth;
-                      _dragDelta = 0;
-                      GestureBinding.instance.pointerRouter.addRoute(
-                        event.pointer,
-                        _trackPointer,
-                      );
-                    },
-                    child: Align(
-                      alignment: Alignment.centerRight,
-                      child: SizedBox(
-                        width: 1,
-                        height: double.infinity,
-                        child: ColoredBox(
-                          color: Theme.of(context).colorScheme.outlineVariant,
+                        if (_activePointer != null) return;
+                        _activePointer = event.pointer;
+                        _dragging = true;
+                        _dragMoved = false;
+                        _dragAnchor = panelWidth;
+                        _dragDelta = 0;
+                        GestureBinding.instance.pointerRouter.addRoute(
+                          event.pointer,
+                          _trackPointer,
+                        );
+                      },
+                      child: Align(
+                        alignment: Alignment.centerRight,
+                        child: SizedBox(
+                          width: 1,
+                          height: double.infinity,
+                          child: ColoredBox(
+                            color: Theme.of(context).colorScheme.outlineVariant,
+                          ),
                         ),
                       ),
                     ),

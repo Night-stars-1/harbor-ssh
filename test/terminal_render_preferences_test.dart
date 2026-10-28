@@ -18,17 +18,21 @@ void main() {
       ..status = ConnectionStatus.connected;
     addTearDown(session.dispose);
 
-    Widget app({required double fontSize, required Brightness brightness}) =>
-        MaterialApp(
-          theme: harborTheme(brightness: brightness),
-          home: Scaffold(
-            body: TerminalPane(
-              session: session,
-              onReconnect: () {},
-              fontSize: fontSize,
-            ),
-          ),
-        );
+    Widget app({
+      required double fontSize,
+      required Brightness brightness,
+      String fontFamily = '',
+    }) => MaterialApp(
+      theme: harborTheme(brightness: brightness),
+      home: Scaffold(
+        body: TerminalPane(
+          session: session,
+          onReconnect: () {},
+          fontSize: fontSize,
+          fontFamily: fontFamily,
+        ),
+      ),
+    );
 
     await tester.pumpWidget(app(fontSize: 14, brightness: Brightness.light));
     session.terminal.write('ready\r\n');
@@ -36,6 +40,7 @@ void main() {
     final state = tester.state<TerminalViewState>(find.byType(TerminalView));
     final initialCellSize = state.renderTerminal.cellSize;
     final initialBackground = state.widget.theme.background;
+    expect(state.widget.textStyle.fontFamily, 'monospace');
     expect(initialBackground, harborTheme().colorScheme.surfaceContainerLowest);
 
     final mouse = TestGesture(
@@ -71,6 +76,20 @@ void main() {
           .surfaceContainerLowest,
     );
     expect(state.widget.theme.background, isNot(initialBackground));
+
+    final style = state.widget.textStyle;
+    await tester.pumpWidget(
+      app(
+        fontSize: 18,
+        brightness: Brightness.dark,
+        fontFamily: 'Cascadia Mono',
+      ),
+    );
+    await tester.pumpAndSettle();
+    expect(state.widget.textStyle.fontFamily, 'Cascadia Mono');
+    expect(state.widget.textStyle.fontSize, 18);
+    expect(state.widget.textStyle.fontFamilyFallback.first, 'monospace');
+    expect(state.widget.textStyle, isNot(same(style)));
 
     await mouse.removePointer();
     await tester.pumpAndSettle();

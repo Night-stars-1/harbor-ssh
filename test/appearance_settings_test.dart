@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:harbor_ssh/data/sync_storage.dart';
+import 'package:harbor_ssh/data/system_fonts.dart';
 import 'package:harbor_ssh/domain/appearance.dart';
 import 'package:harbor_ssh/ui/app.dart';
 import 'package:harbor_ssh/ui/settings_window_bridge.dart';
@@ -50,16 +51,29 @@ void main() {
     restored.dispose();
   });
 
-  test('默认终端字号独立保存，非法值回退且不进入云同步', () async {
+  test('默认终端字号和字体独立保存，非法值回退且不进入云同步', () async {
     final repository = memoryRepository();
     final model = WorkspaceModel(repository);
     await model.initialize();
     await model.saveAppearance(
-      const AppearancePreferences(terminalFontSize: 18),
+      const AppearancePreferences(terminalFontSize: 18)
+          .copyWith(terminalFontFamily: '  JetBrains Mono  '),
     );
     final restored = WorkspaceModel(repository);
     await restored.initialize();
     expect(restored.appearance.value.terminalFontSize, 18);
+    expect(restored.appearance.value.terminalFontFamily, 'JetBrains Mono');
+    expect(AppearancePreferences.fromJson({}).terminalFontFamily, '');
+    expect(
+      AppearancePreferences.fromJson({'terminalFontFamily': 12})
+          .terminalFontFamily,
+      '',
+    );
+    expect(
+      AppearancePreferences.fromJson({'terminalFontFamily': 'x' * 101})
+          .terminalFontFamily,
+      '',
+    );
     expect(
       AppearancePreferences.fromJson({'terminalFontSize': 4}).terminalFontSize,
       10,
@@ -72,6 +86,7 @@ void main() {
     expect(AppearancePreferences.fromJson({}).terminalFontSize, 14);
     final snapshot = await SyncStorage(repository).capture();
     expect(snapshot.encode(), isNot(contains('terminalFontSize')));
+    expect(snapshot.encode(), isNot(contains('JetBrains')));
     model.dispose();
     restored.dispose();
   });
@@ -280,7 +295,7 @@ void main() {
   }
 
   for (final acrylicEnabled in [false, true]) {
-    testWidgets('外观设置可修改自动换行、状态刷新和 KDE 原生模糊，模糊 $acrylicEnabled', (
+    testWidgets('外观设置可选择系统等宽字体并修改自动换行、状态刷新和 KDE 原生模糊，模糊 $acrylicEnabled', (
       tester,
     ) async {
       tester.view.physicalSize = const Size(1280, 900);
@@ -290,6 +305,18 @@ void main() {
       debugDefaultTargetPlatformOverride = TargetPlatform.linux;
       addTearDown(() => debugDefaultTargetPlatformOverride = null);
       mockDesktopWindow(tester);
+      tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+        systemFontsChannel,
+        (call) async => call.method == 'monospaceFamilies'
+            ? ['Fira Code', ' Cascadia Mono', 'consolas', 'Fira Code', '']
+            : null,
+      );
+      addTearDown(
+        () => tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+          systemFontsChannel,
+          null,
+        ),
+      );
       final supported = windowAcrylicSupported;
       windowAcrylicSupported = true;
       addTearDown(() => windowAcrylicSupported = supported);
@@ -356,6 +383,88 @@ void main() {
       await tester.tap(find.text('10 秒').last);
       await tester.pumpAndSettle();
       expect(model.appearance.value.statusRefreshSeconds, 10);
+      final family = find.byKey(const ValueKey('terminal-font-family'));
+      final field = find.descendant(
+        of: family,
+        matching: find.byType(TextField),
+      );
+      await tester.ensureVisible(family);
+      await tester.tap(field);
+      await tester.pumpAndSettle();
+      // DropdownMenu also lays out an invisible copy to measure its width.
+      final entries = find.byType(MenuItemButton).hitTestable();
+      Finder entry(String label) =>
+          find.widgetWithText(MenuItemButton, label).hitTestable();
+      Finder selectedMark(String label) => find.descendant(
+        of: entry(label),
+        matching: find.byIcon(Icons.check_rounded),
+      );
+      List<String> listed() => [
+        for (final element in entries.evaluate())
+          tester
+              .widget<Text>(
+                find
+                    .descendant(
+                      of: find.byWidget(element.widget),
+                      matching: find.byType(Text),
+                    )
+                    .first,
+              )
+              .data!,
+      ];
+      expect(listed(), ['系统等宽字体', 'Cascadia Mono', 'consolas', 'Fira Code']);
+      expect(selectedMark('系统等宽字体'), findsOneWidget);
+      expect(selectedMark('Fira Code'), findsNothing);
+      await tester.enterText(field, 'fira');
+      await tester.pumpAndSettle();
+      expect(listed(), ['系统等宽字体', 'Fira Code']);
+      await tester.tap(entry('Fira Code'));
+      await tester.pumpAndSettle();
+      expect(model.appearance.value.terminalFontFamily, 'Fira Code');
+      expect(entries, findsNothing);
+      expect(
+        tester
+            .widget<Text>(find.byKey(const ValueKey('terminal-font-preview')))
+            .style
+            ?.fontFamily,
+        'Fira Code',
+      );
+      await tester.tap(field);
+      await tester.pumpAndSettle();
+      expect(listed(), hasLength(4));
+      expect(selectedMark('Fira Code'), findsOneWidget);
+      expect(selectedMark('系统等宽字体'), findsNothing);
+      // Keyboard highlight is not a committed selection.
+      await tester.sendKeyEvent(LogicalKeyboardKey.arrowDown);
+      await tester.pumpAndSettle();
+      expect(selectedMark('Fira Code'), findsOneWidget);
+      expect(model.appearance.value.terminalFontFamily, 'Fira Code');
+      await tester.tap(entry('Fira Code'));
+      await tester.pumpAndSettle();
+      await tester.tap(field);
+      await tester.pumpAndSettle();
+      await tester.enterText(field, ' JetBrains Mono ');
+      await tester.testTextInput.receiveAction(TextInputAction.done);
+      await tester.pumpAndSettle();
+      expect(model.appearance.value.terminalFontFamily, 'JetBrains Mono');
+      await tester.tap(field);
+      await tester.pumpAndSettle();
+      await tester.enterText(field, 'Iosevka');
+      await tester.tapAt(const Offset(4, 4));
+      await tester.pumpAndSettle();
+      expect(model.appearance.value.terminalFontFamily, 'Iosevka');
+      await tester.tap(field);
+      await tester.pumpAndSettle();
+      await tester.tap(entry('系统等宽字体'));
+      await tester.pumpAndSettle();
+      expect(model.appearance.value.terminalFontFamily, isEmpty);
+      expect(tester.widget<TextField>(field).controller?.text, isEmpty);
+      await tester.tap(field);
+      await tester.pumpAndSettle();
+      expect(selectedMark('系统等宽字体'), findsOneWidget);
+      expect(selectedMark('Fira Code'), findsNothing);
+      await tester.sendKeyEvent(LogicalKeyboardKey.escape);
+      await tester.pumpAndSettle();
       expect(tester.takeException(), isNull);
       await tester.pumpWidget(const SizedBox.shrink());
       debugDefaultTargetPlatformOverride = null;

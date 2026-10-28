@@ -627,10 +627,7 @@ class _DetachedSession {
             // The raw error is never rethrown: an exception raised while a
             // password is in flight may quote the credential or the SSH prompt
             // that produced it.
-            throw PlatformException(
-              code: 'ai',
-              message: '提权未完成，请重试',
-            );
+            throw PlatformException(code: 'ai', message: '提权未完成，请重试');
           }
         case AiWindowOp.endRoot:
           // The only endRoot the panel offers is the root banner, so a turn
@@ -650,7 +647,9 @@ class _DetachedSession {
           }
           task.endRoot();
         case AiWindowOp.setModel:
-          task.setModel(arguments['model'] as String?);
+          // Persisting the choice is part of the action: the reply must not
+          // report a saved model before the write actually finished.
+          await task.setModel(arguments['model'] as String?);
         case AiWindowOp.setReasoningEffort:
           task.setReasoningEffort(_reasoningFrom(arguments['effort']));
         case AiWindowOp.setApprovalMode:
@@ -780,6 +779,7 @@ class _DetachedSession {
       'turnStartedAt': task.turnStartedAt?.toIso8601String(),
       'settings': _publicSettings(
         task.settings(),
+        model: task.activeModel,
         reasoningEffort: task.reasoningEffort,
       ),
       'appearance': host.appearance().toJson(),
@@ -880,16 +880,18 @@ AiReasoningEffort _reasoningFrom(Object? value) {
 /// needs neither to render or approve a tool call.
 Map<String, Object?> _publicSettings(
   AiSettings settings, {
+  String? model,
   AiReasoningEffort? reasoningEffort,
 }) => <String, Object?>{
   'baseUrl': settings.baseUrl,
-  'model': settings.model,
+  // Session override first: the mirrored window must show what will be sent.
+  'model': model ?? settings.model,
   'protocol': (settings.protocol ?? AiProtocol.openai).name,
   'provider': settings.provider ?? 'custom',
   'approvalModel': settings.approvalModel,
   'approvalProvider': settings.approvalProvider,
   'defaultApprovalMode': settings.defaultApprovalMode.name,
-  // Session override first: the mirrored window must show what will be sent.
+  // Effort override, same as the model above.
   'reasoningEffort': (reasoningEffort ?? settings.reasoningEffort).name,
 };
 
@@ -1191,9 +1193,9 @@ class RemoteAiTaskController extends AiTaskController
   }
 
   @override
-  void setModel(String? model) {
+  Future<void> setModel(String? model) async {
     if (_disposed) return;
-    unawaited(_forward(AiWindowOp.setModel, <String, Object?>{'model': model}));
+    await _forward(AiWindowOp.setModel, <String, Object?>{'model': model});
   }
 
   @override

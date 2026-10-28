@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
+import 'package:flutter/gestures.dart';
 import 'package:flutter/services.dart';
 
 import 'package:flutter/material.dart';
@@ -621,6 +622,13 @@ void main() {
     final handle = find.byKey(const ValueKey('ai-panel-resize-handle'));
     final panel = find.byType(TerminalAiPanel);
     final input = find.byKey(const ValueKey('ai-task-input'));
+    final mouse = TestGesture(
+      dispatcher: tester.sendEventToBinding,
+      kind: PointerDeviceKind.mouse,
+      device: 7,
+    );
+    await mouse.addPointer(location: Offset.zero);
+    addTearDown(mouse.removePointer);
     double panelWidth() => tester.getSize(panel).width;
     double handleLeft() => tester.getTopLeft(handle).dx;
     void expectPreserved() {
@@ -634,7 +642,12 @@ void main() {
     }
 
     Future<void> dragBy(double dx) async {
-      await tester.drag(handle, Offset(dx, 0));
+      final start = tester.getCenter(handle);
+      await mouse.moveTo(start);
+      await tester.pump();
+      await mouse.down(start);
+      await mouse.moveBy(Offset(dx, 0));
+      await mouse.up();
       await tester.pumpAndSettle();
       expectPreserved();
     }
@@ -655,6 +668,30 @@ void main() {
     await tester.enterText(input, '检查磁盘');
     await tester.pumpAndSettle();
     expectPreserved();
+
+    // The entire grab area, including the visible line at its right edge,
+    // advertises horizontal resizing; neither adjacent pane inherits it.
+    final grabArea = tester.getRect(handle);
+    for (final x in [
+      grabArea.left + 1,
+      grabArea.center.dx,
+      grabArea.right - 1,
+    ]) {
+      await mouse.moveTo(Offset(x, grabArea.center.dy));
+      await tester.pump();
+      expect(
+        tester.binding.mouseTracker.debugDeviceActiveCursor(7),
+        SystemMouseCursors.resizeLeftRight,
+      );
+    }
+    for (final x in [grabArea.left - 4, grabArea.right + 4]) {
+      await mouse.moveTo(Offset(x, grabArea.center.dy));
+      await tester.pump();
+      expect(
+        tester.binding.mouseTracker.debugDeviceActiveCursor(7),
+        isNot(SystemMouseCursors.resizeLeftRight),
+      );
+    }
 
     // Dragging right narrows the panel; it stops where the composer is still
     // usable, not at zero.
@@ -1365,6 +1402,68 @@ void main() {
     expect(tester.takeException(), isNull);
     await tester.pumpWidget(const SizedBox.shrink());
     task.dispose();
+  });
+
+  testWidgets('模型菜单选择保存到本机，失败时面板提示未保存且保留其他 AI 字段', (tester) async {
+    tester.view.devicePixelRatio = 1;
+    tester.view.physicalSize = const Size(1280, 900);
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    final repository = memoryRepository();
+    final model = WorkspaceModel(repository);
+    addTearDown(model.dispose);
+    await model.initialize();
+    const saved = AiSettings(
+      baseUrl: 'https://ai.example.com/v1',
+      model: 'model-a',
+      systemPrompt: '只读运行',
+    );
+    await model.saveAiSettings(saved);
+    final task = AiTaskController(
+      settings: () => model.aiSettings,
+      executorFactory: _RecordingExecutor.new,
+      connected: () => true,
+      clientFactory: _RefreshClient.new,
+      persistModel: model.saveAiModel,
+    );
+    addTearDown(task.dispose);
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: harborTheme(),
+        home: Scaffold(
+          body: TerminalAiPanel(task: task, hostName: '开发服务器'),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+    Future<void> choose(String name) async {
+      await tester.tap(find.byKey(const ValueKey('ai-model-picker')));
+      await tester.pumpAndSettle();
+      await tester.tap(find.widgetWithText(MenuItemButton, name).hitTestable());
+      await tester.pumpAndSettle();
+    }
+
+    // 存储失败：面板必须说明没有保存，本机会话仍用所选模型。
+    (repository.secrets as MemoryStore).failWrites = true;
+    await choose('model-b');
+    expect(task.activeModel, 'model-b');
+    expect(find.textContaining('未能保存'), findsWidgets);
+    expect(model.aiSettings.model, 'model-a');
+    expect(model.aiSettings.systemPrompt, '只读运行');
+
+    // 存储恢复后再选一次：提示清除，本机配置换模型并保留其他字段。
+    (repository.secrets as MemoryStore).failWrites = false;
+    await choose('model-b');
+    expect(find.textContaining('未能保存'), findsNothing);
+    expect(model.aiSettings.model, 'model-b');
+    expect(model.aiSettings.systemPrompt, '只读运行');
+    expect(model.aiSettings.baseUrl, saved.baseUrl);
+    final reloaded = WorkspaceModel(repository);
+    addTearDown(reloaded.dispose);
+    await reloaded.initialize();
+    expect(reloaded.aiSettings.model, 'model-b');
+    expect(tester.takeException(), isNull);
+    await tester.pumpWidget(const SizedBox.shrink());
   });
 }
 

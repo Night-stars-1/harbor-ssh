@@ -66,12 +66,19 @@ class AiTaskController extends ChangeNotifier {
     this.historyStore,
     this.historyScope,
     AiApprovalMode? approvalMode,
+    this.persistModel,
   }) : clientFactory = clientFactory ?? TerminalAiClient.new,
        approvalMode = approvalMode ?? settings().defaultApprovalMode;
   final AiSettings Function() settings;
   final AiCommandExecutor Function() executorFactory;
   final bool Function() connected;
   final TerminalAiClient Function() clientFactory;
+
+  /// Saves an explicitly chosen model as this machine's model, so a new
+  /// session or a restart starts from it. Null keeps every choice
+  /// session-scoped; the panel and the detached window then only change the
+  /// current session.
+  final Future<void> Function(String model)? persistModel;
 
   /// Local encrypted history. When null (or [historyScope] is null) the
   /// controller never touches platform storage.
@@ -102,6 +109,14 @@ class AiTaskController extends ChangeNotifier {
   final _unresolved = <String, AiTaskEntry?>{};
   String? _contextModel;
   String? _modelOverride;
+
+  /// Message of the last failed model save, so a later success clears only its
+  /// own error and never an unrelated turn failure.
+  String? _modelSaveFailure;
+
+  /// Serial of the newest model save; an older completion must not overwrite
+  /// the state of a newer selection.
+  int _modelSaveSerial = 0;
   AiReasoningEffort? _reasoningOverride;
   DateTime? turnStartedAt;
   AiApprovalMode approvalMode;
@@ -306,13 +321,14 @@ class AiTaskController extends ChangeNotifier {
   }
 
   static String _toolReason(Object error) {
-    final text = (error is FormatException
-            ? error.message
-            : error.toString().replaceFirst(
-                RegExp(r'^(Bad state: |Exception: |FormatException: )'),
-                '',
-              ))
-        .replaceAll(RegExp(r'[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]'), ' ');
+    final text =
+        (error is FormatException
+                ? error.message
+                : error.toString().replaceFirst(
+                    RegExp(r'^(Bad state: |Exception: |FormatException: )'),
+                    '',
+                  ))
+            .replaceAll(RegExp(r'[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]'), ' ');
     return text.length <= 300 ? text : '${text.substring(0, 300)}…';
   }
 
@@ -382,9 +398,9 @@ class AiTaskController extends ChangeNotifier {
       for (final entry in turn.mcpClients.entries)
         () async {
           try {
-            final tools = await entry.value
-                .listTools()
-                .timeout(const Duration(seconds: 20));
+            final tools = await entry.value.listTools().timeout(
+              const Duration(seconds: 20),
+            );
             return (entry.key, tools, null);
           } catch (error) {
             return (entry.key, const <McpTool>[], _toolReason(error));
@@ -511,7 +527,8 @@ class AiTaskController extends ChangeNotifier {
         'output': '',
         'exitCode': null,
         'error': '用户拒绝执行，未执行',
-        'note': '用户明确拒绝了该请求；不要声称已经完成，也不要换用其他工具、命令或'
+        'note':
+            '用户明确拒绝了该请求；不要声称已经完成，也不要换用其他工具、命令或'
             '权限方式绕过。除非用户明确重新要求，不要再次申请同一操作。',
       }),
     });
@@ -536,15 +553,44 @@ class AiTaskController extends ChangeNotifier {
     return effective;
   }
 
-  void setModel(String? model) {
+  /// Applies [model] to this session and, for an explicit non-empty choice,
+  /// saves it through [persistModel] so the next session or restart starts
+  /// from it.
+  ///
+  /// Refused while a turn is running. A failed save never looks successful:
+  /// the choice stays active for this session, [failure] states that it was
+  /// not saved, and the stored settings keep their previous model and every
+  /// other field.
+  Future<void> setModel(String? model) async {
     if (running || _disposed) return;
     final next = model?.trim();
     _modelOverride = next == null || next.isEmpty ? null : next;
     _notify();
+    if (next == null || next.isEmpty) return;
+    final persist = persistModel;
+    if (persist == null) return;
+    final serial = ++_modelSaveSerial;
+    try {
+      await persist(next);
+      // A newer choice owns the state now, and a disposed controller must not
+      // touch its listeners.
+      if (_disposed || serial != _modelSaveSerial) return;
+      if (failure == _modelSaveFailure) failure = null;
+      _modelSaveFailure = null;
+      _notify();
+    } catch (_) {
+      if (_disposed || serial != _modelSaveSerial) return;
+      final saved = settings().model.trim();
+      _modelSaveFailure = saved.isEmpty
+          ? '模型已切换，但未能保存，重启后需要重新选择'
+          : '模型已切换，但未能保存，重启后仍为「$saved」';
+      failure = _modelSaveFailure;
+      _notify();
+    }
   }
 
-  /// Session-scoped, exactly like [setModel]: refused while a turn is running
-  /// and kept for the next conversation of this session.
+  /// Session-scoped: refused while a turn is running and kept for the next
+  /// conversation of this session, unlike [setModel] it is never saved.
   void setReasoningEffort(AiReasoningEffort effort) {
     if (running || _disposed) return;
     _reasoningOverride = effort == settings().reasoningEffort ? null : effort;
@@ -908,6 +954,9 @@ class AiTaskController extends ChangeNotifier {
     return trimmed.length <= 40 ? trimmed : '${trimmed.substring(0, 40)}…';
   }
 
+  /// Model of a restored conversation, for this session only. Opening history
+  /// never rewrites the saved machine model: the restored conversation keeps
+  /// its own model, while new conversations still start from the saved one.
   String? _restoredModelOverride(AiConversation conversation) {
     final model = conversation.model.trim();
     if (model.isEmpty || model == settings().model) return null;
@@ -1437,7 +1486,8 @@ class AiTaskController extends ChangeNotifier {
                 'search_text',
                 'system_info',
               ].contains(call.name);
-          final forwardUnavailable = isForward && executor is! AiSessionExecutor;
+          final forwardUnavailable =
+              isForward && executor is! AiSessionExecutor;
           final rootUnavailable = isRoot && executor is! AiPrivilegeExecutor;
           final rootInvalid = isRoot && !_rootArgumentsValid(call.arguments);
           final unknownTool =
@@ -1544,12 +1594,7 @@ class AiTaskController extends ChangeNotifier {
           if (isForward) {
             final session = executor;
             if (session is! AiSessionExecutor) {
-              _completeToolFailure(
-                entry,
-                call,
-                messages,
-                '当前会话不支持端口转发',
-              );
+              _completeToolFailure(entry, call, messages, '当前会话不支持端口转发');
               continue;
             }
             try {
@@ -1614,9 +1659,7 @@ class AiTaskController extends ChangeNotifier {
               final encoded = jsonEncode(result);
               const limit = 64000;
               final truncated = encoded.length > limit;
-              final raw = truncated
-                  ? encoded.substring(0, limit)
-                  : encoded;
+              final raw = truncated ? encoded.substring(0, limit) : encoded;
               final isError = result['isError'] == true;
               entry.output = truncated ? '$raw\n…输出已截断' : raw;
               if (isError) entry.interruption = 'MCP 工具返回错误';

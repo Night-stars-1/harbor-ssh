@@ -97,7 +97,7 @@ void main() {
       connected: () => true,
       clientFactory: () => client,
     );
-    task.setModel('alternate-model');
+    await task.setModel('alternate-model');
     task.setAutoApprove(true);
     expect(task.activeModel, 'alternate-model');
     await task.start('检查目录');
@@ -654,6 +654,143 @@ void main() {
     model.dispose();
   });
 
+  test('任务运行中无法切换模型，也不会写入本机配置', () async {
+    final repository = memoryRepository();
+    final model = WorkspaceModel(repository);
+    addTearDown(model.dispose);
+    await model.initialize();
+    await model.saveAiSettings(_settings);
+    final task = AiTaskController(
+      settings: () => model.aiSettings,
+      executorFactory: _Executor.new,
+      connected: () => true,
+      persistModel: model.saveAiModel,
+    );
+    addTearDown(task.dispose);
+    task.running = true;
+    await task.setModel('blocked-model');
+    expect(task.activeModel, _settings.model);
+    expect(model.aiSettings.toJson(), _settings.toJson());
+    task.running = false;
+  });
+
+  test('选择新模型保存到本机，重建工作区和控制器后仍沿用', () async {
+    final repository = memoryRepository();
+    final model = WorkspaceModel(repository);
+    addTearDown(model.dispose);
+    await model.initialize();
+    const saved = AiSettings(
+      baseUrl: 'https://ai.example.com/v1',
+      apiKey: 'test-key',
+      model: 'old-model',
+      approvalModel: 'approval-model',
+      systemPrompt: '只读运行',
+      reasoningEffort: AiReasoningEffort.high,
+    );
+    await model.saveAiSettings(saved);
+    final task = AiTaskController(
+      settings: () => model.aiSettings,
+      executorFactory: _Executor.new,
+      connected: () => true,
+      persistModel: model.saveAiModel,
+    );
+    addTearDown(task.dispose);
+
+    await task.setModel('new-model');
+    expect(task.activeModel, 'new-model');
+    expect(task.failure, isNull, reason: '保存成功不留下失败提示');
+    expect(model.aiSettings.model, 'new-model');
+    // 只换模型：审批模型、提示词、地址与密钥都保持原值。
+    expect(model.aiSettings.baseUrl, saved.baseUrl);
+    expect(model.aiSettings.apiKey, saved.apiKey);
+    expect(model.aiSettings.approvalModel, saved.approvalModel);
+    expect(model.aiSettings.systemPrompt, saved.systemPrompt);
+    expect(model.aiSettings.reasoningEffort, AiReasoningEffort.high);
+
+    // 重启后：新的 WorkspaceModel 与新的会话控制器都从新模型开始。
+    final reloaded = WorkspaceModel(repository);
+    addTearDown(reloaded.dispose);
+    await reloaded.initialize();
+    expect(reloaded.aiSettings.model, 'new-model');
+    expect(reloaded.aiSettings.toJson(), model.aiSettings.toJson());
+    final next = AiTaskController(
+      settings: () => reloaded.aiSettings,
+      executorFactory: _Executor.new,
+      connected: () => true,
+      persistModel: reloaded.saveAiModel,
+    );
+    addTearDown(next.dispose);
+    expect(next.activeModel, 'new-model');
+  });
+
+  test('保存模型失败时明确提示未保存，旧模型与其他字段保持原值', () async {
+    final repository = memoryRepository();
+    final model = WorkspaceModel(repository);
+    addTearDown(model.dispose);
+    await model.initialize();
+    const saved = AiSettings(
+      baseUrl: 'https://ai.example.com/v1',
+      apiKey: 'test-key',
+      model: 'old-model',
+      systemPrompt: '只读运行',
+    );
+    await model.saveAiSettings(saved);
+    final task = AiTaskController(
+      settings: () => model.aiSettings,
+      executorFactory: _Executor.new,
+      connected: () => true,
+      persistModel: model.saveAiModel,
+    );
+    addTearDown(task.dispose);
+
+    (repository.secrets as MemoryStore).failWrites = true;
+    await task.setModel('new-model');
+    expect(task.activeModel, 'new-model', reason: '本会话仍使用所选模型');
+    expect(task.failure, contains('未能保存'));
+    expect(task.failure, contains('old-model'));
+    expect(model.aiSettings.toJson(), saved.toJson());
+    final reloaded = WorkspaceModel(repository);
+    addTearDown(reloaded.dispose);
+    await reloaded.initialize();
+    expect(reloaded.aiSettings.model, 'old-model');
+
+    // 存储恢复后再次选择：写入成功，失败提示清除。
+    (repository.secrets as MemoryStore).failWrites = false;
+    await task.setModel('new-model');
+    expect(task.failure, isNull, reason: '成功保存清除这条失败提示');
+    expect(model.aiSettings.model, 'new-model');
+    expect(model.aiSettings.systemPrompt, saved.systemPrompt);
+  });
+
+  test('连续快速选择按顺序写入，最终配置为最后一次选择', () async {
+    final repository = memoryRepository();
+    final model = WorkspaceModel(repository);
+    addTearDown(model.dispose);
+    await model.initialize();
+    await model.saveAiSettings(_settings);
+    final task = AiTaskController(
+      settings: () => model.aiSettings,
+      executorFactory: _Executor.new,
+      connected: () => true,
+      persistModel: model.saveAiModel,
+    );
+    addTearDown(task.dispose);
+
+    await Future.wait([
+      task.setModel('model-a'),
+      task.setModel('model-b'),
+      task.setModel('model-c'),
+    ]);
+    expect(task.activeModel, 'model-c');
+    expect(model.aiSettings.model, 'model-c');
+    expect(model.aiSettings.apiKey, _settings.apiKey);
+    final reloaded = WorkspaceModel(repository);
+    addTearDown(reloaded.dispose);
+    await reloaded.initialize();
+    expect(reloaded.aiSettings.model, 'model-c');
+    expect(reloaded.aiSettings.toJson(), model.aiSettings.toJson());
+  });
+
   test('工具调用往返：实际命令输出与退出码返回模型，再完成任务', () async {
     final client = _Client()..replies.addAll([_call('df -h'), _done]);
     final executor = _Executor()..exitCode = 1;
@@ -776,9 +913,7 @@ void main() {
     const total = rounds * batch;
     String command(int index) => 'echo step-$index';
     AiReply batchCall(int round) {
-      final indexes = [
-        for (var i = 0; i < batch; i++) round * batch + i,
-      ];
+      final indexes = [for (var i = 0; i < batch; i++) round * batch + i];
       return AiReply(
         {
           'role': 'assistant',
@@ -801,12 +936,7 @@ void main() {
         },
         [
           for (final index in indexes)
-            AiToolCall(
-              'call-$index',
-              command(index),
-              '顺序检查',
-              false,
-            ),
+            AiToolCall('call-$index', command(index), '顺序检查', false),
         ],
       );
     }
@@ -831,9 +961,7 @@ void main() {
     expect(task.running, isFalse);
     expect(task.status, '已完成');
     expect(task.entries.last.text, '检查完成');
-    expect(executor.commands, [
-      for (var i = 0; i < total; i++) command(i),
-    ]);
+    expect(executor.commands, [for (var i = 0; i < total; i++) command(i)]);
     final executed = task.entries.where((entry) => entry.command).toList();
     expect(executed, hasLength(total));
     expect(executed.every((entry) => entry.finished), isTrue);
@@ -1030,9 +1158,7 @@ void main() {
       if (requests == 1) {
         // Headers and one SSE chunk go out, then the socket is cut before
         // the chunked body ends, like a gateway reset mid-reply.
-        final socket = await request.response.detachSocket(
-          writeHeaders: false,
-        );
+        final socket = await request.response.detachSocket(writeHeaders: false);
         final chunk = utf8.encode(
           'data: {"choices":[{"delta":{"content":"半截"}}]}\n\n',
         );

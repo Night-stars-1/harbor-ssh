@@ -22,6 +22,7 @@ class AppearancePreferences {
     this.mode = AppThemeMode.system,
     this.color = AppThemeColor.defaultColor,
     this.terminalFontSize = 14,
+    this.terminalFontFamily = '',
     this.terminalWrap = true,
     this.statusRefreshSeconds = 5,
     this.titleBarNavigation = false,
@@ -35,6 +36,12 @@ class AppearancePreferences {
   final AppThemeMode mode;
   final AppThemeColor color;
   final int terminalFontSize;
+
+  /// Installed font family the terminal draws with; empty uses the platform
+  /// monospace font. Missing families fall back through the built-in
+  /// monospace list. Stored only on this device.
+  final String terminalFontFamily;
+  static const int maxTerminalFontFamilyLength = 100;
 
   /// Width the AI side panel was last dragged (or nudged) to, or null while
   /// the panel keeps its automatic share of the terminal pane. Stored only on
@@ -92,6 +99,7 @@ class AppearancePreferences {
     AppThemeMode? mode,
     AppThemeColor? color,
     int? terminalFontSize,
+    String? terminalFontFamily,
     bool? terminalWrap,
     int? statusRefreshSeconds,
     bool? titleBarNavigation,
@@ -106,6 +114,9 @@ class AppearancePreferences {
     mode: mode ?? this.mode,
     color: color ?? this.color,
     terminalFontSize: terminalFontSize ?? this.terminalFontSize,
+    terminalFontFamily: terminalFontFamily == null
+        ? this.terminalFontFamily
+        : _fontFamily(terminalFontFamily),
     terminalWrap: terminalWrap ?? this.terminalWrap,
     statusRefreshSeconds: statusRefreshSeconds ?? this.statusRefreshSeconds,
     titleBarNavigation: titleBarNavigation ?? this.titleBarNavigation,
@@ -124,6 +135,7 @@ class AppearancePreferences {
     'mode': mode.name,
     'color': color.name,
     'terminalFontSize': terminalFontSize,
+    if (terminalFontFamily.isNotEmpty) 'terminalFontFamily': terminalFontFamily,
     'terminalWrap': terminalWrap,
     'statusRefreshSeconds': statusRefreshSeconds,
     'titleBarNavigation': titleBarNavigation,
@@ -151,6 +163,7 @@ class AppearancePreferences {
             .firstOrNull ??
         AppThemeColor.defaultColor,
     terminalFontSize: _fontSize(json['terminalFontSize']),
+    terminalFontFamily: _fontFamily(json['terminalFontFamily']),
     terminalWrap: json['terminalWrap'] != false,
     statusRefreshSeconds: _statusRefreshSeconds(json['statusRefreshSeconds']),
     titleBarNavigation: json['titleBarNavigation'] == true,
@@ -166,6 +179,12 @@ class AppearancePreferences {
   static int _fontSize(Object? value) {
     final size = value is num ? value.round() : int.tryParse('$value');
     return size == null ? 14 : size.clamp(10, 24).toInt();
+  }
+
+  static String _fontFamily(Object? value) {
+    if (value is! String) return '';
+    final family = value.trim();
+    return family.length > maxTerminalFontFamilyLength ? '' : family;
   }
 
   static double? _aiPanelWidth(Object? value) {

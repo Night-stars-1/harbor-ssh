@@ -39,10 +39,12 @@ class TerminalPane extends StatefulWidget {
     this.onFocused,
     this.maxErrorHeight = 180,
     this.fontSize = 14,
+    this.fontFamily = '',
     this.terminalWrap = true,
     this.statusRefreshSeconds = 5,
     this.statusVisible = true,
     this.aiSettings,
+    this.persistAiModel,
     this.onAiSettings,
     this.aiHistoryStore,
     this.aiWindow,
@@ -65,6 +67,9 @@ class TerminalPane extends StatefulWidget {
   final VoidCallback? onFocused;
   final double maxErrorHeight;
   final double fontSize;
+
+  /// Preferred terminal font family; empty uses the platform monospace font.
+  final String fontFamily;
   final bool terminalWrap;
   final int statusRefreshSeconds;
 
@@ -72,6 +77,11 @@ class TerminalPane extends StatefulWidget {
   /// hide the status strip without losing the terminal buffer.
   final bool statusVisible;
   final AiSettings Function()? aiSettings;
+
+  /// Saves an explicitly chosen assistant model as this machine's model, so
+  /// the next session or a restart starts from it. Null keeps the choice
+  /// session-scoped.
+  final Future<void> Function(String model)? persistAiModel;
   final VoidCallback? onAiSettings;
   final AiConversationStore? aiHistoryStore;
   final AiWindowHost? aiWindow;
@@ -129,6 +139,7 @@ class _TerminalPaneState extends State<TerminalPane> {
         connected: () => widget.session.status == ConnectionStatus.connected,
         historyStore: historyStore,
         historyScope: historyScope,
+        persistModel: widget.persistAiModel,
       );
     } else {
       // Closures capture the session object, not this State: the controller
@@ -140,6 +151,7 @@ class _TerminalPaneState extends State<TerminalPane> {
         connected: () => session.status == ConnectionStatus.connected,
         historyStore: historyStore,
         historyScope: historyScope,
+        persistModel: widget.persistAiModel,
       );
     }
     _registerAi();
@@ -154,6 +166,7 @@ class _TerminalPaneState extends State<TerminalPane> {
       settings: widget.aiSettings,
       executorFactory: () => session.createAiExecutor(),
       connected: () => session.status == ConnectionStatus.connected,
+      persistModel: widget.persistAiModel,
     );
     if (restored == null) return;
     _ai = restored.task;
@@ -171,6 +184,7 @@ class _TerminalPaneState extends State<TerminalPane> {
       settings: widget.aiSettings,
       executorFactory: () => session.createAiExecutor(),
       connected: () => session.status == ConnectionStatus.connected,
+      persistModel: widget.persistAiModel,
     );
   }
 
@@ -183,6 +197,7 @@ class _TerminalPaneState extends State<TerminalPane> {
     required AiWindowHost? host,
     required VoidCallback? onSettings,
     required AiSettings Function()? settings,
+    required Future<void> Function(String model)? persistModel,
   }) {
     final task = _ai;
     if (task != null && retention != null && retention.keeps(session.id)) {
@@ -194,6 +209,7 @@ class _TerminalPaneState extends State<TerminalPane> {
         settings: settings,
         executorFactory: () => session.createAiExecutor(),
         connected: () => session.status == ConnectionStatus.connected,
+        persistModel: persistModel,
       );
       host?.register(
         session.id,
@@ -302,10 +318,11 @@ class _TerminalPaneState extends State<TerminalPane> {
   // Both classes carry no value equality, so a freshly built instance clears
   // the painter's paragraph cache even when nothing visual changed. Reuse the
   // same instances across hover, completion and output rebuilds and only
-  // rebuild them when the actual colors or font size change.
+  // rebuild them when the actual colors or font change.
   TerminalTheme? _cachedTerminalTheme;
   ColorScheme? _cachedTerminalColors;
   TerminalStyle? _cachedTerminalTextStyle;
+  String? _cachedTerminalFontFamily;
 
   late double _fontSize = widget.fontSize.clamp(10, 24).toDouble();
   PointerDownEvent? _linkDown;
@@ -573,6 +590,7 @@ class _TerminalPaneState extends State<TerminalPane> {
         host: oldWidget.aiWindow,
         onSettings: oldWidget.onAiSettings,
         settings: oldWidget.aiSettings,
+        persistModel: oldWidget.persistAiModel,
       );
       _claimAi();
       _completion?.dispose();
@@ -635,6 +653,7 @@ class _TerminalPaneState extends State<TerminalPane> {
       host: widget.aiWindow,
       onSettings: widget.onAiSettings,
       settings: widget.aiSettings,
+      persistModel: widget.persistAiModel,
     );
     _focus.removeListener(_completionChanged);
     _scrollController.removeListener(_queueCompletionGeometry);
@@ -697,16 +716,15 @@ class _TerminalPaneState extends State<TerminalPane> {
 
   TerminalStyle get _terminalTextStyle {
     final cached = _cachedTerminalTextStyle;
-    if (cached != null && cached.fontSize == _fontSize) return cached;
-    return _cachedTerminalTextStyle = TerminalStyle(
+    if (cached != null &&
+        cached.fontSize == _fontSize &&
+        _cachedTerminalFontFamily == widget.fontFamily) {
+      return cached;
+    }
+    _cachedTerminalFontFamily = widget.fontFamily;
+    return _cachedTerminalTextStyle = harborTerminalTextStyle(
       fontSize: _fontSize,
-      fontFamily: 'monospace',
-      fontFamilyFallback: const [
-        'Consolas',
-        'Menlo',
-        'Noto Sans Mono',
-        'Courier New',
-      ],
+      fontFamily: widget.fontFamily,
     );
   }
 
@@ -1192,6 +1210,7 @@ class TerminalAiRetention {
     required bool Function() connected,
     required AiConversationStore? historyStore,
     required String? historyScope,
+    required Future<void> Function(String model)? persistModel,
   }) {
     final existing = _slots[sessionId];
     if (existing != null) {
@@ -1200,17 +1219,24 @@ class TerminalAiRetention {
         settings: settings,
         executorFactory: executorFactory,
         connected: connected,
+        persistModel: persistModel,
       );
       return existing.task;
     }
     final hook = _AiHook()
       ..settings = settings
       ..executorFactory = executorFactory
-      ..connected = connected;
+      ..connected = connected
+      ..persistModel = persistModel;
     final task = AiTaskController(
       settings: () => hook.settings!(),
       executorFactory: () => hook.executorFactory!(),
       connected: () => hook.connected!(),
+      // Resolved per choice, so rebinding the slot (a resumed workspace or a
+      // rebuilt pane) re-points persistence without recreating the task.
+      persistModel: persistModel == null
+          ? null
+          : (model) => hook.persistModel!(model),
       historyStore: historyStore,
       historyScope: historyScope,
     );
@@ -1225,6 +1251,7 @@ class TerminalAiRetention {
     required AiSettings Function()? settings,
     required AiCommandExecutor Function() executorFactory,
     required bool Function() connected,
+    required Future<void> Function(String model)? persistModel,
   }) {
     final slot = _slots[sessionId];
     if (slot == null) return null;
@@ -1235,6 +1262,7 @@ class TerminalAiRetention {
       settings: settings,
       executorFactory: executorFactory,
       connected: connected,
+      persistModel: persistModel,
     );
     return (task: slot.task, open: slot.open, detached: slot.detached);
   }
@@ -1244,12 +1272,16 @@ class TerminalAiRetention {
     required AiSettings Function()? settings,
     required AiCommandExecutor Function() executorFactory,
     required bool Function() connected,
+    required Future<void> Function(String model)? persistModel,
   }) {
     final slot = _slots[sessionId];
     if (slot == null) return;
     if (settings != null) slot.hook.settings = settings;
     slot.hook.executorFactory = executorFactory;
     slot.hook.connected = connected;
+    // A pane without a persistence hook keeps the one this slot already had.
+    final persist = persistModel;
+    if (persist != null) slot.hook.persistModel = persist;
   }
 
   void park(
@@ -1260,6 +1292,7 @@ class TerminalAiRetention {
     required AiSettings Function()? settings,
     required AiCommandExecutor Function() executorFactory,
     required bool Function() connected,
+    required Future<void> Function(String model)? persistModel,
   }) {
     final slot = _slots[sessionId];
     if (slot == null) return;
@@ -1272,6 +1305,7 @@ class TerminalAiRetention {
       settings: settings,
       executorFactory: executorFactory,
       connected: connected,
+      persistModel: persistModel,
     );
     slot.watch(session);
   }
@@ -1303,6 +1337,10 @@ class _AiHook {
   AiSettings Function()? settings;
   AiCommandExecutor Function()? executorFactory;
   bool Function()? connected;
+
+  /// Saves an explicitly chosen model for later sessions. Null only in panes
+  /// that offer no persistence (tests, previews).
+  Future<void> Function(String model)? persistModel;
 }
 
 class _RetainedAi {

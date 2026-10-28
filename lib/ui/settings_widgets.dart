@@ -120,14 +120,18 @@ class SettingsRow extends StatelessWidget {
     this.description,
     required this.control,
     this.inline = false,
+    this.padding = const EdgeInsets.all(16),
   });
   final String title;
   final String? description;
   final Widget control;
   final bool inline;
+
+  /// Insets around the label and control; defaults to the standard settings row.
+  final EdgeInsetsGeometry padding;
   @override
   Widget build(BuildContext context) => Padding(
-    padding: const EdgeInsets.all(16),
+    padding: padding,
     child: LayoutBuilder(
       builder: (context, constraints) {
         final label = Column(

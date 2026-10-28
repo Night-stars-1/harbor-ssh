@@ -29,6 +29,7 @@ class AiSettingsPage extends StatefulWidget {
 }
 
 class _AiSettingsPageState extends State<AiSettingsPage> {
+  late AiSettings _savedSettings;
   late final _url = TextEditingController(
     text: widget.controller.aiSettings.baseUrl,
   );
@@ -41,6 +42,7 @@ class _AiSettingsPageState extends State<AiSettingsPage> {
   late final _approvalModel = TextEditingController(
     text: widget.controller.aiSettings.approvalModel,
   );
+
   /// User supplement appended to the built-in prompt. Page-scoped, so changing
   /// the provider (which swaps every credential draft) never touches it.
   late final _prompt = TextEditingController(
@@ -101,8 +103,6 @@ class _AiSettingsPageState extends State<AiSettingsPage> {
     });
   }
 
-
-
   void _closeMenusLater() {
     _closeMenus();
     WidgetsBinding.instance.addPostFrameCallback((_) {
@@ -110,9 +110,12 @@ class _AiSettingsPageState extends State<AiSettingsPage> {
       _closeMenus();
     });
   }
+
   @override
   void initState() {
     super.initState();
+    _savedSettings = widget.controller.aiSettings;
+    widget.controller.addListener(_syncSavedModel);
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted) return;
       _model.addListener(_collapseModelMenu);
@@ -145,6 +148,37 @@ class _AiSettingsPageState extends State<AiSettingsPage> {
       provider: _provider,
       reasoningEffort: widget.controller.aiSettings.reasoningEffort,
     );
+  }
+
+  @override
+  void didUpdateWidget(AiSettingsPage oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.controller != widget.controller) {
+      oldWidget.controller.removeListener(_syncSavedModel);
+      widget.controller.addListener(_syncSavedModel);
+      _syncSavedModel();
+    }
+  }
+
+  // Panel model picks are saved immediately. Adopt them in untouched fields
+  // so a long-lived settings window cannot write the old model back later.
+  // Deliberate, unsaved edits in this form still belong to the user.
+  void _syncSavedModel() {
+    final previous = _savedSettings;
+    final next = _savedSettings = widget.controller.aiSettings;
+    final provider = next.provider ?? 'custom';
+    if (provider != (previous.provider ?? 'custom') ||
+        next.model == previous.model) {
+      return;
+    }
+    final draft = _drafts[provider];
+    if (draft != null && draft.model.trim() == previous.model.trim()) {
+      _drafts[provider] = _copyDraft(draft, model: next.model);
+    }
+    if (_modelProvider == provider &&
+        _model.text.trim() == previous.model.trim()) {
+      _model.text = next.model;
+    }
   }
 
   AiSettings _copyDraft(
@@ -337,6 +371,7 @@ class _AiSettingsPageState extends State<AiSettingsPage> {
 
   @override
   void dispose() {
+    widget.controller.removeListener(_syncSavedModel);
     _modelsRevision++;
     _modelsClient?.cancel();
     _url.dispose();

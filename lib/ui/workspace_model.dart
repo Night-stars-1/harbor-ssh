@@ -35,11 +35,29 @@ class WorkspaceModel extends ChangeNotifier {
   Future<void> _aiWrite = Future.value();
 
   Future<void> saveAiSettings(AiSettings settings) {
+    // Rejects an unusable address before anything is written.
     settings.modelsEndpoint;
+    return _writeAiSettings((_) => settings);
+  }
+
+  /// Saves only the model of the stored AI settings, so the model a panel
+  /// chose survives the session. Every other field keeps its current value:
+  /// the update is computed when the queued write runs, never from a stale
+  /// snapshot taken by the caller.
+  Future<void> saveAiModel(String model) =>
+      _writeAiSettings((current) => current.withModel(model));
+
+  /// One serial queue for every AI write: writes land in call order, and a
+  /// failed write leaves [aiSettings] at the last value that was actually
+  /// stored.
+  Future<void> _writeAiSettings(
+    AiSettings Function(AiSettings current) update,
+  ) {
     final operation = _aiWrite.then((_) async {
-      await repository.secrets.write(_aiKey, jsonEncode(settings.toJson()));
+      final next = update(aiSettings);
+      await repository.secrets.write(_aiKey, jsonEncode(next.toJson()));
       if (_disposed) return;
-      aiSettings = settings;
+      aiSettings = next;
       _notify();
     });
     _aiWrite = operation.catchError((Object _) {});

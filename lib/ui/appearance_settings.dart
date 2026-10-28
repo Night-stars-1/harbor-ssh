@@ -1,8 +1,13 @@
-import 'package:flutter/material.dart';
+import 'dart:async';
 
+import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
+
+import '../data/system_fonts.dart';
 import '../domain/appearance.dart';
 import 'settings_widgets.dart';
 import 'sync_settings_controller.dart';
+import 'terminal_theme.dart';
 import 'theme.dart';
 import 'system_color_scope.dart';
 import 'window_frame.dart';
@@ -17,6 +22,93 @@ class AppearanceSettings extends StatefulWidget {
 
 class _AppearanceSettingsState extends State<AppearanceSettings> {
   bool _saving = false;
+  late final _fontFamily = TextEditingController(
+    text: widget.controller.appearance.terminalFontFamily,
+  );
+  final _fontFamilyFocus = FocusNode();
+  final _fontMenu = MenuController();
+  // Set when a menu entry was chosen, so the blur that the click caused does
+  // not save the half-typed filter text over it.
+  bool _fontPicked = false;
+  List<String> _systemFonts = const [];
+
+  @override
+  void initState() {
+    super.initState();
+    widget.controller.addListener(_syncFontFamily);
+    _fontFamilyFocus.addListener(() {
+      if (_fontFamilyFocus.hasFocus) {
+        _fontPicked = false;
+      } else {
+        _saveFontFamilyOnBlur();
+      }
+    });
+    SystemFonts.monospaceFamilies().then((fonts) {
+      if (mounted) setState(() => _systemFonts = fonts);
+    });
+  }
+
+  // The saved family lists every font so the user can browse; typing filters.
+  // The empty value (system monospace) always stays reachable.
+  List<DropdownMenuEntry<String>> _fontEntries(
+    List<DropdownMenuEntry<String>> entries,
+    String query,
+  ) {
+    final text = query.trim().toLowerCase();
+    if (text.isEmpty ||
+        text == widget.controller.appearance.terminalFontFamily.toLowerCase()) {
+      return entries;
+    }
+    return [
+      for (final entry in entries)
+        if (entry.value.isEmpty || entry.label.toLowerCase().contains(text))
+          entry,
+    ];
+  }
+
+  @override
+  void dispose() {
+    widget.controller.removeListener(_syncFontFamily);
+    _fontFamily.dispose();
+    _fontFamilyFocus.dispose();
+    super.dispose();
+  }
+
+  // Another window may change the preference; never overwrite text the user
+  // is still typing.
+  void _syncFontFamily() {
+    final saved = widget.controller.appearance.terminalFontFamily;
+    if (!_fontFamilyFocus.hasFocus && _fontFamily.text != saved) {
+      _fontFamily.text = saved;
+    }
+  }
+
+  void _saveFontFamily(String value) {
+    final appearance = widget.controller.appearance;
+    final family = value.trim();
+    if (_fontFamily.text != family) _fontFamily.text = family;
+    if (_saving || family == appearance.terminalFontFamily) return;
+    _save(appearance.copyWith(terminalFontFamily: family));
+  }
+
+  // Clicking an entry blurs the field on pointer down but reports the choice
+  // from a post-frame callback after the menu closes. Wait for the close, then
+  // let that frame's callbacks run before treating the blur as "keep the
+  // typed name".
+  void _saveFontFamilyOnBlur() {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      if (_fontMenu.isOpen) {
+        _saveFontFamilyOnBlur();
+        return;
+      }
+      scheduleMicrotask(() {
+        if (mounted && !_fontPicked && !_fontFamilyFocus.hasFocus) {
+          _saveFontFamily(_fontFamily.text);
+        }
+      });
+    });
+  }
 
   Future<void> _save(AppearancePreferences value) async {
     setState(() => _saving = true);
@@ -233,6 +325,113 @@ class _AppearanceSettingsState extends State<AppearanceSettings> {
                   ],
                 ),
               ),
+              Padding(
+                padding: const EdgeInsets.all(16),
+                child: Text(
+                  'user@harbor:~\$ ls -la  0O 1lI {}[]',
+                  key: const ValueKey('terminal-font-preview'),
+                  style: harborTerminalTextStyle(
+                    fontSize: appearance.terminalFontSize.toDouble(),
+                    fontFamily: appearance.terminalFontFamily,
+                  ).toTextStyle(color: colors.onSurface),
+                ),
+              ),
+              SettingsRow(
+                title: '字体',
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 16,
+                  vertical: 8,
+                ),
+                control: LayoutBuilder(
+                  builder: (context, constraints) => DropdownMenu<String>(
+                    key: const ValueKey('terminal-font-family'),
+                    width: constraints.maxWidth,
+                    controller: _fontFamily,
+                    focusNode: _fontFamilyFocus,
+                    menuController: _fontMenu,
+                    enabled: !_saving,
+                    requestFocusOnTap: true,
+                    enableSearch: false,
+                    enableFilter: true,
+                    filterCallback: _fontEntries,
+                    textStyle: theme.textTheme.bodyLarge,
+                    inputDecorationTheme: theme.inputDecorationTheme.copyWith(
+                      isDense: true,
+                      contentPadding: const EdgeInsets.symmetric(
+                        horizontal: 16,
+                        vertical: 8,
+                      ),
+                      constraints: const BoxConstraints(minHeight: 48),
+                    ),
+                    inputFormatters: [
+                      LengthLimitingTextInputFormatter(
+                        AppearancePreferences.maxTerminalFontFamilyLength,
+                      ),
+                    ],
+                    textInputAction: TextInputAction.done,
+                    decorationBuilder: (context, menu) => InputDecoration(
+                      hintText: '系统等宽字体',
+                      // Keep the 48px button without DropdownMenu's extra
+                      // 4px top/bottom padding around its default arrow.
+                      suffixIcon: IconButton(
+                        isSelected: menu.isOpen,
+                        icon: const Icon(Icons.expand_more_rounded),
+                        selectedIcon: const Icon(Icons.expand_less_rounded),
+                        onPressed: _saving
+                            ? null
+                            : () => menu.isOpen ? menu.close() : menu.open(),
+                      ),
+                    ),
+                    alignmentOffset: const Offset(0, 4),
+                    menuHeight: 320,
+                    dropdownMenuEntries: harborDropdownEntries(context, [
+                      for (final font in ['', ..._systemFonts])
+                        DropdownMenuEntry(
+                          value: font,
+                          label: font.isEmpty ? '系统等宽字体' : font,
+                          trailingIcon: font == appearance.terminalFontFamily
+                              ? const Icon(Icons.check_rounded, size: 20)
+                              : null,
+                          // Each name renders in its own face as a preview.
+                          labelWidget: Text(
+                            font.isEmpty ? '系统等宽字体' : font,
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: harborTerminalTextStyle(
+                              fontSize:
+                                  theme.textTheme.bodyLarge?.fontSize ?? 16,
+                              fontFamily: font,
+                            ).toTextStyle(),
+                          ),
+                          style: MenuItemButton.styleFrom(
+                            minimumSize: const Size(0, 48),
+                            padding: const EdgeInsets.symmetric(
+                              horizontal: 12,
+                              vertical: 8,
+                            ),
+                            shape: HarborShapes.superellipse(
+                              const BorderRadius.all(HarborShapes.sm),
+                            ),
+                            backgroundColor:
+                                font == appearance.terminalFontFamily
+                                ? colors.secondaryContainer
+                                : null,
+                            foregroundColor:
+                                font == appearance.terminalFontFamily
+                                ? colors.onSecondaryContainer
+                                : colors.onSurface,
+                            textStyle: theme.textTheme.bodyLarge,
+                          ),
+                        ),
+                    ]),
+                    // Null means Enter on typed text without a chosen entry.
+                    onSelected: (font) {
+                      if (font != null) _fontPicked = true;
+                      _saveFontFamily(font ?? _fontFamily.text);
+                    },
+                  ),
+                ),
+              ),
               SettingsRow(
                 title: '自动换行',
                 description: '关闭后长行保持在同一行，可横向滚动。只保存在本机',
@@ -253,10 +452,30 @@ class _AppearanceSettingsState extends State<AppearanceSettings> {
                 control: DropdownMenu<int>(
                   key: const ValueKey('status-refresh-interval'),
                   initialSelection: appearance.statusRefreshSeconds,
-                  width: 104,
+                  width: 120,
                   selectOnly: true,
                   enableSearch: false,
                   enabled: !_saving,
+                  textStyle: theme.textTheme.bodyLarge,
+                  inputDecorationTheme: theme.inputDecorationTheme.copyWith(
+                    isDense: true,
+                    contentPadding: const EdgeInsets.symmetric(
+                      horizontal: 16,
+                      vertical: 8,
+                    ),
+                    constraints: const BoxConstraints(minHeight: 48),
+                  ),
+                  decorationBuilder: (context, menu) => InputDecoration(
+                    suffixIcon: IconButton(
+                      isSelected: menu.isOpen,
+                      icon: const Icon(Icons.expand_more_rounded),
+                      selectedIcon: const Icon(Icons.expand_less_rounded),
+                      onPressed: _saving
+                          ? null
+                          : () => menu.isOpen ? menu.close() : menu.open(),
+                    ),
+                  ),
+                  alignmentOffset: const Offset(0, 4),
                   onSelected: (seconds) {
                     if (seconds != null &&
                         seconds != appearance.statusRefreshSeconds) {

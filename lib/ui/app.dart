@@ -1505,6 +1505,7 @@ class _WorkspaceState extends State<Workspace> {
                                           child: TerminalWorkspace(
                                             sessions: model.sessions,
                                             aiSettings: () => model.aiSettings,
+                                            persistAiModel: model.saveAiModel,
                                             aiHistoryStore:
                                                 model.aiHistoryStore,
                                             aiWindow: widget.aiWindow,
@@ -1531,6 +1532,10 @@ class _WorkspaceState extends State<Workspace> {
                                                 .value
                                                 .terminalFontSize
                                                 .toDouble(),
+                                            fontFamily: model
+                                                .appearance
+                                                .value
+                                                .terminalFontFamily,
                                             terminalWrap: model
                                                 .appearance
                                                 .value

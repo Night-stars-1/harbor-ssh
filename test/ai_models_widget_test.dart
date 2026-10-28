@@ -82,6 +82,72 @@ void main() {
     });
   }
 
+  testWidgets('面板保存的新模型更新未编辑设置，旧窗口保存不回滚且保留主动编辑', (tester) async {
+    tester.view.physicalSize = const Size(1280, 1400);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    final repository = memoryRepository();
+    final model = WorkspaceModel(repository);
+    await model.initialize();
+    await model.saveAiSettings(
+      const AiSettings(
+        provider: 'custom',
+        baseUrl: 'https://example.com/v1',
+        apiKey: 'test-key',
+        model: 'old-model',
+        approvalModel: 'approval-model',
+      ),
+    );
+    final controller = LocalSyncSettingsController(model);
+    addTearDown(controller.dispose);
+    addTearDown(model.dispose);
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: harborTheme(),
+        home: Scaffold(body: AiSettingsPage(controller: controller)),
+      ),
+    );
+    await tester.pumpAndSettle();
+    final field = find.byKey(const ValueKey('ai-setting-model'));
+    String displayedModel() =>
+        tester.widget<DropdownMenu<String>>(field).controller!.text;
+    Future<void> saveForm() async {
+      final save = find.widgetWithText(FilledButton, '保存');
+      await tester.ensureVisible(save);
+      await tester.pumpAndSettle();
+      await tester.tap(save);
+      await tester.pumpAndSettle();
+    }
+
+    // The settings page remains mounted while the panel persists a new choice.
+    await model.saveAiModel('panel-model');
+    await tester.pumpAndSettle();
+    expect(displayedModel(), 'panel-model');
+    await saveForm();
+    final restored = WorkspaceModel(repository);
+    await restored.initialize();
+    expect(restored.aiSettings.model, 'panel-model');
+    expect(restored.aiSettings.approvalModel, 'approval-model');
+    expect(restored.aiSettings.apiKey, 'test-key');
+    restored.dispose();
+
+    // Explicit user edits are not replaced by another panel's later selection.
+    await tester.ensureVisible(field);
+    await tester.enterText(field, 'draft-model');
+    await model.saveAiModel('panel-newer');
+    await tester.pumpAndSettle();
+    expect(displayedModel(), 'draft-model');
+    expect(model.aiSettings.model, 'panel-newer');
+    await saveForm();
+    final edited = WorkspaceModel(repository);
+    await edited.initialize();
+    expect(edited.aiSettings.model, 'draft-model');
+    expect(edited.aiSettings.approvalModel, 'approval-model');
+    edited.dispose();
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
+
   testWidgets('地址更改取消旧请求，迟到列表不会进入新配置', (tester) async {
     final model = WorkspaceModel(memoryRepository());
     await model.initialize();
@@ -184,7 +250,6 @@ void main() {
     controller.dispose();
     model.dispose();
   });
-
 }
 
 class _ModelsClient extends TerminalAiClient {

@@ -13,6 +13,7 @@ private final class WindowBackdropView: NSVisualEffectView {
 class MainFlutterWindow: NSWindow {
   private var localPathsChannel: FlutterMethodChannel?
   private var windowEffectChannel: FlutterMethodChannel?
+  private var systemFontsChannel: FlutterMethodChannel?
   private weak var flutterViewController: FlutterViewController?
   private let backdrop = WindowBackdropView()
   private var scopedDirectories: [String: (url: URL, started: Bool)] = [:]
@@ -62,6 +63,24 @@ class MainFlutterWindow: NSWindow {
       self?.handleWindowEffectCall(call, result: result)
     }
     windowEffectChannel = effectChannel
+    let fontsChannel = FlutterMethodChannel(
+      name: "harbor/system_fonts",
+      binaryMessenger: flutterViewController.engine.binaryMessenger)
+    fontsChannel.setMethodCallHandler { call, result in
+      guard call.method == "monospaceFamilies" else {
+        result(FlutterMethodNotImplemented)
+        return
+      }
+      // The fixed-pitch mask lists PostScript face names; Flutter resolves
+      // fonts by family.
+      let manager = NSFontManager.shared
+      let families = Set(
+        (manager.availableFontNames(with: .fixedPitchFontMask) ?? []).compactMap {
+          NSFont(name: $0, size: 12)?.familyName
+        })
+      result(Array(families))
+    }
+    systemFontsChannel = fontsChannel
     super.awakeFromNib()
   }
 

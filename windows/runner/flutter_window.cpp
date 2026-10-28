@@ -8,6 +8,7 @@
 #include <flutter/method_result_functions.h>
 
 #include "flutter/generated_plugin_registrant.h"
+#include "system_fonts.h"
 
 namespace {
 
@@ -171,6 +172,23 @@ bool FlutterWindow::OnCreate() {
         acrylic_dark_ = *dark;
         ApplyWindowEffect();
         result->Success(Value(acrylic_));
+      });
+
+  system_fonts_channel_ = std::make_unique<flutter::MethodChannel<Value>>(
+      flutter_controller_->engine()->messenger(), "harbor/system_fonts",
+      &flutter::StandardMethodCodec::GetInstance());
+  system_fonts_channel_->SetMethodCallHandler(
+      [](const flutter::MethodCall<Value>& call,
+         std::unique_ptr<flutter::MethodResult<Value>> result) {
+        if (call.method_name() != "monospaceFamilies") {
+          result->NotImplemented();
+          return;
+        }
+        flutter::EncodableList families;
+        for (auto& family : MonospaceFontFamilies()) {
+          families.emplace_back(std::move(family));
+        }
+        result->Success(Value(std::move(families)));
       });
 
   ai_channel_ = std::make_unique<flutter::MethodChannel<Value>>(

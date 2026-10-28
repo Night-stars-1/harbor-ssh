@@ -108,7 +108,7 @@ void main() {
     final task = build(_Client([]));
     await task.start('第一个话题');
     final firstId = task.activeConversationId!;
-    task.setModel('second-model');
+    await task.setModel('second-model');
     await task.newConversation();
     await task.start('第二个话题');
     final secondId = task.activeConversationId!;
