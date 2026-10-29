@@ -8,7 +8,6 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 import 'package:package_info_plus/package_info_plus.dart';
 import 'package:path_provider/path_provider.dart';
-import 'package:url_launcher/url_launcher.dart';
 
 import '../domain/app_update.dart';
 
@@ -339,8 +338,17 @@ class AppUpdater {
         ], mode: ProcessStartMode.detached);
         exit(0);
       case TargetPlatform.macOS:
-        // The sandbox lets Launch Services mount the image for the user.
-        if (!await launchUrl(Uri.file(package.path))) {
+        // The sandbox lets Launch Services mount the image for the user; the
+        // runner remembers it so the installed version ejects it on launch.
+        try {
+          if (await appUpdateChannel.invokeMethod<bool>(
+                'install',
+                package.path,
+              ) !=
+              true) {
+            throw const UpdateFailure('无法打开安装包');
+          }
+        } on PlatformException {
           throw const UpdateFailure('无法打开安装包');
         }
       case TargetPlatform.android:

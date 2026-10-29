@@ -377,7 +377,7 @@ class _AppUpdateDialogState extends State<AppUpdateDialog> {
         return _Banner(
           key: const ValueKey('status-opened'),
           icon: Icons.check_circle_outline_rounded,
-          message: '已打开安装包。请先退出软件，再将 Harbor SSH 拖入「应用程序」替换旧版本。',
+          message: '已打开安装包。请先退出软件，再将 Harbor SSH 拖入「应用程序」替换旧版本；新版本启动后会自动推出安装包。',
           background: colors.primaryContainer,
           foreground: colors.onPrimaryContainer,
         );

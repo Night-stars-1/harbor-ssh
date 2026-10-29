@@ -31,8 +31,9 @@ const _windowEffect = MethodChannel('harbor/window_effect');
 bool windowAcrylicSupported = false;
 
 /// Main window size on macOS when the side panel is hidden: the default
-/// 1280-wide window minus the 264-wide sidebar and its 8-wide resize handle.
-const macosSidebarlessWindowSize = Size(1008, 800);
+/// 1280-wide window minus the 264-wide sidebar and its 8-wide resize handle,
+/// with the height scaled to keep the default 16:10 proportion.
+const macosSidebarlessWindowSize = Size(1008, 630);
 
 Future<void> initializeWindowsWindow({
   bool settings = false,

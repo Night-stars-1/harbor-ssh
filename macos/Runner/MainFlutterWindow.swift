@@ -14,12 +14,16 @@ class MainFlutterWindow: NSWindow {
   private var localPathsChannel: FlutterMethodChannel?
   private var windowEffectChannel: FlutterMethodChannel?
   private var systemFontsChannel: FlutterMethodChannel?
+  private var appUpdateChannel: FlutterMethodChannel?
   private weak var flutterViewController: FlutterViewController?
   private let backdrop = WindowBackdropView()
   private var scopedDirectories: [String: (url: URL, started: Bool)] = [:]
   private var stagedBookmarks: [String: Data] = [:]
   private let bookmarkKey = "harbor.files.default-local-bookmark.v1"
   private let bookmarkPathKey = "harbor.files.default-local-bookmark-path.v1"
+  private let pendingImageEjectKey = "harbor.update.eject-image-from-version.v1"
+  /// Volume name of the release image, see `hdiutil create -volname`.
+  private let updateVolumeName = "Harbor SSH"
   override func awakeFromNib() {
     let flutterViewController = FlutterViewController()
     let windowFrame = self.frame
@@ -81,6 +85,14 @@ class MainFlutterWindow: NSWindow {
       result(Array(families))
     }
     systemFontsChannel = fontsChannel
+    let updateChannel = FlutterMethodChannel(
+      name: "dev.harborssh/app_update",
+      binaryMessenger: flutterViewController.engine.binaryMessenger)
+    updateChannel.setMethodCallHandler { [weak self] call, result in
+      self?.handleAppUpdateCall(call, result: result)
+    }
+    appUpdateChannel = updateChannel
+    ejectUpdateImage()
     super.awakeFromNib()
   }
 
@@ -108,6 +120,59 @@ class MainFlutterWindow: NSWindow {
       result(enabled)
     default:
       result(FlutterMethodNotImplemented)
+    }
+  }
+
+  private static var bundleVersion: String {
+    let info = Bundle.main.infoDictionary
+    let short = info?["CFBundleShortVersionString"] as? String ?? ""
+    let build = info?["CFBundleVersion"] as? String ?? ""
+    return "\(short)+\(build)"
+  }
+
+  private func handleAppUpdateCall(_ call: FlutterMethodCall, result: @escaping FlutterResult) {
+    guard call.method == "install" else {
+      result(FlutterMethodNotImplemented)
+      return
+    }
+    guard let path = call.arguments as? String else {
+      result(FlutterError(code: "arguments", message: "Invalid package path", details: nil))
+      return
+    }
+    // The image stays mounted after the user copies the new app out of it;
+    // the first launch of a different version ejects it.
+    let defaults = UserDefaults.standard
+    defaults.set(Self.bundleVersion, forKey: pendingImageEjectKey)
+    let opened = NSWorkspace.shared.open(URL(fileURLWithPath: path))
+    if !opened {
+      defaults.removeObject(forKey: pendingImageEjectKey)
+    }
+    result(opened)
+  }
+
+  /// Ejects the release image opened by an update once another version runs.
+  /// A copy running from a read-only location (the image itself or its App
+  /// Translocation mirror) is not installed yet and keeps the request.
+  private func ejectUpdateImage() {
+    let defaults = UserDefaults.standard
+    guard let openedBy = defaults.string(forKey: pendingImageEjectKey),
+          openedBy != Self.bundleVersion else { return }
+    let running = try? Bundle.main.bundleURL.resourceValues(forKeys: [.volumeIsReadOnlyKey])
+    if running?.volumeIsReadOnly == true { return }
+    defaults.removeObject(forKey: pendingImageEjectKey)
+    let keys: Set<URLResourceKey> = [.volumeNameKey, .volumeIsEjectableKey, .volumeIsReadOnlyKey]
+    let volumes = FileManager.default.mountedVolumeURLs(
+      includingResourceValuesForKeys: Array(keys), options: [.skipHiddenVolumes]) ?? []
+    for volume in volumes {
+      guard let values = try? volume.resourceValues(forKeys: keys),
+            let name = values.volumeName,
+            values.volumeIsEjectable == true,
+            values.volumeIsReadOnly == true,
+            // Finder appends " 1", " 2" … when the same name is mounted twice.
+            name == updateVolumeName || name.hasPrefix(updateVolumeName + " ") else { continue }
+      // Best effort: a busy image simply stays mounted for the user.
+      FileManager.default.unmountVolume(
+        at: volume, options: [.allPartitionsAndEjectDisk, .withoutUI]) { _ in }
     }
   }
 
