@@ -162,6 +162,18 @@ class _TerminalAiPanelState extends State<TerminalAiPanel> {
   bool _historyOpen = false;
   bool _wasRunning = false;
 
+  /// Sent messages being recalled with Up/Down, oldest first. Captured when
+  /// recall starts so the index stays valid; null while not recalling.
+  List<String>? _recall;
+  int _recallIndex = 0;
+
+  /// Conversation and transcript length [_recall] was captured from; opening
+  /// another conversation or a new turn drops it.
+  (String?, int)? _recallSource;
+
+  /// The unsent text that Down past the newest message restores.
+  String _recallDraft = '';
+
   /// Forward approvals are remembered per pending call id, so every new
   /// approval starts unchecked. The flag is only sent for
   /// `create_port_forward` when the user approves.
@@ -888,6 +900,7 @@ class _TerminalAiPanelState extends State<TerminalAiPanel> {
     _wasRunning = widget.task.running;
     _syncRootPending();
     _input.addListener(_reportDraft);
+    _input.addListener(_endRecallOnEdit);
     _scroll.addListener(_reportDraft);
     widget.task.addListener(_changed);
     // Loading here keeps the history list ready before it is opened. The store
@@ -933,6 +946,8 @@ class _TerminalAiPanelState extends State<TerminalAiPanel> {
     }
     // A replaced or answered request must never keep the previous password.
     _syncRootPending();
+    // A new turn or another conversation changes what Up should recall.
+    if (_recallSource != _transcriptKey) _recall = null;
     final running = widget.task.running;
     if (running && !_wasRunning) {
       // The message is accepted only once the turn starts; a rejected start
@@ -967,6 +982,7 @@ class _TerminalAiPanelState extends State<TerminalAiPanel> {
   void dispose() {
     widget.task.removeListener(_changed);
     _input.removeListener(_reportDraft);
+    _input.removeListener(_endRecallOnEdit);
     _scroll.removeListener(_reportDraft);
     _input.dispose();
     _rootPassword.dispose();
@@ -987,6 +1003,10 @@ class _TerminalAiPanelState extends State<TerminalAiPanel> {
   }
 
   KeyEventResult _composerKey(FocusNode node, KeyEvent event) {
+    if (event.logicalKey == LogicalKeyboardKey.arrowUp ||
+        event.logicalKey == LogicalKeyboardKey.arrowDown) {
+      return _recallKey(event);
+    }
     if (event.logicalKey != LogicalKeyboardKey.enter &&
         event.logicalKey != LogicalKeyboardKey.numpadEnter) {
       return KeyEventResult.ignored;
@@ -1010,6 +1030,78 @@ class _TerminalAiPanelState extends State<TerminalAiPanel> {
     }
     return KeyEventResult.handled;
   }
+
+  /// Shell-style recall of this conversation's sent messages. Up only acts on
+  /// the first line and Down on the last, so moving the caret through a
+  /// multi-line draft keeps working.
+  KeyEventResult _recallKey(KeyEvent event) {
+    if (event is KeyUpEvent) return KeyEventResult.ignored;
+    final keyboard = HardwareKeyboard.instance;
+    if (keyboard.isShiftPressed ||
+        keyboard.isControlPressed ||
+        keyboard.isAltPressed ||
+        keyboard.isMetaPressed) {
+      return KeyEventResult.ignored;
+    }
+    final value = _input.value;
+    if (value.composing.isValid && !value.composing.isCollapsed) {
+      return KeyEventResult.ignored;
+    }
+    final selection = value.selection;
+    if (!selection.isValid || !selection.isCollapsed) {
+      return KeyEventResult.ignored;
+    }
+    final up = event.logicalKey == LogicalKeyboardKey.arrowUp;
+    final caret = selection.baseOffset;
+    final onEdgeLine = up
+        ? !value.text.substring(0, caret).contains('\n')
+        : !value.text.contains('\n', caret);
+    if (!onEdgeLine) return KeyEventResult.ignored;
+    var recall = _recall;
+    if (recall == null) {
+      if (!up) return KeyEventResult.ignored;
+      recall = <String>[];
+      for (final entry in widget.task.entries) {
+        final text = entry.text;
+        if (entry.user == true &&
+            text.isNotEmpty &&
+            (recall.isEmpty || recall.last != text)) {
+          recall.add(text);
+        }
+      }
+      if (recall.isEmpty) return KeyEventResult.ignored;
+      _recall = recall;
+      _recallSource = _transcriptKey;
+      _recallIndex = recall.length;
+      _recallDraft = value.text;
+    }
+    if (up) {
+      if (_recallIndex == 0) return KeyEventResult.handled;
+      _recallIndex--;
+    } else {
+      _recallIndex++;
+    }
+    final text = _recallIndex < recall.length
+        ? recall[_recallIndex]
+        : _recallDraft;
+    if (_recallIndex >= recall.length) _recall = null;
+    // _endRecallOnEdit sees the recalled text equal to the current index, so
+    // this change never counts as an edit.
+    _input.value = TextEditingValue(
+      text: text,
+      selection: TextSelection.collapsed(offset: text.length),
+    );
+    return KeyEventResult.handled;
+  }
+
+  /// Typing over a recalled message makes it the new draft.
+  void _endRecallOnEdit() {
+    final recall = _recall;
+    if (recall != null && _input.text != recall[_recallIndex]) _recall = null;
+  }
+
+  (String?, int) get _transcriptKey =>
+      (widget.task.activeConversationId, widget.task.entries.length);
 
   String _modelsCacheKey(AiTaskController task) {
     final settings = task.settings();

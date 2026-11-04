@@ -263,6 +263,98 @@ void main() {
     task.dispose();
   });
 
+  testWidgets('上下键切换已发送消息，多行草稿内光标移动不被拦截', (tester) async {
+    final client = _Client();
+    final task = AiTaskController(
+      settings: () =>
+          const AiSettings(baseUrl: 'https://example.com/v1', model: 'test'),
+      executorFactory: _Executor.new,
+      connected: () => true,
+      clientFactory: () => client,
+    );
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: harborTheme(),
+        home: Scaffold(
+          body: TerminalAiPanel(task: task, hostName: 'server'),
+        ),
+      ),
+    );
+    final input = find.byKey(const ValueKey('ai-task-input'));
+    await tester.tap(input);
+    final controller = tester.widget<TextField>(input).controller!;
+    Future<void> type(String text) async {
+      await tester.enterText(input, text);
+      await tester.pump();
+    }
+
+    Future<void> press(LogicalKeyboardKey key) async {
+      await tester.sendKeyEvent(key);
+      await tester.pump();
+    }
+
+    // 没有已发送消息时上键不改草稿
+    await type('草稿');
+    await press(LogicalKeyboardKey.arrowUp);
+    expect(controller.text, '草稿');
+    for (final text in ['查看磁盘', '查看内存']) {
+      client.reply = Completer<AiReply>();
+      await type(text);
+      await press(LogicalKeyboardKey.enter);
+      client.reply.complete(
+        const AiReply({'role': 'assistant', 'content': '收到'}, []),
+      );
+      await tester.pumpAndSettle();
+    }
+    expect(controller.text, isEmpty);
+
+    await type('未发送');
+    await press(LogicalKeyboardKey.arrowUp);
+    expect(controller.text, '查看内存');
+    expect(controller.selection, const TextSelection.collapsed(offset: 4));
+    await press(LogicalKeyboardKey.arrowUp);
+    expect(controller.text, '查看磁盘');
+    // 已到最早一条，继续上键保持不变
+    await press(LogicalKeyboardKey.arrowUp);
+    expect(controller.text, '查看磁盘');
+    await press(LogicalKeyboardKey.arrowDown);
+    expect(controller.text, '查看内存');
+    // 越过最新一条恢复切换前的草稿
+    await press(LogicalKeyboardKey.arrowDown);
+    expect(controller.text, '未发送');
+    await press(LogicalKeyboardKey.arrowDown);
+    expect(controller.text, '未发送');
+
+    // 修改调出的消息后它成为新草稿，下键不再覆盖
+    await press(LogicalKeyboardKey.arrowUp);
+    await type('查看内存占用');
+    await press(LogicalKeyboardKey.arrowDown);
+    expect(controller.text, '查看内存占用');
+
+    // 多行草稿：光标不在首行时上键只移动光标
+    await type('第一行\n第二行');
+    controller.selection = const TextSelection.collapsed(offset: 7);
+    await tester.pump();
+    await press(LogicalKeyboardKey.arrowUp);
+    expect(controller.text, '第一行\n第二行');
+    expect(controller.selection.baseOffset, lessThanOrEqualTo(3));
+    await press(LogicalKeyboardKey.arrowUp);
+    expect(controller.text, '查看内存');
+    await press(LogicalKeyboardKey.arrowDown);
+    expect(controller.text, '第一行\n第二行');
+
+    // 新对话不再调出旧对话的消息
+    await tester.tap(find.byKey(const ValueKey('ai-new-conversation')));
+    await tester.pumpAndSettle();
+    await tester.tap(input);
+    await type('');
+    await press(LogicalKeyboardKey.arrowUp);
+    expect(controller.text, isEmpty);
+    expect(tester.takeException(), isNull);
+    await tester.pumpWidget(const SizedBox.shrink());
+    task.dispose();
+  });
+
   for (final (width, scale) in [(390.0, 1.0), (240.0, 2.0)]) {
     testWidgets('工具默认折叠、回复背景与模型 $width', (tester) async {
       tester.view.physicalSize = Size(width, 1100);
