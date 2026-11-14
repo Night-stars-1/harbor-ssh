@@ -30,6 +30,92 @@ enum ConnectionStatus { connecting, connected, closed, failed }
 enum _AiReachability { public, private, unknown }
 
 class SshConnection extends ChangeNotifier {
+  static final Set<SshConnection> _activeConnections = {};
+  static bool _mobileBackgrounded = false;
+  static int _mobileEpoch = 0;
+  static Future<void>? _foregroundTransition;
+
+  /// Pauses automatic SSH work on mobile and probes existing transports on
+  /// return. Authentication in progress is handled when that hop finishes.
+  static Future<void> setMobileBackgrounded(bool backgrounded) {
+    if (_mobileBackgrounded == backgrounded) {
+      return _foregroundTransition ?? Future<void>.value();
+    }
+    _mobileBackgrounded = backgrounded;
+    final epoch = ++_mobileEpoch;
+    final connections = _activeConnections.toList();
+    if (backgrounded) {
+      _foregroundTransition = null;
+      for (final connection in connections) {
+        connection._pauseForMobile();
+      }
+      return Future<void>.value();
+    }
+    final transition = Future.wait(
+      connections.map((connection) => connection._resumeForMobile(epoch)),
+    ).then<void>((_) {});
+    _foregroundTransition = transition;
+    transition.whenComplete(() {
+      if (identical(_foregroundTransition, transition)) {
+        _foregroundTransition = null;
+      }
+    });
+    return transition;
+  }
+
+  /// False while mobile background work is suspended or a hop awaits a probe.
+  bool get backgroundWorkAllowed =>
+      !_mobileBackgrounded && _unverifiedClients.isEmpty;
+
+  final Set<SSHClient> _authenticatedClients = {};
+  final Set<SSHClient> _unverifiedClients = {};
+  final Map<SSHClient, (int, Future<void>)> _mobileProbes = {};
+
+  void _pauseForMobile() {
+    for (final client in _routeClients) {
+      _unverifiedClients.add(client);
+      client.setKeepAliveEnabled(false);
+    }
+    _notify();
+  }
+
+  Future<void> _resumeForMobile(int epoch) async {
+    final generation = _generation;
+    final clients = _unverifiedClients.where(_authenticatedClients.contains).toList();
+    if (clients.isEmpty) {
+      _notify();
+      return;
+    }
+    await Future.wait(clients.map((client) => _probeMobile(client, generation, epoch)));
+  }
+
+  Future<void> _probeMobile(SSHClient client, int generation, int epoch) {
+    final existing = _mobileProbes[client];
+    if (existing != null && existing.$1 == epoch) return existing.$2;
+    final probe = () async {
+      try {
+        await client.ping().timeout(const Duration(seconds: 5));
+        if (!_current(generation) || _mobileBackgrounded || epoch != _mobileEpoch) return;
+        _unverifiedClients.remove(client);
+        if (_unverifiedClients.isEmpty) {
+          for (final hop in _routeClients) {
+            hop.setKeepAliveEnabled(true);
+          }
+        }
+        _notify();
+      } catch (error) {
+        if (_current(generation) && !_mobileBackgrounded && epoch == _mobileEpoch) {
+          _fail(StateError('前台恢复时 SSH 连接检测失败：$error'));
+        }
+      }
+    }();
+    _mobileProbes[client] = (epoch, probe);
+    probe.whenComplete(() {
+      if (identical(_mobileProbes[client]?.$2, probe)) _mobileProbes.remove(client);
+    });
+    return probe;
+  }
+
   SshConnection({required this.id, required Host host}) {
     _host = host;
   }
@@ -138,6 +224,7 @@ class SshConnection extends ChangeNotifier {
     _release();
     final generation = _generation;
     _closed = false;
+    _activeConnections.add(this);
     _host = host ?? _host;
     _remoteHome = null;
     _historyLoad = null;
@@ -170,6 +257,7 @@ class SshConnection extends ChangeNotifier {
   }) async {
     final generation = _generation;
     if (!_current(generation)) return;
+    _activeConnections.add(this);
     Object? verificationError;
     Host? connectingHost;
     try {
@@ -277,6 +365,10 @@ class SshConnection extends ChangeNotifier {
         );
         _pendingSocket = null;
         _routeClients.add(client);
+        if (_mobileBackgrounded || _unverifiedClients.isNotEmpty) {
+          _unverifiedClients.add(client);
+          client.setKeepAliveEnabled(false);
+        }
         if (isTarget) _client = client;
         unawaited(
           client.done.then(
@@ -301,6 +393,11 @@ class SshConnection extends ChangeNotifier {
         );
         await client.authenticated;
         if (!_current(generation)) return;
+        _authenticatedClients.add(client);
+        if (!_mobileBackgrounded && _unverifiedClients.contains(client)) {
+          await _probeMobile(client, generation, _mobileEpoch);
+          if (!_current(generation)) return;
+        }
         previous = client;
       }
       final client = _client!;
@@ -870,6 +967,10 @@ class SshConnection extends ChangeNotifier {
   void _release() {
     _generation++;
     _closed = true;
+    _activeConnections.remove(this);
+    _authenticatedClients.clear();
+    _unverifiedClients.clear();
+    _mobileProbes.clear();
     _endpointAddress = '';
     _endpointPort = null;
     unawaited(portForwards.close());

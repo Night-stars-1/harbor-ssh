@@ -401,6 +401,19 @@ class SSHClient {
   late final _keepAlive = keepAliveInterval != null
       ? SSHKeepAlive(ping: ping, interval: keepAliveInterval!)
       : null;
+  bool _keepAliveEnabled = true;
+  bool _authenticationSucceeded = false;
+
+  /// Controls future automatic keepalives. An already sent ping cannot be
+  /// cancelled and may still complete after keepalives are disabled.
+  void setKeepAliveEnabled(bool enabled) {
+    _keepAliveEnabled = enabled;
+    if (!enabled || isClosed) {
+      _keepAlive?.stop();
+    } else if (_authenticationSucceeded) {
+      _keepAlive?.start();
+    }
+  }
 
   SSHAuthMethod? _currentAuthMethod;
 
@@ -1109,7 +1122,8 @@ class SSHClient {
     _authTimeoutTimer = null;
     _authenticated.complete();
     onAuthenticated?.call();
-    _keepAlive?.start();
+    _authenticationSucceeded = true;
+    if (_keepAliveEnabled && !isClosed) _keepAlive?.start();
   }
 
   void _handleHandshakeTimeout() {

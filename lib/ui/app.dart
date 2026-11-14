@@ -49,19 +49,48 @@ class HarborApp extends StatefulWidget {
   State<HarborApp> createState() => _HarborAppState();
 }
 
-class _HarborAppState extends State<HarborApp> {
+class _HarborAppState extends State<HarborApp> with WidgetsBindingObserver {
   // The title bar lives above the navigator; closing a tab there still needs
   // the workspace's confirmation dialog.
   final _workspace = GlobalKey<_WorkspaceState>();
 
+  bool get _mobile => !kIsWeb &&
+      (defaultTargetPlatform == TargetPlatform.android ||
+          defaultTargetPlatform == TargetPlatform.iOS);
+
   @override
   void initState() {
     super.initState();
+    if (_mobile) {
+      WidgetsBinding.instance.addObserver(this);
+      final state = WidgetsBinding.instance.lifecycleState;
+      didChangeAppLifecycleState(
+        state == null || state == AppLifecycleState.inactive
+            ? AppLifecycleState.resumed
+            : state,
+      );
+    }
     unawaited(widget.model.initialize());
   }
 
   @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (!_mobile) return;
+    switch (state) {
+      case AppLifecycleState.hidden:
+      case AppLifecycleState.paused:
+      case AppLifecycleState.detached:
+        unawaited(widget.model.setMobileBackgrounded(true));
+      case AppLifecycleState.resumed:
+        unawaited(widget.model.setMobileBackgrounded(false));
+      case AppLifecycleState.inactive:
+        break;
+    }
+  }
+
+  @override
   void dispose() {
+    if (_mobile) WidgetsBinding.instance.removeObserver(this);
     widget.settingsWindow?.dispose();
     if (widget.aiWindow != null) {
       widget.model.appearance.removeListener(widget.aiWindow!.refresh);

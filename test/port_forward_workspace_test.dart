@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -7,6 +9,7 @@ import 'package:harbor_ssh/domain/host.dart';
 import 'package:harbor_ssh/domain/port_forward.dart';
 import 'package:harbor_ssh/ui/app.dart';
 import 'package:harbor_ssh/ui/port_forward_dialog.dart';
+import 'package:harbor_ssh/ui/port_forward_panel.dart';
 import 'package:harbor_ssh/ui/port_forward_workspace.dart';
 import 'package:harbor_ssh/ui/workspace_model.dart';
 import 'package:harbor_ssh/ui/theme.dart';
@@ -53,6 +56,22 @@ class _Session extends SshConnection {
   late final _manager = PortForwardManager((_) async => handle);
   @override
   PortForwardManager get portForwards => _manager;
+}
+
+class _DelayedHandle implements PortForwardHandle {
+  final closed = Completer<void>();
+  @override
+  int get port => 15432;
+  @override
+  Future<void> close() => closed.future;
+}
+
+class _DelayedSession extends _Session {
+  _DelayedSession({required super.id, required super.host});
+  final started = Completer<PortForwardHandle>();
+  late final _delayedManager = PortForwardManager((_) => started.future);
+  @override
+  PortForwardManager get portForwards => _delayedManager;
 }
 
 class _Model extends WorkspaceModel {
@@ -500,25 +519,145 @@ void main() {
     expect(tester.takeException(), isNull);
   });
 
+  testWidgets('saved rule order survives starting, running and stopping', (
+    tester,
+  ) async {
+    tester.view.physicalSize = const Size(1200, 1600);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    const first = PortForwardRule(
+      id: 'first', name: '第一条', type: PortForwardType.local,
+      bindPort: 15431, targetPort: 5432,
+    );
+    const last = PortForwardRule(
+      id: 'last', name: '最后一条', type: PortForwardType.local,
+      bindPort: 15433, targetPort: 5432,
+    );
+    final preferences = MemoryStore();
+    await PortForwardStore(preferences, testHost.id).save([first, _rule, last]);
+    final session = _DelayedSession(id: 'delayed', host: testHost);
+    final handle = _DelayedHandle();
+    addTearDown(session.dispose);
+    await page(tester, preferences: preferences, sessions: [session]);
+
+    void expectOrder(PortForwardStatus status) {
+      final cards = tester.widgetList<PortForwardRuleCard>(
+        find.byType(PortForwardRuleCard),
+      ).toList();
+      expect(cards.map((card) => card.rule.id), ['first', 'db', 'last']);
+      expect(cards[1].state.status, status);
+    }
+
+    expectOrder(PortForwardStatus.stopped);
+    final card = find.byKey(const ValueKey('forward-rule-host-1-db-delayed'));
+    await tester.tap(find.descendant(of: card, matching: find.byTooltip('启动')));
+    await tester.pump();
+    expectOrder(PortForwardStatus.starting);
+    session.started.complete(handle);
+    await tester.pumpAndSettle();
+    expectOrder(PortForwardStatus.running);
+    await tester.tap(find.descendant(of: card, matching: find.byTooltip('停止')));
+    await tester.pump();
+    expectOrder(PortForwardStatus.stopping);
+    handle.closed.complete();
+    await tester.pumpAndSettle();
+    expectOrder(PortForwardStatus.stopped);
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
+
+  testWidgets('connecting a later host keeps saved host groups in order', (
+    tester,
+  ) async {
+    tester.view.physicalSize = const Size(1200, 1200);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    final preferences = MemoryStore();
+    await PortForwardStore(preferences, testHost.id).save([_rule]);
+    await PortForwardStore(preferences, _second.id).save([_rule]);
+    final session = _Session(id: 'new-other', host: _second);
+    addTearDown(session.dispose);
+    var sessions = <SshConnection>[];
+    await tester.pumpWidget(MaterialApp(
+      theme: harborTheme(brightness: Brightness.dark),
+      home: Scaffold(body: StatefulBuilder(builder: (context, setPageState) {
+        return PortForwardWorkspace(
+          hosts: const [testHost, _second],
+          sessions: sessions,
+          preferences: preferences,
+          onHosts: () {},
+          onConnect: (host) async {
+            setPageState(() => sessions = [session]);
+            return session;
+          },
+        );
+      })),
+    ));
+    await tester.pumpAndSettle();
+    void expectHostOrder() {
+      expect(
+        tester.widgetList<PortForwardRuleCard>(find.byType(PortForwardRuleCard))
+            .map((card) => card.hostLabel),
+        [testHost.name, _second.name],
+      );
+    }
+    expectHostOrder();
+    final card = find.byKey(const ValueKey('forward-rule-other-db-null'));
+    await tester.tap(find.descendant(of: card, matching: find.byTooltip('启动')));
+    await tester.pumpAndSettle();
+    expectHostOrder();
+    expect(session.portForwards.activeCount, 1);
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
+
   testWidgets('active rules on multiple sessions remain separately stoppable', (
     tester,
   ) async {
+    tester.view.physicalSize = const Size(1200, 1600);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    const first = PortForwardRule(
+      id: 'first', name: '第一条', type: PortForwardType.local,
+      bindPort: 15431, targetPort: 5432,
+    );
+    const temporary = PortForwardRule(
+      id: 'temporary', name: '临时转发', type: PortForwardType.local,
+      bindPort: 15434, targetPort: 5432,
+    );
     final preferences = MemoryStore();
+    await PortForwardStore(preferences, testHost.id).save([first, _rule]);
     final a = _Session(id: 'a', host: testHost);
     final b = _Session(id: 'b', host: testHost);
     addTearDown(a.dispose);
     addTearDown(b.dispose);
+    await a.portForwards.start(temporary);
     await a.portForwards.start(_rule);
     await b.portForwards.start(_rule);
     await page(tester, preferences: preferences, sessions: [a, b]);
-    expect(find.text('运行中'), findsNWidgets(2));
+    expect(
+      tester.widgetList<PortForwardRuleCard>(find.byType(PortForwardRuleCard))
+          .map((card) => card.rule.id),
+      ['first', 'db', 'db', 'temporary'],
+    );
+    expect(find.text('运行中'), findsNWidgets(3));
     final card = find.byKey(const ValueKey('forward-rule-host-1-db-b'));
     final stop = find.descendant(of: card, matching: find.byTooltip('停止'));
     await tester.ensureVisible(stop);
     await tester.tap(stop);
     await tester.pumpAndSettle();
-    expect(a.portForwards.activeCount, 1);
+    expect(a.portForwards.activeCount, 2);
     expect(b.portForwards.activeCount, 0);
+    final temporaryCard = find.byKey(
+      const ValueKey('forward-rule-host-1-temporary-a'),
+    );
+    await tester.tap(find.descendant(
+      of: temporaryCard, matching: find.byTooltip('停止'),
+    ));
+    await tester.pumpAndSettle();
+    expect(a.portForwards.activeCount, 1);
+    expect(find.text('临时转发'), findsNothing);
   });
 
   testWidgets(

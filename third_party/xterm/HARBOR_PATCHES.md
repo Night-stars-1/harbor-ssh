@@ -151,3 +151,32 @@ Regression coverage: `test/terminal_parser_stream_test.dart` exercises split
 CSI/OSC sequences, UTF-8 byte boundaries, Unicode, cursor restoration and
 scrolling logs. `test/terminal_geometry_input_test.dart` covers output,
 scrolling, resizing, font changes, Chinese composition and focus reconnection.
+
+## Android native selection menu
+
+`TerminalView.onSelectionMenuRequested` is an optional callback emitted by the
+existing touch long-press recognizer when selection ends. It carries the final
+global logical position after releasing the gesture anchor. Empty-space long
+presses also request the menu, so pasting does not require selecting a word.
+Mouse selection, horizontal scrolling and long-press drag selection retain
+their existing recognizers and buffer anchors.
+
+Harbor SSH connects this callback to Android's floating `ActionMode`, not a
+Flutter imitation of the platform toolbar. Copy, paste and select-all actions
+are returned to the owning terminal through a request-scoped method channel.
+Copy and paste reuse the application's clipboard actions: disconnected output
+remains copyable, pasting requires a connected session, and multiline input
+still requires confirmation before `Terminal.paste` applies bracketed-paste
+framing. Terminal output is not editable, so no cut action is offered.
+
+The menu closes on a new touch, selection change, scroll, pane replacement or
+disposal, and Activity pause. Request IDs and session identity checks reject
+late actions from another terminal. The terminal selection remains a buffer
+range, not the hidden IME input client's placeholder selection; keyboard-owned
+clipboard panels remain separate from this terminal context-menu flow.
+
+`test/terminal_test.dart` covers long-press drag copy, empty-space paste,
+multiline cancellation/confirmation, disconnected copy, stale menu replies and
+desktop isolation. The existing wrap and IME geometry flows remain covered by
+`test/terminal_wrap_test.dart` and `test/terminal_geometry_input_test.dart`.
+

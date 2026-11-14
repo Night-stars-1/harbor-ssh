@@ -371,6 +371,10 @@ class WorkspaceModel extends ChangeNotifier {
   bool get saving => _saving || _syncing;
   String? loadError;
   bool _disposed = false;
+  bool _mobileBackgrounded = false;
+  bool _mobileLifecycleKnown = false;
+  bool _mobileResumePending = false;
+  int _mobileLifecycleEpoch = 0;
   int _sequence = 0;
   Future<void> _bookmarkWrite = Future.value();
   Completer<void>? _idleCompleter;
@@ -517,10 +521,34 @@ class WorkspaceModel extends ChangeNotifier {
     _configureAutoSync();
   }
 
+  Future<void> setMobileBackgrounded(bool backgrounded) async {
+    if (_disposed) return;
+    if (_mobileLifecycleKnown && backgrounded && _mobileBackgrounded) return;
+    if (_mobileLifecycleKnown && !backgrounded && !_mobileBackgrounded &&
+        !_mobileResumePending) {
+      return;
+    }
+    _mobileLifecycleKnown = true;
+    final epoch = ++_mobileLifecycleEpoch;
+    _mobileBackgrounded = backgrounded;
+    _mobileResumePending = !backgrounded;
+    _syncPoll?.cancel();
+    _syncDelay?.cancel();
+    _notify();
+    await SshConnection.setMobileBackgrounded(backgrounded);
+    if (_disposed || epoch != _mobileLifecycleEpoch || backgrounded) return;
+    _mobileResumePending = false;
+    _configureAutoSync();
+    _notify();
+  }
+
   void _configureAutoSync() {
     _syncPoll?.cancel();
     _syncDelay?.cancel();
-    if (_disposed || cloudSync.settings?.automatic != true) return;
+    if (_disposed || _mobileBackgrounded || _mobileResumePending ||
+        cloudSync.settings?.automatic != true) {
+      return;
+    }
     _syncPoll = Timer.periodic(
       const Duration(minutes: 2),
       (_) => _scheduleSync(),
@@ -529,10 +557,16 @@ class WorkspaceModel extends ChangeNotifier {
   }
 
   void _scheduleSync() {
-    if (_disposed || cloudSync.settings?.automatic != true) return;
+    if (_disposed || _mobileBackgrounded || _mobileResumePending ||
+        cloudSync.settings?.automatic != true) {
+      return;
+    }
     _syncDelay?.cancel();
     _syncDelay = Timer(const Duration(seconds: 2), () async {
-      if (_disposed) return;
+      if (_disposed || _mobileBackgrounded || _mobileResumePending ||
+          cloudSync.settings?.automatic != true) {
+        return;
+      }
       if (saving || loading) {
         _scheduleSync();
         return;

@@ -11,6 +11,7 @@ from pathlib import Path
 import socket
 import sys
 import threading
+import time
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / ".tools" / "python"))
 import paramiko
@@ -319,13 +320,19 @@ class Server(paramiko.ServerInterface):
         self.width, self.height = 80, 24
         self.catalog_queries = 0
         self.metrics_queries = 0
+        self.slow_keepalive = False
+    def check_global_request(self, kind, msg):
+        if kind == 'keepalive@openssh.com' and self.slow_keepalive:
+            time.sleep(6)
+        return False
     def get_allowed_auths(self, username):
         return "password,publickey"
     def check_auth_none(self, username):
         return paramiko.AUTH_SUCCESSFUL if username == "cnb-fixture-token" else paramiko.AUTH_FAILED
     def check_auth_password(self, username, password):
         self.resume_mode = username == 'resume-tester'
-        return paramiko.AUTH_SUCCESSFUL if username in ('tester', 'resume-tester') and password == 'fixture-password' else paramiko.AUTH_FAILED
+        self.slow_keepalive = username == 'slow-keepalive'
+        return paramiko.AUTH_SUCCESSFUL if username in ('tester', 'resume-tester', 'slow-keepalive') and password == 'fixture-password' else paramiko.AUTH_FAILED
     def check_auth_publickey(self, username, key):
         if username != "tester":
             return paramiko.AUTH_FAILED

@@ -51,8 +51,10 @@ class _PortForwardWorkspaceState extends State<PortForwardWorkspace> {
   String? _error;
 
   List<Host> get _hosts => {
-    for (final session in widget.sessions) session.host.id: session.host,
     for (final host in widget.hosts) host.id: host,
+    for (final session in widget.sessions)
+      if (!widget.hosts.any((host) => host.id == session.host.id))
+        session.host.id: session.host,
   }.values.toList();
   PortForwardStore _store(String hostId) =>
       PortForwardStore(widget.preferences, hostId);
@@ -200,17 +202,22 @@ class _PortForwardWorkspaceState extends State<PortForwardWorkspace> {
     final entries = <_RuleEntry>[];
     for (final host in _hosts) {
       final sessions = _sessions(host);
-      final active = <String>{};
+      final active = <String, List<_RuleEntry>>{};
       for (final session in sessions) {
         for (final rule in session.portForwards.activeRules) {
-          active.add(rule.id);
-          entries.add(_RuleEntry(host, rule, session));
+          (active[rule.id] ??= []).add(_RuleEntry(host, rule, session));
         }
       }
       for (final rule in _saved[host.id] ?? <PortForwardRule>[]) {
-        if (!active.contains(rule.id)) {
+        final running = active.remove(rule.id);
+        if (running == null) {
           entries.add(_RuleEntry(host, rule, _session(host)));
+        } else {
+          entries.addAll(running);
         }
+      }
+      for (final running in active.values) {
+        entries.addAll(running);
       }
     }
     return entries;

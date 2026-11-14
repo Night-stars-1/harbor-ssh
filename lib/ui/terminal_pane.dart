@@ -1,5 +1,6 @@
 import 'dart:async';
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/gestures.dart';
 import 'package:flutter/scheduler.dart';
@@ -98,6 +99,17 @@ class TerminalPane extends StatefulWidget {
   final ValueChanged<double?>? onAiPanelWidthChanged;
   @override
   State<TerminalPane> createState() => _TerminalPaneState();
+}
+
+const _terminalMenuChannel = MethodChannel('dev.harborssh/terminal_context_menu');
+int _nextTerminalMenuId = 0;
+int? _activeTerminalMenuId;
+
+void _dismissActiveTerminalMenu() {
+  final id = _activeTerminalMenuId;
+  if (id == null) return;
+  _activeTerminalMenuId = null;
+  unawaited(_terminalMenuChannel.invokeMethod<void>('hide', {'id': id}));
 }
 
 class _TerminalPaneState extends State<TerminalPane> {
@@ -313,6 +325,66 @@ class _TerminalPaneState extends State<TerminalPane> {
   final _terminalKey = GlobalKey<TerminalViewState>();
   final _scrollController = ScrollController();
   final _linkStyle = TerminalLinkStyle(const Color(0xff9ecaff));
+  int? _menuId;
+  BufferRange? _menuSelection;
+
+  void _hideTerminalMenu() {
+    final id = _menuId;
+    _menuId = null;
+    _menuSelection = null;
+    if (id == null) return;
+    if (_activeTerminalMenuId == id) _activeTerminalMenuId = null;
+    unawaited(_terminalMenuChannel.invokeMethod<void>('hide', {'id': id}));
+  }
+
+  void _selectionChanged() {
+    if (_menuId != null && _menuSelection != _controller.selection) {
+      _hideTerminalMenu();
+    }
+  }
+
+  Future<void> _showTerminalMenu(Offset position) async {
+    _hideTerminalMenu();
+    final id = ++_nextTerminalMenuId;
+    _menuId = id;
+    _activeTerminalMenuId = id;
+    _menuSelection = _controller.selection;
+    final session = widget.session;
+    final selection = _menuSelection;
+    final action = await _terminalMenuChannel.invokeMethod<String>('show', {
+      'id': id,
+      'x': position.dx,
+      'y': position.dy,
+      'pixelRatio': View.of(context).devicePixelRatio,
+      'canCopy': selection != null && !selection.isCollapsed,
+      'canPaste': session.status == ConnectionStatus.connected,
+      'canSelectAll': true,
+    });
+    if (!mounted ||
+        _menuId != id ||
+        _activeTerminalMenuId != id ||
+        widget.session != session) {
+      return;
+    }
+    _menuId = null;
+    _activeTerminalMenuId = null;
+    _menuSelection = null;
+    switch (action) {
+      case 'copy':
+        await _copy();
+        break;
+      case 'paste':
+        await _paste();
+        break;
+      case 'selectAll':
+        final focusContext = _focus.context;
+        if (focusContext == null || !focusContext.mounted) return;
+        Actions.invoke(focusContext,
+            const SelectAllTextIntent(SelectionChangedCause.toolbar));
+        await _showTerminalMenu(position);
+        break;
+    }
+  }
 
   // TerminalView rebuilds replace the render object's theme and text style.
   // Both classes carry no value equality, so a freshly built instance clears
@@ -374,6 +446,7 @@ class _TerminalPaneState extends State<TerminalPane> {
 
   bool get _metricsEligible =>
       widget.statusVisible &&
+      widget.session.backgroundWorkAllowed &&
       widget.session.status == ConnectionStatus.connected;
 
   void _syncMetrics() {
@@ -416,7 +489,11 @@ class _TerminalPaneState extends State<TerminalPane> {
       sample = null;
     }
     _metricsInFlight = false;
-    if (!mounted || generation != _metricsGeneration) return;
+    if (!mounted) return;
+    if (generation != _metricsGeneration) {
+      _syncMetrics();
+      return;
+    }
     final hadBaseline = _metricsSample != null;
     setState(() {
       _metricsLoading = false;
@@ -527,6 +604,8 @@ class _TerminalPaneState extends State<TerminalPane> {
   void initState() {
     super.initState();
     widget.controller?._state = this;
+    _controller.addListener(_selectionChanged);
+    _scrollController.addListener(_hideTerminalMenu);
     _focus.addListener(_reportFocus);
     _listenForLinkHover();
     _applyLineWrap();
@@ -536,7 +615,10 @@ class _TerminalPaneState extends State<TerminalPane> {
   }
 
   void _reportFocus() {
-    if (_focus.hasFocus) widget.onFocused?.call();
+    if (_focus.hasFocus) {
+      if (_activeTerminalMenuId != _menuId) _dismissActiveTerminalMenu();
+      widget.onFocused?.call();
+    }
   }
 
   void _listenForLinkHover() {
@@ -577,11 +659,13 @@ class _TerminalPaneState extends State<TerminalPane> {
   void didUpdateWidget(TerminalPane oldWidget) {
     super.didUpdateWidget(oldWidget);
     widget.controller?._state = this;
+    if (oldWidget.statusVisible && !widget.statusVisible) _hideTerminalMenu();
     _applyLineWrap();
     if (oldWidget.fontSize != widget.fontSize) {
       _fontSize = widget.fontSize;
     }
     if (oldWidget.session != widget.session) {
+      _hideTerminalMenu();
       oldWidget.session.removeListener(_connectionChanged);
       widget.session.addListener(_connectionChanged);
       _releaseAi(
@@ -644,6 +728,9 @@ class _TerminalPaneState extends State<TerminalPane> {
 
   @override
   void dispose() {
+    _hideTerminalMenu();
+    _controller.removeListener(_selectionChanged);
+    _scrollController.removeListener(_hideTerminalMenu);
     _stopMetrics(notify: false);
     widget.session.removeListener(_connectionChanged);
     widget.aiWindow?.removeListener(_aiHostChanged);
@@ -765,21 +852,24 @@ class _TerminalPaneState extends State<TerminalPane> {
   }
 
   Future<void> _copy() async {
+    final session = widget.session;
     final selection = _controller.selection;
     if (selection == null) return;
     await Clipboard.setData(
-      ClipboardData(text: widget.session.terminal.buffer.getText(selection)),
+      ClipboardData(text: session.terminal.buffer.getText(selection)),
     );
-    if (!mounted) return;
+    if (!mounted || widget.session != session) return;
     _controller.clearSelection();
     _focus.requestFocus();
   }
 
   Future<void> _paste() async {
+    final session = widget.session;
     final data = await Clipboard.getData(Clipboard.kTextPlain);
     if (!mounted ||
         data?.text == null ||
-        widget.session.status != ConnectionStatus.connected) {
+        widget.session != session ||
+        session.status != ConnectionStatus.connected) {
       return;
     }
     final text = data!.text!;
@@ -823,10 +913,10 @@ class _TerminalPaneState extends State<TerminalPane> {
           ],
         ),
       );
-      if (confirmed != true || !mounted) return;
+      if (confirmed != true || !mounted || widget.session != session) return;
     }
-    if (widget.session.status == ConnectionStatus.connected) {
-      widget.session.terminal.paste(text);
+    if (session.status == ConnectionStatus.connected && widget.session == session) {
+      session.terminal.paste(text);
     }
     _focus.requestFocus();
   }
@@ -1006,6 +1096,8 @@ class _TerminalPaneState extends State<TerminalPane> {
                       onExit: (_) => setState(() => _hoverPosition = null),
                       child: Listener(
                         onPointerDown: (event) {
+                          _hideTerminalMenu();
+                          _dismissActiveTerminalMenu();
                           _linkDown = null;
                           _pressedLink = null;
                           if (event.buttons == kSecondaryMouseButton) {
@@ -1053,6 +1145,10 @@ class _TerminalPaneState extends State<TerminalPane> {
                             controller: _controller,
                             focusNode: _focus,
                             autofocus: widget.autofocus,
+                            onSelectionMenuRequested: !kIsWeb &&
+                                    defaultTargetPlatform == TargetPlatform.android
+                                ? _showTerminalMenu
+                                : null,
                             onSecondaryTapUp: (_, _) => _copyOrPaste(),
                             readOnly: !connected,
                             shortcuts: const {},

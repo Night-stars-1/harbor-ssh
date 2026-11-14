@@ -21,6 +21,15 @@ class _SampledConnection extends SshConnection {
 
   int calls = 0;
   Completer<RemoteMetricsSample?>? holdNext;
+  bool allowed = true;
+
+  @override
+  bool get backgroundWorkAllowed => allowed;
+
+  void setAllowed(bool value) {
+    allowed = value;
+    notifyListeners();
+  }
 
   @override
   Future<RemoteMetricsSample?> readRemoteMetrics() async {
@@ -306,6 +315,44 @@ __HARBOR_REMOTE_METRICS_END__
     expect(find.text('99%'), findsNothing);
     expect(find.text('60%'), findsOneWidget);
     await tester.pumpWidget(const SizedBox.shrink());
+  });
+
+  testWidgets('后台及前台探测期间停止采样，旧采样结束后重新启动', (tester) async {
+    final session = _SampledConnection('background');
+    addTearDown(session.dispose);
+    final pending = Completer<RemoteMetricsSample?>();
+    session.holdNext = pending;
+    await tester.pumpWidget(MaterialApp(
+      theme: harborTheme(),
+      home: Scaffold(body: TerminalPane(
+        session: session,
+        statusVisible: true,
+        statusRefreshSeconds: 5,
+        onReconnect: () {},
+      )),
+    ));
+    expect(session.calls, 1);
+    session.setAllowed(false);
+    await tester.pump();
+    await tester.pump(const Duration(seconds: 10));
+    expect(session.calls, 1);
+    session.setAllowed(true);
+    await tester.pump();
+    expect(session.calls, 1);
+    pending.complete(const RemoteMetricsSample(
+      memoryUsedBytes: 999, memoryTotalBytes: 1000,
+    ));
+    await tester.pump();
+    await tester.pump();
+    expect(session.calls, 2);
+    expect(find.text('99%'), findsNothing);
+    expect(find.text('60%'), findsOneWidget);
+    session.setAllowed(false);
+    await tester.pump();
+    await tester.pumpWidget(const SizedBox.shrink());
+    session.setAllowed(true);
+    await tester.pump(const Duration(seconds: 10));
+    expect(session.calls, 2);
   });
 
   for (final width in [320.0, 1100.0]) {

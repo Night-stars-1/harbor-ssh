@@ -11,6 +11,7 @@ import 'package:harbor_ssh/data/remote_metrics.dart';
 import 'package:harbor_ssh/data/terminal_ai.dart';
 import 'package:harbor_ssh/domain/host.dart';
 import 'package:harbor_ssh/domain/remote_file.dart';
+import 'package:harbor_ssh/domain/port_forward.dart';
 import 'package:harbor_ssh/domain/network_identity.dart';
 import 'package:harbor_ssh/data/file_copy.dart';
 import 'package:harbor_ssh/data/local_files.dart';
@@ -163,6 +164,11 @@ void main() {
         );
         expect(trusted, [outer.id, inner.id, target.id]);
         expect(fingerprints.toSet(), hasLength(3));
+        await SshConnection.setMobileBackgrounded(true);
+        expect(connection.backgroundWorkAllowed, isFalse);
+        await SshConnection.setMobileBackgrounded(false);
+        expect(connection.backgroundWorkAllowed, isTrue);
+        expect(connection.status, ConnectionStatus.connected);
         connection.send('jump-session\r');
         await eventually(
           () => connection.terminal.buffer.getText().contains(
@@ -288,6 +294,93 @@ void main() {
           expect(connection.status, ConnectionStatus.failed);
           expect(connection.error, contains('中转主机'));
         }
+      });
+      test('后台恢复保留现有连接和转发，认证中的连接延迟探测', () async {
+        final repository = memoryRepository();
+        final connection = SshConnection(id: 'mobile', host: host());
+        addTearDown(connection.dispose);
+        addTearDown(() => SshConnection.setMobileBackgrounded(false));
+        const credentials = Credentials(password: 'fixture-password');
+        await connection.connect(credentials, repository, (_, _) async => true);
+        const rule = PortForwardRule(
+          id: 'mobile-forward', name: 'mobile',
+          type: PortForwardType.dynamic, bindPort: 0,
+        );
+        await connection.portForwards.start(rule);
+        final before = connection.portForwards.state(rule.id);
+        expect(before.status, PortForwardStatus.running);
+        await SshConnection.setMobileBackgrounded(true);
+        expect(connection.backgroundWorkAllowed, isFalse);
+        await SshConnection.setMobileBackgrounded(false);
+        expect(connection.backgroundWorkAllowed, isTrue);
+        expect(connection.portForwards.state(rule.id).status, PortForwardStatus.running);
+        expect(connection.portForwards.state(rule.id).port, before.port);
+        connection.send('after-mobile-resume\r');
+        await eventually(() => connection.terminal.buffer.getText().contains('ECHO=after-mobile-resume'));
+
+        final pending = SshConnection(id: 'mobile-pending', host: host());
+        addTearDown(pending.dispose);
+        final opened = Completer<void>();
+        final decision = Completer<bool>();
+        final connecting = pending.connect(credentials, memoryRepository(), (_, _) {
+          opened.complete();
+          return decision.future;
+        });
+        await opened.future;
+        await SshConnection.setMobileBackgrounded(true);
+        await SshConnection.setMobileBackgrounded(false);
+        expect(pending.backgroundWorkAllowed, isFalse);
+        decision.complete(true);
+        await connecting;
+        expect(pending.status, ConnectionStatus.connected, reason: pending.error);
+        expect(pending.backgroundWorkAllowed, isTrue);
+      });
+      test('恢复探测超时关闭转发，迟到的探测不影响重连或再次后台', () async {
+        final target = Host(
+          id: 'slow-mobile', name: 'Slow fixture', address: '127.0.0.1',
+          port: port, username: 'slow-keepalive',
+        );
+        final repository = memoryRepository();
+        const credentials = Credentials(password: 'fixture-password');
+        final connection = SshConnection(id: 'slow-mobile', host: target);
+        var disposed = false;
+        addTearDown(() { if (!disposed) connection.dispose(); });
+        addTearDown(() => SshConnection.setMobileBackgrounded(false));
+        await connection.connect(credentials, repository, (_, _) async => true);
+        const rule = PortForwardRule(
+          id: 'slow-forward', name: 'slow',
+          type: PortForwardType.dynamic, bindPort: 0,
+        );
+        await connection.portForwards.start(rule);
+        expect(connection.portForwards.state(rule.id).status, PortForwardStatus.running);
+        await SshConnection.setMobileBackgrounded(true);
+        var completed = false;
+        final resume = SshConnection.setMobileBackgrounded(false).then((_) => completed = true);
+        await Future<void>.delayed(const Duration(milliseconds: 100));
+        expect(completed, isFalse);
+        expect(connection.backgroundWorkAllowed, isFalse);
+        await resume;
+        expect(connection.status, ConnectionStatus.failed);
+        expect(connection.error, contains('前台恢复时 SSH 连接检测失败'));
+        await eventually(() => connection.portForwards.state(rule.id).status == PortForwardStatus.stopped);
+
+        await connection.reconnect(credentials, repository, (_, _) async => true);
+        expect(connection.status, ConnectionStatus.connected, reason: connection.error);
+        await SshConnection.setMobileBackgrounded(true);
+        final stale = SshConnection.setMobileBackgrounded(false);
+        await Future<void>.delayed(const Duration(milliseconds: 100));
+        await SshConnection.setMobileBackgrounded(true);
+        connection.close();
+        await connection.reconnect(credentials, repository, (_, _) async => true);
+        expect(connection.status, ConnectionStatus.connected, reason: connection.error);
+        await stale;
+        expect(connection.status, ConnectionStatus.connected);
+        expect(connection.backgroundWorkAllowed, isFalse);
+        final disposing = SshConnection.setMobileBackgrounded(false);
+        await Future<void>.delayed(const Duration(milliseconds: 100));
+        connection.dispose();
+        disposed = true;
+        await disposing;
       });
       test('免密码认证可打开终端和 SFTP，拒绝不允许免密码的账户', () async {
         final connection = SshConnection(
@@ -1412,6 +1505,11 @@ void main() {
           (_, _) async => true,
           openShell: false,
         );
+        expect(connection.status, ConnectionStatus.connected);
+        await SshConnection.setMobileBackgrounded(true);
+        expect(connection.backgroundWorkAllowed, isFalse);
+        await SshConnection.setMobileBackgrounded(false);
+        expect(connection.backgroundWorkAllowed, isTrue);
         expect(connection.status, ConnectionStatus.connected);
         final files = connection.files;
         final directory = await files.browse('~');

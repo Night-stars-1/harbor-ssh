@@ -16,6 +16,7 @@ class TerminalGestureHandler extends StatefulWidget {
     required this.terminalController,
     this.child,
     this.onTapUp,
+    this.onSelectionMenuRequested,
     this.onSingleTapUp,
     this.onTapDown,
     this.onSecondaryTapDown,
@@ -32,6 +33,8 @@ class TerminalGestureHandler extends StatefulWidget {
   final Widget? child;
 
   final GestureTapUpCallback? onTapUp;
+
+  final ValueChanged<Offset>? onSelectionMenuRequested;
 
   final GestureTapUpCallback? onSingleTapUp;
 
@@ -58,6 +61,7 @@ class _TerminalGestureHandlerState extends State<TerminalGestureHandler> {
 
   CellAnchor? _dragStart;
   CellAnchor? _longPressStart;
+  Offset? _longPressPosition;
 
   CellAnchor _anchorAt(Offset offset) => terminalView.widget.terminal.buffer
       .createAnchorFromOffset(renderTerminal.getCellOffset(offset));
@@ -173,12 +177,14 @@ class _TerminalGestureHandlerState extends State<TerminalGestureHandler> {
   }
 
   void onLongPressStart(LongPressStartDetails details) {
+    _longPressPosition = details.globalPosition;
     _longPressStart?.dispose();
     _longPressStart = _anchorAt(details.localPosition);
     renderTerminal.selectWordFrom(_longPressStart!.offset);
   }
 
   void onLongPressMoveUpdate(LongPressMoveUpdateDetails details) {
+    _longPressPosition = details.globalPosition;
     final start = _longPressStart;
     if (start != null && start.attached) {
       renderTerminal.selectWordFrom(start.offset, details.localPosition);
@@ -188,6 +194,9 @@ class _TerminalGestureHandlerState extends State<TerminalGestureHandler> {
   void onLongPressUp() {
     _longPressStart?.dispose();
     _longPressStart = null;
+    final position = _longPressPosition;
+    _longPressPosition = null;
+    if (position != null) widget.onSelectionMenuRequested?.call(position);
   }
 
   void onDragStart(DragStartDetails details) {

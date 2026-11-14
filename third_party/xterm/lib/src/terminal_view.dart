@@ -39,6 +39,7 @@ class TerminalView extends StatefulWidget {
     this.focusNode,
     this.autofocus = false,
     this.onTapUp,
+    this.onSelectionMenuRequested,
     this.onSecondaryTapDown,
     this.onSecondaryTapUp,
     this.mouseCursor = SystemMouseCursors.text,
@@ -92,6 +93,9 @@ class TerminalView extends StatefulWidget {
 
   /// Callback for when the user taps on the terminal.
   final void Function(TapUpDetails, CellOffset)? onTapUp;
+
+  /// Called after a touch long press finishes, with its global position.
+  final ValueChanged<Offset>? onSelectionMenuRequested;
 
   /// Function called when the user taps on the terminal with a secondary
   /// button.
@@ -322,6 +326,7 @@ class TerminalViewState extends State<TerminalView> {
       terminalView: this,
       terminalController: _controller,
       onTapUp: _onTapUp,
+      onSelectionMenuRequested: widget.onSelectionMenuRequested,
       onTapDown: _onTapDown,
       onSecondaryTapDown:
           widget.onSecondaryTapDown != null ? _onSecondaryTapDown : null,

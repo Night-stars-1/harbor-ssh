@@ -1,5 +1,7 @@
-import 'package:flutter/material.dart';
+import 'dart:async';
+
 import 'package:flutter/gestures.dart';
+import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:harbor_ssh/data/ssh_connection.dart';
@@ -282,4 +284,170 @@ void main() {
     expect(tester.takeException(), isNull);
     await tester.pumpWidget(const SizedBox.shrink());
   });
+  testWidgets('Android 长按拖选复制，空白粘贴及多行确认', (tester) async {
+    tester.view.physicalSize = const Size(800, 900);
+    tester.view.devicePixelRatio = 1;
+    const menu = MethodChannel('dev.harborssh/terminal_context_menu');
+    final requests = <Map<dynamic, dynamic>>[];
+    final replies = <Completer<String?>>[];
+    String clipboard = '';
+    tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(menu, (call) {
+      if (call.method == 'show') {
+        requests.add(call.arguments as Map);
+        final reply = Completer<String?>();
+        replies.add(reply);
+        return reply.future;
+      }
+      return Future.value();
+    });
+    tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+      SystemChannels.platform, (call) async {
+        if (call.method == 'Clipboard.setData') clipboard = call.arguments['text'];
+        if (call.method == 'Clipboard.getData') return {'text': clipboard};
+        return null;
+      },
+    );
+    final session = SshConnection(id: 'android-menu', host: testHost)
+      ..status = ConnectionStatus.connected;
+    final output = <String>[];
+    session.terminal.onOutput = output.add;
+    session.terminal.write('hello world');
+    addTearDown(() {
+      tester.view.resetPhysicalSize();
+      tester.view.resetDevicePixelRatio();
+      tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(menu, null);
+      tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(SystemChannels.platform, null);
+      session.dispose();
+    });
+    await tester.pumpWidget(MaterialApp(theme: harborTheme(), home: Scaffold(
+      body: TerminalPane(session: session, onReconnect: () {}),
+    )));
+    await tester.pumpAndSettle();
+    final render = tester.state<TerminalViewState>(find.byType(TerminalView)).renderTerminal;
+    Offset point(int x, int y) => render.localToGlobal(
+      render.getOffset(CellOffset(x, y)) + render.cellSize.center(Offset.zero),
+    );
+    final gesture = await tester.startGesture(point(1, 0));
+    await tester.pump(kLongPressTimeout + const Duration(milliseconds: 50));
+    await gesture.moveTo(point(8, 0));
+    await tester.pump();
+    await gesture.up();
+    await tester.pump();
+    expect(requests.last['canCopy'], isTrue);
+    final controller = tester.widget<TerminalView>(find.byType(TerminalView)).controller!;
+    final selected = session.terminal.buffer.getText(controller.selection);
+    expect(selected, contains('hello'));
+    expect(selected, contains('world'));
+    replies.last.complete('copy');
+    await tester.pumpAndSettle();
+    expect(clipboard, selected);
+    expect(controller.selection, isNull);
+
+    clipboard = 'echo one\necho two';
+    session.terminal.write('\x1b[?2004h');
+    for (final confirm in [false, true]) {
+      await tester.longPressAt(point(30, 2));
+      await tester.pump();
+      expect(requests.last['canPaste'], isTrue);
+      replies.last.complete('paste');
+      await tester.pumpAndSettle();
+      expect(find.text('粘贴多行内容？'), findsOneWidget);
+      await tester.tap(find.text(confirm ? '粘贴' : '取消').last);
+      await tester.pumpAndSettle();
+      if (!confirm) expect(output, isEmpty);
+    }
+    expect(output.join(), '\x1b[200~echo one\necho two\x1b[201~');
+    await tester.pumpWidget(const SizedBox.shrink());
+  }, variant: TargetPlatformVariant({TargetPlatform.android}));
+
+  testWidgets('Android 断线复制并丢弃切换或销毁后的菜单结果', (tester) async {
+    const menu = MethodChannel('dev.harborssh/terminal_context_menu');
+    final requests = <Map<dynamic, dynamic>>[];
+    final replies = <Completer<String?>>[];
+    var clipboard = '';
+    tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(menu, (call) {
+      if (call.method == 'show') {
+        requests.add(call.arguments as Map);
+        final reply = Completer<String?>();
+        replies.add(reply);
+        return reply.future;
+      }
+      return Future.value();
+    });
+    tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(SystemChannels.platform, (call) async {
+      if (call.method == 'Clipboard.setData') clipboard = call.arguments['text'];
+      if (call.method == 'Clipboard.getData') return {'text': 'unsafe'};
+      return null;
+    });
+    final first = SshConnection(id: 'old', host: testHost)
+      ..status = ConnectionStatus.closed;
+    final second = SshConnection(id: 'new', host: testHost)..status = ConnectionStatus.connected;
+    first.terminal.write('hello world');
+    second.terminal.write('second');
+    final output = <String>[];
+    second.terminal.onOutput = output.add;
+    addTearDown(() {
+      tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(menu, null);
+      tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(SystemChannels.platform, null);
+      first.dispose();
+      second.dispose();
+    });
+    Widget pane(SshConnection session) => MaterialApp(theme: harborTheme(), home: Scaffold(
+      body: TerminalPane(session: session, onReconnect: () {}),
+    ));
+    await tester.pumpWidget(pane(first));
+    await tester.pumpAndSettle();
+    Offset point() {
+      final render = tester.state<TerminalViewState>(find.byType(TerminalView)).renderTerminal;
+      return render.localToGlobal(render.getOffset(CellOffset(1, 0)) + render.cellSize.center(Offset.zero));
+    }
+    await tester.longPressAt(point());
+    await tester.pump();
+    expect(requests.last['canCopy'], isTrue);
+    expect(requests.last['canPaste'], isFalse);
+    replies.last.complete('copy');
+    await tester.pumpAndSettle();
+    expect(clipboard, contains('hello'));
+    await tester.longPressAt(point());
+    await tester.pump();
+    final stale = replies.last;
+    await tester.pumpWidget(pane(second));
+    await tester.pump();
+    stale.complete('paste');
+    await tester.pump();
+    expect(output, isEmpty);
+    await tester.longPressAt(point());
+    await tester.pump();
+    final disposed = replies.last;
+    await tester.pumpWidget(const SizedBox.shrink());
+    disposed.complete('paste');
+    await tester.pump();
+    expect(output, isEmpty);
+  }, variant: TargetPlatformVariant({TargetPlatform.android}));
+  testWidgets('桌面长按不调用 Android 系统菜单', (tester) async {
+    const menu = MethodChannel('dev.harborssh/terminal_context_menu');
+    final calls = <MethodCall>[];
+    tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(menu, (call) async {
+      calls.add(call);
+      return null;
+    });
+    final session = SshConnection(id: 'desktop-menu', host: testHost)
+      ..status = ConnectionStatus.connected;
+    session.terminal.write('desktop');
+    addTearDown(() {
+      tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(menu, null);
+      session.dispose();
+    });
+    await tester.pumpWidget(MaterialApp(theme: harborTheme(), home: Scaffold(
+      body: TerminalPane(session: session, onReconnect: () {}),
+    )));
+    await tester.pumpAndSettle();
+    final render = tester.state<TerminalViewState>(find.byType(TerminalView)).renderTerminal;
+    await tester.longPressAt(render.localToGlobal(
+      render.getOffset(CellOffset(1, 0)) + render.cellSize.center(Offset.zero),
+    ));
+    await tester.pump();
+    expect(calls, isEmpty);
+    await tester.pumpWidget(const SizedBox.shrink());
+  }, variant: TargetPlatformVariant({TargetPlatform.windows}));
 }
