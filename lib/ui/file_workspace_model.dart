@@ -4,6 +4,7 @@ import 'dart:math';
 
 import 'package:flutter/foundation.dart';
 
+import '../data/external_files.dart';
 import '../data/file_copy.dart';
 import '../data/local_files.dart';
 import '../data/resumable_copy.dart';
@@ -224,13 +225,21 @@ class FileDragData {
 }
 
 class FileWorkspaceModel extends ChangeNotifier {
-  FileWorkspaceModel({this.localHome, TransferSpeed? transferSpeed})
-    : transferSpeed = transferSpeed ?? TransferSpeed() {
+  FileWorkspaceModel({
+    this.localHome,
+    TransferSpeed? transferSpeed,
+    ExternalEdits? externalEdits,
+  }) : transferSpeed = transferSpeed ?? TransferSpeed(),
+       externalEdits = externalEdits ?? ExternalEdits() {
     this.transferSpeed.addListener(_notify);
   }
 
   final RemoteFileSystem? Function()? localHome;
   final TransferSpeed transferSpeed;
+
+  /// Files opened in external applications. Their copies and sync loops live
+  /// as long as the workspace, independent of the tab or editor they came from.
+  final ExternalEdits externalEdits;
   String defaultLocalPath = '';
   String get localTabName => defaultLocalPath.isEmpty
       ? '本地 · 用户目录'
@@ -1373,6 +1382,7 @@ class FileWorkspaceModel extends ChangeNotifier {
     }
     transferSpeed.removeListener(_notify);
     transferSpeed.dispose();
+    externalEdits.dispose();
     for (final pane in panes) {
       for (final tab in pane.tabs) {
         tab.removeListener(_notify);

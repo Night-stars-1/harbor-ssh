@@ -5,6 +5,7 @@ import android.content.Intent
 import android.net.Uri
 import android.os.Build
 import android.provider.DocumentsContract
+import android.webkit.MimeTypeMap
 import android.provider.Settings
 import androidx.core.content.FileProvider
 import android.view.View
@@ -118,6 +119,32 @@ class MainActivity : FlutterActivity() {
                     else -> result.notImplemented()
                 }
             }
+        MethodChannel(flutterEngine.dartExecutor.binaryMessenger, "dev.harborssh/open_file")
+            .setMethodCallHandler { call, result ->
+                if (call.method == "open") openExternal(File(call.arguments as String), result)
+                else result.notImplemented()
+            }
+    }
+
+    /** Hands a copy under cache/harbor-external to another app, read-only. */
+    private fun openExternal(file: File, result: MethodChannel.Result) {
+        if (!file.canonicalPath.startsWith(File(cacheDir, "harbor-external").canonicalPath + File.separator)) {
+            result.error("open_failed", "文件位置无效", null)
+            return
+        }
+        try {
+            val uri = FileProvider.getUriForFile(this, "$packageName.updates", file)
+            val extension = file.extension.lowercase()
+            val type = MimeTypeMap.getSingleton().getMimeTypeFromExtension(extension) ?: "text/plain"
+            val view = Intent(Intent.ACTION_VIEW).apply {
+                setDataAndType(uri, type)
+                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            }
+            startActivity(Intent.createChooser(view, "打开方式"))
+            result.success(null)
+        } catch (error: Exception) {
+            result.error("open_failed", error.message, null)
+        }
     }
 
     private fun installApk(apk: File, result: MethodChannel.Result) {

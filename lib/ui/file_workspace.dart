@@ -9,6 +9,7 @@ import '../data/ssh_connection.dart';
 import '../domain/host.dart';
 import '../domain/remote_file.dart';
 import 'expressive_widgets.dart';
+import 'external_edits_bar.dart';
 import 'file_workspace_model.dart';
 import 'host_icons.dart';
 import 'remote_text_editor_dialog.dart';
@@ -434,6 +435,7 @@ class _FileWorkspaceState extends State<FileWorkspace> {
               },
             ),
           ),
+          ExternalEditsBar(edits: model.externalEdits),
           if (model.busy || model.message != null) _statusBar(),
         ],
       );
@@ -1114,6 +1116,14 @@ class _FileWorkspaceState extends State<FileWorkspace> {
   bool _canEditRemoteText(FileLocationTab tab, RemoteFile file) =>
       !tab.isLocal && !file.isDirectory && !file.isLink;
 
+  bool _canOpenExternal(FileLocationTab tab, RemoteFile file) =>
+      model.tabs.contains(tab) &&
+      !file.isDirectory &&
+      !file.isLink &&
+      tab.connected &&
+      !tab.loading &&
+      tab.error == null;
+
   Future<void> _editFile(FileLocationTab tab, RemoteFile file) async {
     if (_editing ||
         !mounted ||
@@ -1130,6 +1140,7 @@ class _FileWorkspaceState extends State<FileWorkspace> {
         context,
         files: tab.files,
         file: file,
+        onOpenExternal: () => _openExternal(tab, file),
       );
       if (!saved || !mounted || !model.tabs.contains(tab)) return;
       await tab.browse();
@@ -1140,6 +1151,24 @@ class _FileWorkspaceState extends State<FileWorkspace> {
       }
     } finally {
       if (mounted) setState(() => _editing = false);
+    }
+  }
+
+  /// 本机文件直接交给系统默认程序；远端文件先复制到本机，外部保存后由
+  /// [ExternalEdits] 回传，进度显示在文件页底部的外部打开条里。
+  Future<void> _openExternal(FileLocationTab tab, RemoteFile file) async {
+    if (!mounted || !_canOpenExternal(tab, file)) return;
+    try {
+      if (tab.isLocal) {
+        await model.externalEdits.openLocal(file.path);
+      } else {
+        await model.externalEdits.openRemote(tab.files, file);
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context)
+            .showSnackBar(SnackBar(content: Text(fileError(e))));
+      }
     }
   }
 
@@ -1154,6 +1183,7 @@ class _FileWorkspaceState extends State<FileWorkspace> {
     final deletable = model.canDelete(data);
     final editable =
         deletable && data.files.length == 1 && _canEditRemoteText(tab, file);
+    final external = data.files.length == 1 && _canOpenExternal(tab, file);
     final creatable = model.canCreate(tab);
     final renamable = model.canRename(tab, file);
     final permissions = model.canSetPermissions(tab, file);
@@ -1214,6 +1244,23 @@ class _FileWorkspaceState extends State<FileWorkspace> {
                 Icon(Icons.edit_outlined, size: 20, color: colors.primary),
                 const SizedBox(width: 10),
                 const Text('编辑文件'),
+              ],
+            ),
+          ),
+        if (external)
+          HarborPopupMenuItem<Object>(
+            key: const ValueKey('open-entry-external'),
+            value: 'external',
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Icon(
+                  Icons.open_in_new_rounded,
+                  size: 20,
+                  color: colors.primary,
+                ),
+                const SizedBox(width: 10),
+                Text(tab.isLocal ? '用默认程序打开' : externalOpenLabel),
               ],
             ),
           ),
@@ -1319,6 +1366,9 @@ class _FileWorkspaceState extends State<FileWorkspace> {
         return;
       case 'edit':
         await _editFile(tab, file);
+        return;
+      case 'external':
+        await _openExternal(tab, file);
         return;
     }
     if (action != 'delete' || !mounted || !model.canDelete(data)) return;

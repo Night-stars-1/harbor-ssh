@@ -7,6 +7,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/gestures.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:harbor_ssh/data/external_files.dart';
 import 'package:harbor_ssh/data/file_copy.dart';
 import 'package:harbor_ssh/data/local_files.dart';
 import 'package:harbor_ssh/data/ssh_connection.dart';
@@ -400,7 +401,7 @@ void main() {
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 300));
     expect(remoteEditorController(tester).text, '暂存内容');
-    await tester.tap(find.text('取消'));
+    await tester.tap(find.byKey(const ValueKey('close-remote-text')));
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 300));
     await tester.tap(find.byKey(const ValueKey('discard-remote-text')));
@@ -488,6 +489,125 @@ void main() {
     expect(tester.takeException(), isNull);
     await tester.pumpWidget(const SizedBox.shrink());
   });
+
+  for (final width in [390.0, 1100.0]) {
+    testWidgets('编辑器转交外部程序：放弃草稿后关闭编辑器，外部保存回传远端 $width', (
+      tester,
+    ) async {
+      tester.view.physicalSize = Size(width, 760);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+      final temp = Directory.systemTemp.createTempSync('harbor-external-ui-');
+      addTearDown(() => temp.deleteSync(recursive: true));
+      final launched = <String>[];
+      final model = FileWorkspaceModel(
+        externalEdits: ExternalEdits(
+          launch: (path) async => launched.add(path),
+          temporaryDirectory: () async => temp,
+          pollInterval: const Duration(hours: 1),
+          syncBack: true,
+        ),
+      );
+      addTearDown(model.dispose);
+      final files = MemoryFiles()
+        ..data['/app.conf'] = Uint8List.fromList(utf8.encode('port=80\n'));
+      final tab = model.add(0, name: 'SFTP', files: files);
+      await tester.pumpWidget(
+        MaterialApp(
+          theme: harborTheme().copyWith(platform: TargetPlatform.android),
+          home: Scaffold(
+            body: FileWorkspace(
+              model: model,
+              hosts: const [],
+              sessions: const [],
+              onConnect: (_) async => null,
+              initializeLocal: false,
+            ),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+      final row = find.byKey(ValueKey('entry-${tab.id}-/app.conf'));
+      await openRemoteEditor(tester, row);
+
+      // 手机全屏、桌面居中：编辑器始终完整落在窗口内，状态栏给出光标与换行符。
+      final dialog = tester.getRect(
+        find.byKey(const ValueKey('remote-text-dialog')),
+      );
+      expect(dialog.left, greaterThanOrEqualTo(0));
+      expect(dialog.right, lessThanOrEqualTo(width));
+      expect(dialog.bottom, lessThanOrEqualTo(760));
+      expect(find.text('行 1，列 1'), findsOneWidget);
+      if (width >= 600) {
+        expect(
+          tester
+              .widget<Text>(find.byKey(const ValueKey('remote-text-line-break')))
+              .data,
+          'LF',
+        );
+      }
+
+      replaceRemoteText(tester, '未保存的草稿');
+      await tester.pump();
+      expect(find.byKey(const ValueKey('remote-text-dirty')), findsOneWidget);
+      if (width < 600) {
+        await tester.tap(find.byKey(const ValueKey('remote-text-more')));
+        await tester.pump();
+        await tester.pump(const Duration(milliseconds: 400));
+      }
+      await tester.tap(find.byKey(const ValueKey('open-remote-text-external')));
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 300));
+      // 外部副本来自远端；未保存的草稿必须先确认放弃。
+      expect(find.text('放弃未保存的修改？'), findsOneWidget);
+      await tester.tap(find.byKey(const ValueKey('discard-remote-text')));
+      await tester.pump();
+      await tester.pump(const Duration(seconds: 1));
+      // 复制走真实文件系统：真实等待与 pump 交替推进，直到交给外部程序。
+      for (var i = 0; i < 50 && launched.isEmpty; i++) {
+        await tester.runAsync(
+          () => Future<void>.delayed(const Duration(milliseconds: 20)),
+        );
+        await tester.pump();
+      }
+
+      expect(find.byKey(const ValueKey('remote-text-content')), findsNothing);
+      expect(launched, hasLength(1));
+      final session = model.externalEdits.sessions.single;
+      expect(File(launched.single).readAsStringSync(), 'port=80\n');
+      expect(
+        find.byKey(const ValueKey('external-edit-/app.conf')),
+        findsOneWidget,
+      );
+
+      await tester.runAsync(() async {
+        await session.local.writeAsString('port=8080\n');
+        await session.check();
+        await session.check();
+      });
+      await tester.pump();
+      expect(utf8.decode(files.data['/app.conf']!), 'port=8080\n');
+      expect(
+        tester
+            .widget<Text>(
+              find.byKey(const ValueKey('external-edit-status-/app.conf')),
+            )
+            .data,
+        contains('已同步'),
+      );
+
+      await tester.tap(find.byKey(const ValueKey('external-edit-stop-/app.conf')));
+      await tester.runAsync(
+        () => Future<void>.delayed(const Duration(milliseconds: 50)),
+      );
+      await tester.pump();
+      expect(model.externalEdits.sessions, isEmpty);
+      expect(find.byKey(const ValueKey('external-edits')), findsNothing);
+      expect(tester.takeException(), isNull);
+      await tester.pumpWidget(const SizedBox.shrink());
+    });
+  }
 
   test('本地删除只移除指定文件并拒绝递归删除目录', () async {
     final root = await Directory.systemTemp.createTemp('harbor-delete-test-');
@@ -2588,14 +2708,9 @@ int remoteLineNumberCount(WidgetTester tester) => tester
     .paragraphs
     .length;
 
-/// 头部展示的语法高亮语言标签。
+/// 状态栏展示的语法高亮语言。
 String remoteLanguageLabel(WidgetTester tester) => tester
-    .widget<Text>(
-      find.descendant(
-        of: find.byKey(const ValueKey('remote-text-language')),
-        matching: find.byType(Text),
-      ),
-    )
+    .widget<Text>(find.byKey(const ValueKey('remote-text-language')))
     .data!;
 
 class MemoryFiles implements RemoteFileSystem {

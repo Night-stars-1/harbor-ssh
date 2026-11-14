@@ -1,6 +1,5 @@
 import 'dart:async';
 import 'dart:convert';
-import 'dart:math' as math;
 import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
@@ -8,6 +7,7 @@ import 'package:flutter/services.dart';
 import 'package:flutter/widget_previews.dart';
 import 'package:re_editor/re_editor.dart';
 
+import '../data/external_files.dart' show externalEditsSyncBack;
 import '../data/remote_text_editor.dart';
 import '../domain/remote_file.dart';
 import 'file_workspace_model.dart' show fileError;
@@ -19,18 +19,34 @@ import 'theme.dart';
 ///
 /// 取消、读取失败、放弃修改或保存失败都返回 false；保存失败时对话框保持
 /// 打开并保留草稿，用户可以直接重试或复制草稿后再关闭。
+///
+/// [onOpenExternal] 为空时不显示「用外部程序打开」。它在编辑器关闭之后才被
+/// 调用，避免外部副本与未保存的草稿同时修改同一个远端文件。
 Future<bool> showRemoteTextEditor(
   BuildContext context, {
   required RemoteFileSystem files,
   required RemoteFile file,
+  Future<void> Function()? onOpenExternal,
 }) async {
-  final saved = await showExpressiveDialog<bool>(
+  final result = await showExpressiveDialog<_EditorResult>(
     context: context,
     barrierDismissible: false,
-    builder: (context) => RemoteTextEditorDialog(files: files, file: file),
+    builder: (context) => RemoteTextEditorDialog(
+      files: files,
+      file: file,
+      externalLabel: onOpenExternal == null ? null : externalOpenLabel,
+    ),
   );
-  return saved ?? false;
+  if (result == _EditorResult.external) await onOpenExternal?.call();
+  return result == _EditorResult.saved;
 }
+
+/// 「用外部程序打开」在当前平台上的说明：桌面会把外部保存同步回远端，
+/// Android 只能交出只读副本。
+String get externalOpenLabel =>
+    externalEditsSyncBack ? '用外部程序打开' : '用其他应用查看';
+
+enum _EditorResult { saved, external }
 
 /// 远程文本编辑对话框：读取 [file] 的 UTF-8 内容，编辑后经
 /// [RemoteTextEditor.save] 原子写回。
@@ -39,10 +55,14 @@ class RemoteTextEditorDialog extends StatefulWidget {
     super.key,
     required this.files,
     required this.file,
+    this.externalLabel,
   });
 
   final RemoteFileSystem files;
   final RemoteFile file;
+
+  /// 外部打开按钮的文字；为空时不显示该入口。
+  final String? externalLabel;
 
   @override
   State<RemoteTextEditorDialog> createState() => _RemoteTextEditorDialogState();
@@ -69,6 +89,9 @@ class _RemoteTextEditorDialogState extends State<RemoteTextEditorDialog> {
   String _renderedOriginal = '';
   bool _loading = true, _saving = false, _dirty = false;
   String? _loadError, _saveError;
+
+  /// UTF-8 大小，载入时计算一次，供状态栏显示；重新载入后远端大小可能变化。
+  int? _size;
 
   /// 载入完成时的行集合。光标移动只改选择并复用同一 [CodeLines] 实例，
   /// 用它跳过全文拼接，避免大文件里的每次移动光标都重算整篇文本。
@@ -142,6 +165,7 @@ class _RemoteTextEditorDialogState extends State<RemoteTextEditorDialog> {
       );
       setState(() {
         _original = content;
+        _size = utf8.encode(content).length;
         _dirty = false;
         _loading = false;
       });
@@ -163,7 +187,7 @@ class _RemoteTextEditorDialogState extends State<RemoteTextEditorDialog> {
     final draft = _text.text;
     // 控制器会将混合换行规范化；没有实际编辑时不能因此覆盖原文件。
     if (draft == _renderedOriginal) {
-      Navigator.of(context).pop(false);
+      Navigator.of(context).pop();
       return;
     }
     _focus.unfocus();
@@ -176,7 +200,7 @@ class _RemoteTextEditorDialogState extends State<RemoteTextEditorDialog> {
       if (!mounted) return;
       final leftover = _editor.leftoverBackupPath;
       final messenger = ScaffoldMessenger.of(context);
-      Navigator.of(context).pop(true);
+      Navigator.of(context).pop(_EditorResult.saved);
       if (leftover != null) {
         messenger.showSnackBar(
           SnackBar(content: Text('已保存，但远端临时备份未能删除：$leftover')),
@@ -225,7 +249,15 @@ class _RemoteTextEditorDialogState extends State<RemoteTextEditorDialog> {
   Future<void> _requestClose() async {
     if (_saving) return;
     if (_dirty && !await _confirmDiscard()) return;
-    if (mounted) Navigator.of(context).pop(false);
+    if (mounted) Navigator.of(context).pop();
+  }
+
+  /// 外部程序拿到的是远端当前内容；编辑器先关闭，未保存的草稿需要确认放弃，
+  /// 避免两份内容分别写回同一个远端文件。
+  Future<void> _openExternal() async {
+    if (_saving) return;
+    if (_dirty && !await _confirmDiscard()) return;
+    if (mounted) Navigator.of(context).pop(_EditorResult.external);
   }
 
   String get _statusLabel {
@@ -234,30 +266,30 @@ class _RemoteTextEditorDialogState extends State<RemoteTextEditorDialog> {
     if (_saving) return '正在写入远端…';
     if (_saveError != null) return '保存失败，草稿已保留';
     if (_dirty) return '未保存的修改';
-    return '内容与远端一致';
+    return '已与远端同步';
   }
 
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     final colors = theme.colorScheme;
-    final media = MediaQuery.of(context);
-    final compact = media.size.width < 600;
-    final inset = compact ? 8.0 : 24.0;
-    final height = math.min(
-      740.0,
-      math.max(
-        0.0,
-        media.size.height -
-            media.padding.vertical -
-            media.viewInsets.vertical -
-            inset * 2,
-      ),
+    // 手机上占满屏幕：代码需要尽可能宽，四周留白只会挤掉可见列数。
+    final compact = MediaQuery.sizeOf(context).width < 600;
+    final content = Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        _toolbar(theme, colors, compact),
+        Divider(height: 1, color: colors.outlineVariant),
+        Expanded(child: _body(theme, colors)),
+        if (_saveError != null) _saveErrorBanner(colors),
+        Divider(height: 1, color: colors.outlineVariant),
+        _statusBar(theme, colors, compact),
+      ],
     );
 
     return PopScope(
-      // 所有离开路径（取消、关闭图标、Esc、系统返回）都由 [_requestClose]
-      // 处理，它按当前草稿状态决定是否确认，不依赖上一帧的构建结果。
+      // 所有离开路径（关闭图标、Esc、系统返回）都由 [_requestClose] 处理，
+      // 它按当前草稿状态决定是否确认，不依赖上一帧的构建结果。
       canPop: false,
       onPopInvokedWithResult: (didPop, result) {
         if (didPop) return;
@@ -271,118 +303,183 @@ class _RemoteTextEditorDialogState extends State<RemoteTextEditorDialog> {
           // barrierDismissible 为 false 的对话框，这里统一接管为关闭请求。
           const SingleActivator(LogicalKeyboardKey.escape): _requestClose,
         },
-        child: Dialog(
-          key: const ValueKey('remote-text-dialog'),
-          insetPadding: EdgeInsets.all(inset),
-          clipBehavior: Clip.antiAlias,
-          child: SizedBox(
-            width: 900,
-            height: height,
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.stretch,
-              children: [
-                _header(theme, colors, compact),
-                Divider(height: 1, color: colors.outlineVariant),
-                Expanded(child: _body(theme, colors, compact ? 8 : 14)),
-                if (_saveError != null)
-                  _saveErrorBanner(colors, compact ? 12 : 20),
-                Divider(height: 1, color: colors.outlineVariant),
-                _footer(theme, colors, compact),
-              ],
-            ),
-          ),
-        ),
+        child: compact
+            ? Dialog.fullscreen(
+                key: const ValueKey('remote-text-dialog'),
+                backgroundColor: colors.surfaceContainerLow,
+                child: SafeArea(child: content),
+              )
+            : Dialog(
+                key: const ValueKey('remote-text-dialog'),
+                insetPadding: const EdgeInsets.all(24),
+                clipBehavior: Clip.antiAlias,
+                child: ConstrainedBox(
+                  constraints: const BoxConstraints(
+                    maxWidth: 1120,
+                    maxHeight: 860,
+                  ),
+                  child: SizedBox.expand(child: content),
+                ),
+              ),
       ),
     );
   }
 
-  Widget _header(ThemeData theme, ColorScheme colors, bool compact) => Padding(
-    padding: EdgeInsets.fromLTRB(compact ? 16 : 20, 12, compact ? 8 : 12, 12),
-    child: Row(
-      children: [
-        DecoratedBox(
-          decoration: BoxDecoration(
-            color: colors.primaryContainer.withValues(alpha: .55),
-            borderRadius: const BorderRadius.all(HarborShapes.sm),
-          ),
-          child: SizedBox.square(
-            dimension: 36,
-            child: Icon(
-              Icons.code_rounded,
-              size: 20,
-              color: colors.onPrimaryContainer,
-            ),
-          ),
+  /// 顶部工具栏：文件身份在左，操作在右。保存是唯一的主操作，其余都是图标
+  /// 或描边按钮；手机上把重新载入和外部打开收进「更多」菜单，给文件名留宽度。
+  Widget _toolbar(ThemeData theme, ColorScheme colors, bool compact) {
+    final external = widget.externalLabel;
+    final save = Tooltip(
+      message: '保存（Ctrl+S）',
+      child: FilledButton.icon(
+        key: const ValueKey('save-remote-text'),
+        style: FilledButton.styleFrom(
+          minimumSize: Size(0, compact ? 44 : 40),
+          padding: EdgeInsets.symmetric(horizontal: compact ? 16 : 18),
         ),
-        const SizedBox(width: 12),
-        Expanded(
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Row(
-                children: [
-                  Flexible(
-                    child: Text(
-                      _file.name,
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: theme.textTheme.titleMedium?.copyWith(
-                        fontWeight: FontWeight.w700,
-                      ),
-                    ),
-                  ),
-                  const SizedBox(width: 8),
-                  _languageBadge(colors),
-                ],
+        onPressed: _ready ? _save : null,
+        icon: _saving
+            ? const SizedBox.square(
+                dimension: 16,
+                child: CircularProgressIndicator(strokeWidth: 2),
+              )
+            : const Icon(Icons.save_outlined, size: 18),
+        label: Text(_saving ? '正在保存…' : '保存'),
+      ),
+    );
+    final close = IconButton(
+      key: const ValueKey('close-remote-text'),
+      onPressed: _saving ? null : _requestClose,
+      tooltip: '关闭编辑器',
+      icon: const Icon(Icons.close_rounded),
+    );
+    return Padding(
+      padding: EdgeInsets.fromLTRB(compact ? 4 : 16, 10, compact ? 4 : 12, 10),
+      child: Row(
+        children: [
+          if (compact) close else _fileMark(colors),
+          SizedBox(width: compact ? 4 : 12),
+          Expanded(child: _identity(theme, colors, compact)),
+          const SizedBox(width: 8),
+          if (compact) ...[
+            save,
+            PopupMenuButton<String>(
+              key: const ValueKey('remote-text-more'),
+              tooltip: '更多操作',
+              enabled: !_saving,
+              clipBehavior: theme.windowBackdrop.frosted
+                  ? Clip.antiAlias
+                  : Clip.none,
+              popUpAnimationStyle: HarborMotion.popup(context),
+              onSelected: (action) => unawaited(
+                action == 'reload' ? _reload() : _openExternal(),
               ),
-              const SizedBox(height: 2),
-              Text(
-                _subtitle,
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-                style: theme.textTheme.bodySmall?.copyWith(
-                  color: colors.onSurfaceVariant,
+              itemBuilder: (_) => [
+                if (theme.windowBackdrop.frosted)
+                  const HarborPopupMenuBackdrop<String>(),
+                HarborPopupMenuItem(
+                  key: const ValueKey('reload-remote-text'),
+                  value: 'reload',
+                  enabled: !_busy,
+                  child: const _MenuLabel(Icons.refresh_rounded, '重新载入'),
                 ),
+                if (external != null)
+                  HarborPopupMenuItem(
+                    key: const ValueKey('open-remote-text-external'),
+                    value: 'external',
+                    child: _MenuLabel(Icons.open_in_new_rounded, external),
+                  ),
+              ],
+            ),
+          ] else ...[
+            IconButton(
+              key: const ValueKey('reload-remote-text'),
+              onPressed: _busy ? null : _reload,
+              tooltip: '重新载入远端内容',
+              icon: const Icon(Icons.refresh_rounded),
+            ),
+            if (external != null) ...[
+              const SizedBox(width: 4),
+              OutlinedButton.icon(
+                key: const ValueKey('open-remote-text-external'),
+                onPressed: _saving ? null : _openExternal,
+                icon: const Icon(Icons.open_in_new_rounded, size: 18),
+                label: Text(external),
               ),
             ],
-          ),
-        ),
-        IconButton(
-          key: const ValueKey('close-remote-text'),
-          onPressed: _saving ? null : _requestClose,
-          tooltip: '关闭编辑器',
-          icon: const Icon(Icons.close_rounded),
-        ),
-      ],
-    ),
-  );
-
-  String get _subtitle {
-    final size = _file.size;
-    final suffix = size == null ? '' : ' · ${fileSizeLabel(size)}';
-    return '${_file.path} · UTF-8$suffix';
+            const SizedBox(width: 8),
+            save,
+            const SizedBox(width: 4),
+            close,
+          ],
+        ],
+      ),
+    );
   }
 
-  /// 头部语言标签：按文件路径推断高亮语言，未知文件显示「纯文本」。
-  Widget _languageBadge(ColorScheme colors) => Container(
-    key: const ValueKey('remote-text-language'),
-    padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+  Widget _fileMark(ColorScheme colors) => DecoratedBox(
     decoration: BoxDecoration(
-      color: colors.secondaryContainer,
-      borderRadius: const BorderRadius.all(HarborShapes.xs),
+      color: colors.primaryContainer.withValues(alpha: .55),
+      borderRadius: const BorderRadius.all(HarborShapes.sm),
     ),
-    child: Text(
-      remoteCodeLanguageLabel(_file.path),
-      style: TextStyle(
-        fontSize: 11,
-        fontWeight: FontWeight.w700,
-        color: colors.onSecondaryContainer,
+    child: SizedBox.square(
+      dimension: 40,
+      child: Icon(
+        Icons.code_rounded,
+        size: 20,
+        color: colors.onPrimaryContainer,
       ),
     ),
   );
 
-  Widget _body(ThemeData theme, ColorScheme colors, double inset) {
+  /// 文件名与完整路径。未保存时文件名后跟一个圆点，与常见桌面编辑器一致；
+  /// 路径用等宽字体，便于和终端里看到的路径对照。
+  Widget _identity(ThemeData theme, ColorScheme colors, bool compact) => Column(
+    mainAxisSize: MainAxisSize.min,
+    crossAxisAlignment: CrossAxisAlignment.start,
+    children: [
+      Row(
+        children: [
+          Flexible(
+            child: Text(
+              _file.name,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: theme.textTheme.titleMedium?.copyWith(
+                fontWeight: FontWeight.w700,
+              ),
+            ),
+          ),
+          if (_dirty) ...[
+            const SizedBox(width: 8),
+            Semantics(
+              label: '未保存',
+              child: DecoratedBox(
+                key: const ValueKey('remote-text-dirty'),
+                decoration: BoxDecoration(
+                  color: colors.tertiary,
+                  shape: BoxShape.circle,
+                ),
+                child: const SizedBox.square(dimension: 8),
+              ),
+            ),
+          ],
+        ],
+      ),
+      if (!compact) const SizedBox(height: 2),
+      Text(
+        _file.path,
+        maxLines: 1,
+        overflow: TextOverflow.ellipsis,
+        style: theme.textTheme.bodySmall?.copyWith(
+          fontFamily: 'monospace',
+          color: colors.onSurfaceVariant,
+        ),
+      ),
+    ],
+  );
+
+  Widget _body(ThemeData theme, ColorScheme colors) {
     if (_loading) {
       return Center(
         child: Column(
@@ -405,123 +502,138 @@ class _RemoteTextEditorDialogState extends State<RemoteTextEditorDialog> {
     }
     final error = _loadError;
     if (error != null) {
+      final external = widget.externalLabel;
       return Center(
         child: SingleChildScrollView(
-          padding: EdgeInsets.symmetric(horizontal: inset, vertical: 12),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              Icon(Icons.error_outline_rounded, size: 32, color: colors.error),
-              const SizedBox(height: 12),
-              Text(
-                error,
-                textAlign: TextAlign.center,
-                style: theme.textTheme.bodyMedium,
-              ),
-              const SizedBox(height: 16),
-              FilledButton.tonalIcon(
-                key: const ValueKey('retry-load-remote-text'),
-                onPressed: _load,
-                icon: const Icon(Icons.refresh_rounded, size: 18),
-                label: const Text('重试'),
-              ),
-            ],
+          padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 16),
+          child: ConstrainedBox(
+            constraints: const BoxConstraints(maxWidth: 420),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Icon(
+                  Icons.error_outline_rounded,
+                  size: 32,
+                  color: colors.error,
+                ),
+                const SizedBox(height: 12),
+                Text(
+                  error,
+                  textAlign: TextAlign.center,
+                  style: theme.textTheme.bodyMedium,
+                ),
+                const SizedBox(height: 16),
+                Wrap(
+                  alignment: WrapAlignment.center,
+                  spacing: 8,
+                  runSpacing: 8,
+                  children: [
+                    FilledButton.tonalIcon(
+                      key: const ValueKey('retry-load-remote-text'),
+                      onPressed: _load,
+                      icon: const Icon(Icons.refresh_rounded, size: 18),
+                      label: const Text('重试'),
+                    ),
+                    // 二进制、非 UTF-8 或超过 1 MiB 的文件编辑器打不开，外部
+                    // 程序往往可以，这里直接给出替代路径。
+                    if (external != null)
+                      OutlinedButton.icon(
+                        key: const ValueKey('open-remote-text-external-error'),
+                        onPressed: _openExternal,
+                        icon: const Icon(Icons.open_in_new_rounded, size: 18),
+                        label: Text(external),
+                      ),
+                  ],
+                ),
+              ],
+            ),
           ),
         ),
       );
     }
     final codeTheme = remoteCodeHighlightTheme(_file.path, theme.brightness);
-    // 高亮主题自带代码面板底色，浅深两套主题各自成套；无高亮时退回对话框表面色。
+    // 高亮主题自带代码面板底色，浅深两套主题各自成套；无高亮时退回表面色。
     final rootStyle = codeTheme?.theme['root'];
-    return Padding(
-      padding: EdgeInsets.fromLTRB(inset, 8, inset, 8),
-      child: Container(
-        decoration: BoxDecoration(
-          color: rootStyle?.backgroundColor ?? colors.surfaceContainerLow,
-          borderRadius: const BorderRadius.all(HarborShapes.sm),
-          border: Border.all(color: colors.outlineVariant),
+    return ColoredBox(
+      color: rootStyle?.backgroundColor ?? colors.surfaceContainerLowest,
+      child: CodeEditor(
+        key: const ValueKey('remote-text-content'),
+        controller: _text,
+        focusNode: _focus,
+        toolbarController: _selectionToolbar,
+        autofocus: true,
+        readOnly: _busy,
+        wordWrap: false,
+        hint: '文件内容为空',
+        padding: const EdgeInsets.fromLTRB(12, 10, 16, 10),
+        style: CodeEditorStyle(
+          fontSize: 13,
+          fontFamily: 'monospace',
+          fontHeight: 1.5,
+          textColor: rootStyle?.color ?? colors.onSurface,
+          hintTextColor: colors.onSurfaceVariant,
+          cursorColor: colors.primary,
+          codeTheme: codeTheme,
         ),
-        child: CodeEditor(
-          key: const ValueKey('remote-text-content'),
-          controller: _text,
-          focusNode: _focus,
-          toolbarController: _selectionToolbar,
-          autofocus: true,
-          readOnly: _busy,
-          wordWrap: false,
-          hint: '文件内容为空',
-          padding: const EdgeInsets.all(12),
-          clipBehavior: Clip.antiAlias,
-          borderRadius: const BorderRadius.all(HarborShapes.sm),
-          style: CodeEditorStyle(
-            fontSize: 13,
-            fontFamily: 'monospace',
-            fontHeight: 1.45,
-            textColor: rootStyle?.color ?? colors.onSurface,
-            hintTextColor: colors.onSurfaceVariant,
-            cursorColor: colors.primary,
-            codeTheme: codeTheme,
-          ),
-          indicatorBuilder: (context, controller, chunkController, notifier) =>
-              DefaultCodeLineNumber(
+        indicatorBuilder: (context, controller, chunkController, notifier) =>
+            Padding(
+              padding: const EdgeInsets.only(left: 8, right: 10),
+              child: DefaultCodeLineNumber(
                 controller: controller,
                 notifier: notifier,
                 textStyle: TextStyle(
                   fontFamily: 'monospace',
                   fontSize: 12,
-                  height: 1.45,
-                  color: colors.onSurfaceVariant,
+                  height: 1.5,
+                  color: colors.onSurfaceVariant.withValues(alpha: .7),
                 ),
                 focusedTextStyle: TextStyle(
                   fontFamily: 'monospace',
                   fontSize: 12,
-                  height: 1.45,
+                  height: 1.5,
                   color: colors.primary,
+                  fontWeight: FontWeight.w600,
                 ),
               ),
-          leadingDivider: VerticalDivider(
-            width: 1,
-            thickness: 1,
-            color: colors.outlineVariant,
-          ),
-          // 库内部的 Shortcuts 会先吃掉 Ctrl+S 与 Esc，这里覆盖成对话框原有的
-          // 保存 / 关闭请求，键盘行为与按钮保持一致。
-          shortcutOverrideActions: {
-            CodeShortcutSaveIntent: CallbackAction<CodeShortcutSaveIntent>(
-              onInvoke: (_) {
-                unawaited(_save());
-                return null;
-              },
             ),
-            CodeShortcutEscIntent: CallbackAction<CodeShortcutEscIntent>(
-              onInvoke: (_) {
-                unawaited(_requestClose());
-                return null;
-              },
-            ),
-          },
+        leadingDivider: VerticalDivider(
+          width: 1,
+          thickness: 1,
+          color: colors.outlineVariant.withValues(alpha: .6),
         ),
+        // 库内部的 Shortcuts 会先吃掉 Ctrl+S 与 Esc，这里覆盖成对话框原有的
+        // 保存 / 关闭请求，键盘行为与按钮保持一致。
+        shortcutOverrideActions: {
+          CodeShortcutSaveIntent: CallbackAction<CodeShortcutSaveIntent>(
+            onInvoke: (_) {
+              unawaited(_save());
+              return null;
+            },
+          ),
+          CodeShortcutEscIntent: CallbackAction<CodeShortcutEscIntent>(
+            onInvoke: (_) {
+              unawaited(_requestClose());
+              return null;
+            },
+          ),
+        },
       ),
     );
   }
 
-  Widget _saveErrorBanner(ColorScheme colors, double inset) => Padding(
-    padding: EdgeInsets.fromLTRB(inset, 0, inset, 8),
-    child: Container(
-      padding: const EdgeInsets.fromLTRB(12, 8, 8, 8),
-      decoration: BoxDecoration(
-        color: colors.errorContainer,
-        borderRadius: const BorderRadius.all(HarborShapes.sm),
-      ),
+  Widget _saveErrorBanner(ColorScheme colors) => Material(
+    key: const ValueKey('remote-text-save-error'),
+    color: colors.errorContainer,
+    child: Padding(
+      padding: const EdgeInsets.fromLTRB(16, 6, 8, 6),
       child: Row(
-        crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           Icon(
             Icons.error_outline_rounded,
             size: 18,
             color: colors.onErrorContainer,
           ),
-          const SizedBox(width: 8),
+          const SizedBox(width: 10),
           Expanded(
             child: Text(
               _saveError!,
@@ -533,7 +645,7 @@ class _RemoteTextEditorDialogState extends State<RemoteTextEditorDialog> {
             ),
           ),
           TextButton(
-            key: const ValueKey('reload-remote-text'),
+            key: const ValueKey('reload-remote-text-after-error'),
             onPressed: _busy ? null : _reload,
             child: Text(
               '重新载入',
@@ -545,88 +657,124 @@ class _RemoteTextEditorDialogState extends State<RemoteTextEditorDialog> {
     ),
   );
 
-  Widget _footer(ThemeData theme, ColorScheme colors, bool compact) {
-    final statusColor = _saveError != null
+  /// 底部状态栏：左边是保存状态，右边是光标位置与文件属性。光标位置单独
+  /// 监听控制器，移动光标不会重建整个对话框。
+  Widget _statusBar(ThemeData theme, ColorScheme colors, bool compact) {
+    final failed = _saveError != null || _loadError != null;
+    final statusColor = failed
         ? colors.error
-        : _dirty || _busy
+        : _busy
         ? colors.primary
+        : _dirty
+        ? colors.tertiary
         : colors.onSurfaceVariant;
-    final status = Row(
-      mainAxisSize: MainAxisSize.min,
-      children: [
-        Icon(
-          _saveError != null
-              ? Icons.error_outline_rounded
-              : _busy
-              ? Icons.sync_rounded
-              : _dirty
-              ? Icons.edit_outlined
-              : Icons.check_circle_outline_rounded,
-          size: 16,
-          color: statusColor,
-        ),
-        const SizedBox(width: 8),
-        Flexible(
-          child: Text(
-            _statusLabel,
-            maxLines: 1,
-            overflow: TextOverflow.ellipsis,
-            style: theme.textTheme.bodySmall?.copyWith(color: statusColor),
-          ),
-        ),
-      ],
+    final style = theme.textTheme.labelSmall?.copyWith(
+      color: colors.onSurfaceVariant,
+      fontFeatures: const [FontFeature.tabularFigures()],
     );
-    final actions = Row(
-      mainAxisSize: MainAxisSize.min,
-      children: [
-        TextButton(
-          key: const ValueKey('cancel-remote-text'),
-          onPressed: _saving ? null : _requestClose,
-          child: const Text('取消'),
-        ),
-        const SizedBox(width: 8),
-        Tooltip(
-          message: '保存（Ctrl+S）',
-          child: FilledButton.icon(
-            key: const ValueKey('save-remote-text'),
-            style: FilledButton.styleFrom(
-              minimumSize: Size(0, compact ? 48 : 40),
-              padding: EdgeInsets.symmetric(horizontal: compact ? 20 : 16),
+    final ready = !_loading && _loadError == null;
+    return SizedBox(
+      height: compact ? 32 : 30,
+      child: Padding(
+        padding: EdgeInsets.symmetric(horizontal: compact ? 12 : 16),
+        child: Row(
+          children: [
+            Icon(
+              failed
+                  ? Icons.error_outline_rounded
+                  : _busy
+                  ? Icons.sync_rounded
+                  : _dirty
+                  ? Icons.edit_outlined
+                  : Icons.check_circle_outline_rounded,
+              size: 14,
+              color: statusColor,
             ),
-            onPressed: _ready ? _save : null,
-            icon: _saving
-                ? const SizedBox.square(
-                    dimension: 16,
-                    child: CircularProgressIndicator(strokeWidth: 2),
-                  )
-                : const Icon(Icons.save_outlined, size: 18),
-            label: Text(_saving ? '正在保存…' : '保存'),
-          ),
+            const SizedBox(width: 6),
+            Expanded(
+              child: Text(
+                _statusLabel,
+                key: const ValueKey('remote-text-status'),
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: style?.copyWith(color: statusColor),
+              ),
+            ),
+            const SizedBox(width: 12),
+            if (ready) ...[
+              ValueListenableBuilder<CodeLineEditingValue>(
+                valueListenable: _text,
+                builder: (context, value, _) {
+                  final selection = value.selection;
+                  return Text(
+                    '行 ${selection.extentIndex + 1}，列 ${selection.extentOffset + 1}',
+                    key: const ValueKey('remote-text-cursor'),
+                    style: style,
+                  );
+                },
+              ),
+              _statusDivider(colors),
+            ],
+            Text(
+              remoteCodeLanguageLabel(_file.path),
+              key: const ValueKey('remote-text-language'),
+              style: style,
+            ),
+            if (!compact) ...[
+              _statusDivider(colors),
+              Text('UTF-8', style: style),
+              if (ready) ...[
+                _statusDivider(colors),
+                Text(
+                  _lineBreakLabel(_text.options.lineBreak),
+                  key: const ValueKey('remote-text-line-break'),
+                  style: style,
+                ),
+              ],
+              if (_size != null) ...[
+                _statusDivider(colors),
+                Text(fileSizeLabel(_size), style: style),
+              ],
+            ],
+          ],
         ),
-      ],
-    );
-    return Padding(
-      padding: EdgeInsets.symmetric(
-        horizontal: compact ? 16 : 20,
-        vertical: compact ? 8 : 10,
       ),
-      child: compact
-          ? Column(
-              crossAxisAlignment: CrossAxisAlignment.end,
-              children: [
-                Align(alignment: Alignment.centerLeft, child: status),
-                const SizedBox(height: 4),
-                actions,
-              ],
-            )
-          : Row(
-              children: [
-                Expanded(child: status),
-                actions,
-              ],
-            ),
     );
   }
+
+  Widget _statusDivider(ColorScheme colors) => Padding(
+    padding: const EdgeInsets.symmetric(horizontal: 10),
+    child: SizedBox(
+      height: 12,
+      child: VerticalDivider(
+        width: 1,
+        thickness: 1,
+        color: colors.outlineVariant,
+      ),
+    ),
+  );
+}
+
+String _lineBreakLabel(TextLineBreak lineBreak) => switch (lineBreak) {
+  TextLineBreak.crlf => 'CRLF',
+  TextLineBreak.cr => 'CR',
+  TextLineBreak.lf => 'LF',
+};
+
+class _MenuLabel extends StatelessWidget {
+  const _MenuLabel(this.icon, this.text);
+  final IconData icon;
+  final String text;
+
+  @override
+  Widget build(BuildContext context) => Row(
+    mainAxisSize: MainAxisSize.min,
+    children: [
+      Icon(icon, size: 20, color: Theme.of(context).colorScheme.primary),
+      const SizedBox(width: 12),
+      Text(text),
+    ],
+  );
 }
 
 /// re_editor 不提供默认选区菜单；移动端长按和桌面右键都需要显式提供。
@@ -870,6 +1018,7 @@ Widget _previewEditor({Brightness brightness = Brightness.light}) =>
         body: RemoteTextEditorDialog(
           files: _PreviewFileSystem({_previewFile.path: _previewContent}),
           file: _previewFile,
+          externalLabel: externalOpenLabel,
         ),
       ),
     );
@@ -918,6 +1067,7 @@ Widget harborRemoteTextEditorErrorPreview() => MaterialApp(
         name: 'missing.conf',
         path: '/etc/harbor/missing.conf',
       ),
+      externalLabel: externalOpenLabel,
     ),
   ),
 );
