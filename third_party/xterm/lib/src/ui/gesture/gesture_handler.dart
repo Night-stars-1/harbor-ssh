@@ -62,6 +62,7 @@ class _TerminalGestureHandlerState extends State<TerminalGestureHandler> {
   CellAnchor? _dragStart;
   CellAnchor? _longPressStart;
   Offset? _longPressPosition;
+  bool _longPressHasWord = false;
 
   CellAnchor _anchorAt(Offset offset) => terminalView.widget.terminal.buffer
       .createAnchorFromOffset(renderTerminal.getCellOffset(offset));
@@ -178,15 +179,22 @@ class _TerminalGestureHandlerState extends State<TerminalGestureHandler> {
 
   void onLongPressStart(LongPressStartDetails details) {
     _longPressPosition = details.globalPosition;
+    widget.terminalController.clearSelection();
     _longPressStart?.dispose();
     _longPressStart = _anchorAt(details.localPosition);
-    renderTerminal.selectWordFrom(_longPressStart!.offset);
+    final offset = _longPressStart!.offset;
+    final line = terminalView.widget.terminal.buffer.lines[offset.y];
+    _longPressHasWord = offset.x < line.length &&
+        line.getCodePoint(offset.x) != 0 && line.getCodePoint(offset.x) != 32;
+    if (_longPressHasWord) {
+      renderTerminal.selectWordFrom(offset);
+    }
   }
 
   void onLongPressMoveUpdate(LongPressMoveUpdateDetails details) {
     _longPressPosition = details.globalPosition;
     final start = _longPressStart;
-    if (start != null && start.attached) {
+    if (_longPressHasWord && start != null && start.attached) {
       renderTerminal.selectWordFrom(start.offset, details.localPosition);
     }
   }

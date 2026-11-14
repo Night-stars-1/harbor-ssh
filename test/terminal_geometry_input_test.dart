@@ -1,3 +1,4 @@
+import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -115,6 +116,216 @@ void _expectCandidateMatchesRender(WidgetTester tester, {String? reason}) {
 }
 
 void main() {
+  testWidgets('空白处长按只显示菜单而不创建选区', (tester) async {
+    _useSurface(tester, _surface);
+    final terminal = Terminal();
+    final controller = TerminalController();
+    final key = GlobalKey<TerminalViewState>();
+    addTearDown(controller.dispose);
+    await tester.pumpWidget(MaterialApp(home: Scaffold(body: TerminalView(
+      terminal,
+      key: key,
+      controller: controller,
+      alwaysShowCursor: true,
+      onSelectionMenuRequested: (position) {
+        key.currentState!.showSelectionToolbar(
+          (context, anchors) => AdaptiveTextSelectionToolbar.buttonItems(
+            anchors: anchors,
+            buttonItems: [ContextMenuButtonItem(label: '粘贴', onPressed: () {})],
+          ),
+          anchor: position,
+        );
+      },
+    ))));
+    await _pumpFrame(tester);
+    final render = key.currentState!.renderTerminal;
+    await tester.longPressAt(render.localToGlobal(Offset(100, render.lineHeight / 2)));
+    await _pumpFrame(tester);
+    expect(controller.selection, isNull);
+    expect(key.currentState!.selectionToolbarVisible, isTrue);
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
+
+  testWidgets('长行选区跨行反向拖动宽字符并随滚动保持手柄和文本一致', (tester) async {
+    _useSurface(tester, _surface);
+    final terminal = Terminal()..lineWrap = false;
+    final controller = TerminalController();
+    final vertical = ScrollController();
+    final focus = FocusNode();
+    final key = GlobalKey<TerminalViewState>();
+    addTearDown(() {
+      controller.dispose();
+      vertical.dispose();
+      focus.dispose();
+    });
+    await tester.pumpWidget(MaterialApp(home: Scaffold(body: TerminalView(
+      terminal,
+      key: key,
+      controller: controller,
+      scrollController: vertical,
+      focusNode: focus,
+      textStyle: const TerminalStyle(fontFamily: 'monospace', fontSize: 18),
+      alwaysShowCursor: true,
+      onSelectionMenuRequested: (position) {
+        key.currentState!.showSelectionToolbar(
+          (context, anchors) => AdaptiveTextSelectionToolbar.buttonItems(
+            anchors: anchors,
+            buttonItems: [ContextMenuButtonItem(label: '复制', onPressed: () {})],
+          ),
+          anchor: position,
+        );
+      },
+    ))));
+    final prefix = '${'p' * 29} ';
+    final suffix = 'z' * 90;
+    terminal.write([
+      for (var row = 0; row < 60; row++)
+        if (row == 4)
+          '${prefix}alpha 中文 tail$suffix'
+        else if (row == 5)
+          '${prefix}bravo 中文 end$suffix'
+        else
+          '${prefix}row$row$suffix',
+    ].join('\r\n'));
+    await _pumpFrame(tester);
+    final view = key.currentState!;
+    final render = view.renderTerminal;
+    final cell = render.cellSize;
+    focus.requestFocus();
+    await _pumpFrame(tester);
+    vertical.jumpTo(cell.height * 2);
+    final horizontal = tester.widget<SingleChildScrollView>(find.descendant(
+      of: find.byKey(const ValueKey('terminal-horizontal-scrollbar')),
+      matching: find.byType(SingleChildScrollView),
+    )).controller!;
+    horizontal.jumpTo(cell.width * 20);
+    await _pumpFrame(tester);
+
+    Offset point(int column, int row, {double fraction = 0}) =>
+        render.localToGlobal(render.getOffset(CellOffset(column, row)) +
+            Offset(cell.width * fraction, cell.height / 2));
+
+    // 实际长按进入标准选区，手柄必须能在横向偏移后的屏幕坐标命中。
+    await tester.longPressAt(point(32, 4));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 250));
+    final initial = controller.selection!.normalized;
+    expect(initial.begin, CellOffset(30, 4));
+    expect(initial.end, CellOffset(35, 4));
+    expect(view.selectionToolbarVisible, isTrue);
+    expect(terminal.buffer.getText(initial), 'alpha');
+
+    // 拖动起始手柄越过固定的终点，并跨行落在“中”的后半格；边界必须
+    // 吸附到整个宽字符之后，固定端仍停在 alpha 之后。
+    final startTip = render.localToGlobal(render.selectionEndpoint(initial.begin));
+    final startTouch = startTip + const Offset(-10, 10);
+    final startCenter = point(30, 4);
+    final drag = await tester.startGesture(startTouch);
+    // 手柄的 Pan 是手势竞技场中唯一的识别器：按下后即接受拖动，
+    // 起点是按下位置，而不是后续用于越过手势阈值的移动位置。
+    await tester.pump();
+    await drag.moveBy(const Offset(0, 25));
+    await tester.pump();
+    expect(view.selectionToolbarVisible, isFalse);
+    await drag.moveTo(startTouch +
+        point(37, 5, fraction: 0.3) - startCenter);
+    await tester.pump();
+    await drag.up();
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 250));
+    final reversed = controller.selection!.normalized;
+    expect(reversed.begin, CellOffset(35, 4));
+    expect(reversed.end, CellOffset(38, 5));
+    expect(terminal.buffer.getText(reversed), ' 中文 tail$suffix\n${prefix}bravo 中');
+    expect(view.selectionToolbarVisible, isTrue);
+
+    // 获取实际 Material 手柄的绘制区域，而不是仅比较计算出的端点。
+    List<Rect> handleRects() {
+      final followers = find.byType(CompositedTransformFollower);
+      final rects = <Rect>[];
+      for (final element in followers.evaluate()) {
+        final follower = find.byWidget(element.widget);
+        final pan = find.descendant(
+          of: follower,
+          matching: find.byWidgetPredicate((widget) => widget is RawGestureDetector &&
+              widget.gestures.containsKey(PanGestureRecognizer)),
+        );
+        if (pan.evaluate().isEmpty) continue;
+        final paint = find.descendant(of: follower, matching: find.byType(CustomPaint));
+        expect(paint, findsOneWidget);
+        rects.add(tester.getRect(paint));
+      }
+      rects.sort((a, b) => a.top.compareTo(b.top));
+      return rects;
+    }
+
+    void expectHandlesAtSelection() {
+      final rects = handleRects();
+      expect(rects, hasLength(2));
+      final range = controller.selection!.normalized;
+      final start = render.localToGlobal(render.selectionEndpoint(range.begin));
+      final end = render.localToGlobal(render.selectionEndpoint(range.end));
+      expect(rects[0].right, closeTo(start.dx, 1));
+      expect(rects[0].top, closeTo(start.dy, 1));
+      expect(rects[1].left, closeTo(end.dx, 1));
+      expect(rects[1].top, closeTo(end.dy, 1));
+    }
+
+    expectHandlesAtSelection();
+    vertical.jumpTo(cell.height * 3);
+    horizontal.jumpTo(cell.width * 22);
+    await _pumpFrame(tester);
+    expectHandlesAtSelection();
+    expect(terminal.buffer.getText(controller.selection),
+        ' 中文 tail$suffix\n${prefix}bravo 中');
+
+    // 滚动后再次命中尾手柄，将范围扩到另一个完整宽字符。
+    final endTouch = render.localToGlobal(render.selectionEndpoint(reversed.end)) +
+        const Offset(10, 10);
+    final endCenter = point(38, 5);
+    final dragAfterScroll = await tester.startGesture(endTouch);
+    await tester.pump();
+    await dragAfterScroll.moveBy(const Offset(25, 0));
+    await tester.pump();
+    await dragAfterScroll.moveTo(endTouch +
+        point(40, 5) - endCenter);
+    await tester.pump();
+    await dragAfterScroll.up();
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 250));
+    final result = controller.selection!.normalized;
+    expect(result.begin, CellOffset(35, 4));
+    expect(result.end, CellOffset(40, 5));
+    expect(terminal.buffer.getText(result), ' 中文 tail$suffix\n${prefix}bravo 中文');
+    expectHandlesAtSelection();
+    // Android 后台切换未必导致 Flutter 失焦；只关闭 UI，保留选区。
+    tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.inactive);
+    tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.hidden);
+    await _pumpFrame(tester);
+    expect(view.selectionToolbarVisible, isFalse);
+    expect(terminal.buffer.getText(controller.selection),
+        ' 中文 tail$suffix\n${prefix}bravo 中文');
+    tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.inactive);
+    tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed);
+    await _pumpFrame(tester);
+    // Hidden applications do not render the frame removing overlay entries;
+    // verify their removal as soon as foreground rendering resumes.
+    expect(handleRects(), isEmpty);
+    view.showSelectionToolbar((context, anchors) =>
+        AdaptiveTextSelectionToolbar.buttonItems(
+          anchors: anchors,
+          buttonItems: [ContextMenuButtonItem(label: '复制', onPressed: () {})],
+        ));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 250));
+    expect(view.selectionToolbarVisible, isTrue);
+    expectHandlesAtSelection();
+    controller.clearSelection();
+    await _pumpFrame(tester);
+    expect(view.selectionToolbarVisible, isFalse);
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
+
   testWidgets('终端输出、滚动、缩放与输入法重连后候选框始终落在最终光标上', (tester) async {
     _useSurface(tester, _surface);
 

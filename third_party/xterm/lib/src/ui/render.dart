@@ -41,6 +41,8 @@ class RenderTerminal extends RenderBox with RelayoutWhenSystemFontsChangeMixin {
     void Function(int firstLine, int lastLine)? prepareCellDecoration,
     TerminalCellDecoration? Function(int x, int y)? cellDecoration,
     HorizontalMetricsCallback? onHorizontalMetrics,
+    required this.startHandleLink,
+    required this.endHandleLink,
   })  : _terminal = terminal,
         _controller = controller,
         _offset = offset,
@@ -59,6 +61,19 @@ class RenderTerminal extends RenderBox with RelayoutWhenSystemFontsChangeMixin {
           textStyle: textStyle,
           textScaler: textScaler,
         );
+
+  final LayerLink startHandleLink;
+  final LayerLink endHandleLink;
+  bool _selectionHandlesReversed = false;
+  set selectionHandlesReversed(bool value) {
+    if (_selectionHandlesReversed == value) return;
+    _selectionHandlesReversed = value;
+    markNeedsPaint();
+  }
+
+
+  @override
+  bool get alwaysNeedsCompositing => true;
 
   Terminal _terminal;
   set terminal(Terminal terminal) {
@@ -440,6 +455,30 @@ class RenderTerminal extends RenderBox with RelayoutWhenSystemFontsChangeMixin {
       row.clamp(0, _terminal.buffer.lines.length - 1),
     );
   }
+  /// Maps a local position to a half-open character boundary, including the
+  /// boundary after the last cell and never splitting a wide character.
+  CellOffset getSelectionBoundary(Offset position) {
+    final lines = _terminal.buffer.lines;
+    final row = ((position.dy - _padding.top + _scrollOffset) / lineHeight)
+        .floor().clamp(0, lines.length - 1);
+    final line = lines[row];
+    final x = (position.dx - _padding.left + _horizontalOffset) / cellSize.width;
+    var column = x.round().clamp(0, line.length);
+    if (column > 0 && column < line.length && line.getWidth(column - 1) == 2) {
+      column = x < column ? column - 1 : column + 1;
+    }
+    return CellOffset(column, row);
+  }
+
+  Offset selectionEndpoint(CellOffset cell) =>
+      getOffset(cell).translate(0, lineHeight);
+
+  bool selectionEndpointVisible(CellOffset cell) {
+    final p = selectionEndpoint(cell);
+    return p.dx >= 0 && p.dx <= size.width &&
+        p.dy > 0 && p.dy - lineHeight < size.height;
+  }
+
 
   /// Selects entire words in the terminal that contains [from] and [to].
   void selectWord(Offset from, [Offset? to]) =>
@@ -636,6 +675,17 @@ class RenderTerminal extends RenderBox with RelayoutWhenSystemFontsChangeMixin {
   @override
   void paint(PaintingContext context, Offset offset) {
     _paint(context, offset);
+    final selection = _controller.selection?.normalized;
+    if (selection != null) {
+      context.pushLayer(
+        LeaderLayer(link: _selectionHandlesReversed ? endHandleLink : startHandleLink, offset: offset + selectionEndpoint(selection.begin)),
+        (context, offset) {}, Offset.zero,
+      );
+      context.pushLayer(
+        LeaderLayer(link: _selectionHandlesReversed ? startHandleLink : endHandleLink, offset: offset + selectionEndpoint(selection.end)),
+        (context, offset) {}, Offset.zero,
+      );
+    }
     context.setWillChangeHint();
   }
 

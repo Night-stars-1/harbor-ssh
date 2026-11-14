@@ -27,12 +27,6 @@ class MainActivity : FlutterActivity() {
     private val createDocumentRequest = 4831
     private val installPermissionRequest = 4832
     private var pendingInstall: Pair<MethodChannel.Result, File>? = null
-    private var terminalContextMenu: TerminalContextMenu? = null
-
-    override fun onPause() {
-        terminalContextMenu?.hide()
-        super.onPause()
-    }
 
     override fun onPostResume() {
         super.onPostResume()
@@ -60,10 +54,6 @@ class MainActivity : FlutterActivity() {
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
-        terminalContextMenu?.dispose()
-        terminalContextMenu = TerminalContextMenu(flutterEngine.dartExecutor.binaryMessenger) {
-            findFlutterView(window.decorView)
-        }
         MethodChannel(flutterEngine.dartExecutor.binaryMessenger, "dev.harborssh/file_transfer")
             .setMethodCallHandler { call, result ->
                 if (call.method == "create") {
@@ -212,8 +202,6 @@ class MainActivity : FlutterActivity() {
     }
 
     override fun onDestroy() {
-        terminalContextMenu?.dispose()
-        terminalContextMenu = null
         pendingCreate?.error("closed", "文件选择已结束", null)
         pendingCreate = null
         pendingInstall?.first?.error("closed", "安装授权已结束", null)

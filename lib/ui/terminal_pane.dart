@@ -101,16 +101,6 @@ class TerminalPane extends StatefulWidget {
   State<TerminalPane> createState() => _TerminalPaneState();
 }
 
-const _terminalMenuChannel = MethodChannel('dev.harborssh/terminal_context_menu');
-int _nextTerminalMenuId = 0;
-int? _activeTerminalMenuId;
-
-void _dismissActiveTerminalMenu() {
-  final id = _activeTerminalMenuId;
-  if (id == null) return;
-  _activeTerminalMenuId = null;
-  unawaited(_terminalMenuChannel.invokeMethod<void>('hide', {'id': id}));
-}
 
 class _TerminalPaneState extends State<TerminalPane> {
   AiTaskController? _ai;
@@ -325,65 +315,59 @@ class _TerminalPaneState extends State<TerminalPane> {
   final _terminalKey = GlobalKey<TerminalViewState>();
   final _scrollController = ScrollController();
   final _linkStyle = TerminalLinkStyle(const Color(0xff9ecaff));
-  int? _menuId;
-  BufferRange? _menuSelection;
+  int _menuGeneration = 0;
 
   void _hideTerminalMenu() {
-    final id = _menuId;
-    _menuId = null;
-    _menuSelection = null;
-    if (id == null) return;
-    if (_activeTerminalMenuId == id) _activeTerminalMenuId = null;
-    unawaited(_terminalMenuChannel.invokeMethod<void>('hide', {'id': id}));
+    _menuGeneration++;
+    _terminalKey.currentState?.hideSelectionToolbar(hideHandles: true);
   }
+
+  // Scrolling may be caused by a selection-handle drag. Hide only the toolbar:
+  // dropping handles or invalidating its callbacks would end that drag early.
+  void _scrollSelectionMenu() =>
+      _terminalKey.currentState?.hideSelectionToolbar();
 
   void _selectionChanged() {
-    if (_menuId != null && _menuSelection != _controller.selection) {
-      _hideTerminalMenu();
-    }
+    if (_controller.selection == null) _hideTerminalMenu();
   }
 
-  Future<void> _showTerminalMenu(Offset position) async {
+  void _showTerminalMenu(Offset position) {
     _hideTerminalMenu();
-    final id = ++_nextTerminalMenuId;
-    _menuId = id;
-    _activeTerminalMenuId = id;
-    _menuSelection = _controller.selection;
+    final generation = ++_menuGeneration;
     final session = widget.session;
-    final selection = _menuSelection;
-    final action = await _terminalMenuChannel.invokeMethod<String>('show', {
-      'id': id,
-      'x': position.dx,
-      'y': position.dy,
-      'pixelRatio': View.of(context).devicePixelRatio,
-      'canCopy': selection != null && !selection.isCollapsed,
-      'canPaste': session.status == ConnectionStatus.connected,
-      'canSelectAll': true,
-    });
-    if (!mounted ||
-        _menuId != id ||
-        _activeTerminalMenuId != id ||
-        widget.session != session) {
-      return;
-    }
-    _menuId = null;
-    _activeTerminalMenuId = null;
-    _menuSelection = null;
-    switch (action) {
-      case 'copy':
-        await _copy();
-        break;
-      case 'paste':
-        await _paste();
-        break;
-      case 'selectAll':
-        final focusContext = _focus.context;
-        if (focusContext == null || !focusContext.mounted) return;
-        Actions.invoke(focusContext,
-            const SelectAllTextIntent(SelectionChangedCause.toolbar));
-        await _showTerminalMenu(position);
-        break;
-    }
+    bool isCurrent() => mounted &&
+        widget.session == session &&
+        generation == _menuGeneration &&
+        (_terminalKey.currentState?.selectionToolbarVisible ?? false);
+    _terminalKey.currentState?.showSelectionToolbar(
+      (context, anchors) => _TerminalSelectionToolbar(
+        anchors: anchors,
+        controller: _controller,
+        session: session,
+        onCopy: () {
+          if (!isCurrent()) return;
+          _hideTerminalMenu();
+          _copy();
+        },
+        onPaste: () {
+          if (!isCurrent()) return;
+          _hideTerminalMenu();
+          _paste();
+        },
+        onSelectAll: () {
+          if (!isCurrent()) return;
+          _hideTerminalMenu();
+          final focusContext = _focus.context;
+          if (focusContext == null || !focusContext.mounted) return;
+          Actions.invoke(focusContext,
+              const SelectAllTextIntent(SelectionChangedCause.toolbar));
+          _showTerminalMenu(position);
+        },
+        isCurrent: isCurrent,
+        onDismiss: _hideTerminalMenu,
+      ),
+      anchor: position,
+    );
   }
 
   // TerminalView rebuilds replace the render object's theme and text style.
@@ -605,7 +589,7 @@ class _TerminalPaneState extends State<TerminalPane> {
     super.initState();
     widget.controller?._state = this;
     _controller.addListener(_selectionChanged);
-    _scrollController.addListener(_hideTerminalMenu);
+    _scrollController.addListener(_scrollSelectionMenu);
     _focus.addListener(_reportFocus);
     _listenForLinkHover();
     _applyLineWrap();
@@ -616,8 +600,9 @@ class _TerminalPaneState extends State<TerminalPane> {
 
   void _reportFocus() {
     if (_focus.hasFocus) {
-      if (_activeTerminalMenuId != _menuId) _dismissActiveTerminalMenu();
       widget.onFocused?.call();
+    } else {
+      _hideTerminalMenu();
     }
   }
 
@@ -730,7 +715,7 @@ class _TerminalPaneState extends State<TerminalPane> {
   void dispose() {
     _hideTerminalMenu();
     _controller.removeListener(_selectionChanged);
-    _scrollController.removeListener(_hideTerminalMenu);
+    _scrollController.removeListener(_scrollSelectionMenu);
     _stopMetrics(notify: false);
     widget.session.removeListener(_connectionChanged);
     widget.aiWindow?.removeListener(_aiHostChanged);
@@ -1097,7 +1082,6 @@ class _TerminalPaneState extends State<TerminalPane> {
                       child: Listener(
                         onPointerDown: (event) {
                           _hideTerminalMenu();
-                          _dismissActiveTerminalMenu();
                           _linkDown = null;
                           _pressedLink = null;
                           if (event.buttons == kSecondaryMouseButton) {
@@ -1270,6 +1254,113 @@ class _TerminalPaneState extends State<TerminalPane> {
     );
   }
 }
+class _TerminalSelectionToolbar extends StatefulWidget {
+  const _TerminalSelectionToolbar({
+    required this.anchors,
+    required this.controller,
+    required this.session,
+    required this.onCopy,
+    required this.onPaste,
+    required this.onSelectAll,
+    required this.onDismiss,
+    required this.isCurrent,
+  });
+
+  final TextSelectionToolbarAnchors anchors;
+  final TerminalController controller;
+  final SshConnection session;
+  final VoidCallback onCopy;
+  final VoidCallback onPaste;
+  final VoidCallback onSelectAll;
+  final bool Function() isCurrent;
+  final VoidCallback onDismiss;
+
+  @override
+  State<_TerminalSelectionToolbar> createState() => _TerminalSelectionToolbarState();
+}
+
+class _TerminalSelectionToolbarState extends State<_TerminalSelectionToolbar> {
+  final _processText = DefaultProcessTextService();
+  late final Future<bool> _clipboard = _hasClipboardText();
+  late final Future<List<ProcessTextAction>> _actions = _processText.queryTextActions();
+
+  Future<bool> _hasClipboardText() async {
+    try {
+      return await Clipboard.hasStrings();
+    } catch (_) {
+      return false;
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) => FutureBuilder<bool>(
+    future: _clipboard,
+    builder: (context, clipboard) => FutureBuilder<List<ProcessTextAction>>(
+      future: _actions,
+      builder: (context, actions) => ListenableBuilder(
+      listenable: widget.controller,
+      builder: (context, _) {
+        final selection = widget.controller.selection;
+        final hasSelection = selection != null && !selection.isCollapsed;
+        String? selectedText() {
+          if (!widget.isCurrent()) return null;
+          final current = widget.controller.selection;
+          if (current == null || current.isCollapsed) return null;
+          return widget.session.terminal.buffer.getText(current);
+        }
+
+        return AdaptiveTextSelectionToolbar.buttonItems(
+          anchors: widget.anchors,
+          buttonItems: [
+            if (hasSelection)
+              ContextMenuButtonItem(type: ContextMenuButtonType.copy, onPressed: widget.onCopy),
+            if (clipboard.data == true && widget.session.status == ConnectionStatus.connected)
+              ContextMenuButtonItem(type: ContextMenuButtonType.paste, onPressed: widget.onPaste),
+            ContextMenuButtonItem(type: ContextMenuButtonType.selectAll, onPressed: widget.onSelectAll),
+            if (hasSelection)
+              ContextMenuButtonItem(
+                type: ContextMenuButtonType.share,
+                onPressed: () async {
+                  final text = selectedText();
+                  if (text == null) return;
+                  final messenger = ScaffoldMessenger.maybeOf(context);
+                  widget.onDismiss();
+                  try {
+                    await SystemChannels.platform.invokeMethod<void>('Share.invoke', text);
+                  } on PlatformException {
+                    if (messenger?.mounted ?? false) {
+                      messenger!.showSnackBar(const SnackBar(content: Text('分享失败')));
+                    }
+                  }
+                },
+              ),
+            if (hasSelection)
+              for (final action in actions.data ?? <ProcessTextAction>[])
+                ContextMenuButtonItem(
+                  label: action.label,
+                  onPressed: () async {
+                    final text = selectedText();
+                    if (text == null) return;
+                    final messenger = ScaffoldMessenger.maybeOf(context);
+                    final processText = _processText;
+                    widget.onDismiss();
+                    try {
+                      await processText.processTextAction(action.id, text, true);
+                    } on PlatformException {
+                      if (messenger?.mounted ?? false) {
+                        messenger!.showSnackBar(const SnackBar(content: Text('文本处理失败')));
+                      }
+                    }
+                  },
+                ),
+          ],
+        );
+      },
+    ),
+    ),
+  );
+}
+
 
 /// Keeps one SSH session's assistant alive while its terminal pane is not
 /// mounted. Switching sessions unmounts the pane; the controller, the open

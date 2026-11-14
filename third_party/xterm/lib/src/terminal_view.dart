@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart';
 import 'package:flutter/services.dart';
 import 'package:xterm/src/core/buffer/cell_offset.dart';
+import 'package:xterm/src/core/buffer/line.dart';
 
 import 'package:xterm/src/core/input/keys.dart';
 import 'package:xterm/src/terminal.dart';
@@ -161,7 +162,7 @@ class TerminalView extends StatefulWidget {
   State<TerminalView> createState() => TerminalViewState();
 }
 
-class TerminalViewState extends State<TerminalView> {
+class TerminalViewState extends State<TerminalView> with WidgetsBindingObserver {
   late FocusNode _focusNode;
 
   late final ShortcutManager _shortcutManager;
@@ -171,6 +172,22 @@ class TerminalViewState extends State<TerminalView> {
   final _scrollableKey = GlobalKey<ScrollableState>();
 
   final _viewportKey = GlobalKey();
+  final _startHandleLink = LayerLink();
+  final _endHandleLink = LayerLink();
+  final _toolbarLink = LayerLink();
+  final _startVisible = ValueNotifier<bool>(false);
+  final _endVisible = ValueNotifier<bool>(false);
+  SelectionOverlay? _selectionOverlay;
+  Widget Function(BuildContext, TextSelectionToolbarAnchors)? _toolbarBuilder;
+  Offset? _toolbarAnchor;
+  bool _selectionMenuHasSelection = false;
+  bool _overlayUpdateScheduled = false;
+  CellAnchor? _dragFixed;
+  Offset? _dragOrigin;
+  Offset? _dragEndpoint;
+  bool _draggingStart = false;
+  bool _handlesReversed = false;
+
 
   String? _composingText;
 
@@ -193,28 +210,56 @@ class TerminalViewState extends State<TerminalView> {
       shortcuts: widget.shortcuts ?? defaultTerminalShortcuts,
     );
     _horizontalController.addListener(_onHorizontalScroll);
+    _controller.addListener(_scheduleSelectionUpdate);
+    widget.terminal.addListener(_scheduleSelectionUpdate);
+    _scrollController.addListener(_scheduleSelectionUpdate);
+    _focusNode.addListener(_onSelectionFocusChange);
+    WidgetsBinding.instance.addObserver(this);
     super.initState();
   }
 
   @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.hidden ||
+        state == AppLifecycleState.paused ||
+        state == AppLifecycleState.detached) {
+      hideSelectionToolbar(hideHandles: true);
+    }
+  }
+
+  @override
   void didUpdateWidget(TerminalView oldWidget) {
+    if (oldWidget.terminal != widget.terminal || oldWidget.controller != widget.controller ||
+        oldWidget.focusNode != widget.focusNode) {
+      hideSelectionToolbar(hideHandles: true);
+    }
+    if (oldWidget.terminal != widget.terminal) {
+      oldWidget.terminal.removeListener(_scheduleSelectionUpdate);
+      widget.terminal.addListener(_scheduleSelectionUpdate);
+    }
     if (oldWidget.focusNode != widget.focusNode) {
+      _focusNode.removeListener(_onSelectionFocusChange);
       if (oldWidget.focusNode == null) {
         _focusNode.dispose();
       }
       _focusNode = widget.focusNode ?? FocusNode();
+      _focusNode.addListener(_onSelectionFocusChange);
     }
     if (oldWidget.controller != widget.controller) {
+      _controller.removeListener(_scheduleSelectionUpdate);
       if (oldWidget.controller == null) {
         _controller.dispose();
       }
       _controller = widget.controller ?? TerminalController();
+      _controller.addListener(_scheduleSelectionUpdate);
     }
     if (oldWidget.scrollController != widget.scrollController) {
+      _scrollController.removeListener(_scheduleSelectionUpdate);
       if (oldWidget.scrollController == null) {
         _scrollController.dispose();
       }
       _scrollController = widget.scrollController ?? ScrollController();
+      _scrollController.addListener(_scheduleSelectionUpdate);
     }
     _shortcutManager.shortcuts = widget.shortcuts ?? defaultTerminalShortcuts;
     super.didUpdateWidget(oldWidget);
@@ -222,6 +267,14 @@ class TerminalViewState extends State<TerminalView> {
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    hideSelectionToolbar(hideHandles: true);
+    _controller.removeListener(_scheduleSelectionUpdate);
+    widget.terminal.removeListener(_scheduleSelectionUpdate);
+    _scrollController.removeListener(_scheduleSelectionUpdate);
+    _focusNode.removeListener(_onSelectionFocusChange);
+    _startVisible.dispose();
+    _endVisible.dispose();
     _horizontalController.dispose();
     if (widget.focusNode == null) {
       _focusNode.dispose();
@@ -242,7 +295,9 @@ class TerminalViewState extends State<TerminalView> {
       key: _scrollableKey,
       controller: _scrollController,
       viewportBuilder: (context, offset) {
-        return Listener(
+        return CompositedTransformTarget(
+          link: _toolbarLink,
+          child: Listener(
           onPointerSignal: _onHorizontalPointer,
           child: _TerminalView(
             key: _viewportKey,
@@ -261,7 +316,10 @@ class TerminalViewState extends State<TerminalView> {
             composingText: _composingText,
             prepareCellDecoration: widget.onPrepareCellDecoration,
             cellDecoration: widget.cellDecoration,
+            startHandleLink: _startHandleLink,
+            endHandleLink: _endHandleLink,
             onHorizontalMetrics: _onHorizontalMetrics,
+          ),
           ),
         );
       },
@@ -367,6 +425,177 @@ class TerminalViewState extends State<TerminalView> {
     );
 
     return child;
+  }
+
+  bool get selectionToolbarVisible => _selectionOverlay?.toolbarIsVisible ?? false;
+
+  /// Shows the platform-style selection menu and, for a selection, handles.
+  void showSelectionToolbar(
+    Widget Function(BuildContext context, TextSelectionToolbarAnchors anchors) builder, {
+    Offset? anchor,
+  }) {
+    hideSelectionToolbar(hideHandles: true);
+    _toolbarBuilder = builder;
+    _toolbarAnchor = anchor;
+    final selection = _controller.selection;
+    _selectionMenuHasSelection = selection != null && !selection.isCollapsed;
+    if (!_selectionMenuHasSelection && anchor == null) return;
+    final render = renderTerminal;
+    _selectionOverlay = SelectionOverlay(
+      context: context,
+      startHandleType: TextSelectionHandleType.left,
+      endHandleType: TextSelectionHandleType.right,
+      lineHeightAtStart: render.lineHeight,
+      lineHeightAtEnd: render.lineHeight,
+      startHandlesVisible: _startVisible,
+      endHandlesVisible: _endVisible,
+      onStartHandleDragStart: (details) => _startHandleDrag(details, true),
+      onEndHandleDragStart: (details) => _startHandleDrag(details, false),
+      onStartHandleDragUpdate: _updateHandleDrag,
+      onEndHandleDragUpdate: _updateHandleDrag,
+      onStartHandleDragEnd: _endHandleDrag,
+      onEndHandleDragEnd: _endHandleDrag,
+      selectionEndpoints: const [],
+      selectionControls: materialTextSelectionHandleControls,
+      selectionDelegate: null,
+      clipboardStatus: null,
+      startHandleLayerLink: _startHandleLink,
+      endHandleLayerLink: _endHandleLink,
+      toolbarLayerLink: _toolbarLink,
+    );
+    _updateSelectionOverlay();
+    if (_selectionMenuHasSelection) _selectionOverlay?.showHandles();
+    _showToolbar();
+  }
+
+  void hideSelectionToolbar({bool hideHandles = false}) {
+    _selectionOverlay?.hideToolbar();
+    if (hideHandles) {
+      _selectionOverlay?.dispose();
+      _selectionOverlay = null;
+      _toolbarBuilder = null;
+      _dragFixed?.dispose();
+      _dragFixed = null;
+      _handlesReversed = false;
+      final render = _viewportKey.currentContext?.findRenderObject();
+      if (render is RenderTerminal) render.selectionHandlesReversed = false;
+    }
+  }
+
+  void _onSelectionFocusChange() {
+    if (!_focusNode.hasFocus) hideSelectionToolbar(hideHandles: true);
+  }
+
+  void _scheduleSelectionUpdate() {
+    if (_selectionOverlay == null || _overlayUpdateScheduled) return;
+    _overlayUpdateScheduled = true;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _overlayUpdateScheduled = false;
+      if (mounted) _updateSelectionOverlay();
+    });
+  }
+
+  void _updateSelectionOverlay() {
+    final overlay = _selectionOverlay;
+    if (overlay == null) return;
+    final selection = _controller.selection?.normalized;
+    if (_selectionMenuHasSelection && (selection == null || (selection.isCollapsed && _dragFixed == null))) {
+      hideSelectionToolbar(hideHandles: true);
+      return;
+    }
+    if (selection == null || !_selectionMenuHasSelection) return;
+    final render = renderTerminal;
+    final start = render.selectionEndpoint(selection.begin);
+    final end = render.selectionEndpoint(selection.end);
+    _startVisible.value = render.selectionEndpointVisible(_handlesReversed ? selection.end : selection.begin);
+    _endVisible.value = render.selectionEndpointVisible(_handlesReversed ? selection.begin : selection.end);
+    overlay
+      ..lineHeightAtStart = render.lineHeight
+      ..lineHeightAtEnd = render.lineHeight
+      ..selectionEndpoints = [
+        TextSelectionPoint(start, TextDirection.ltr),
+        TextSelectionPoint(end, TextDirection.ltr),
+      ];
+    overlay.markNeedsBuild();
+  }
+
+  void _showToolbar() {
+    final overlay = _selectionOverlay;
+    if (overlay == null || _toolbarBuilder == null) return;
+    overlay.hideToolbar();
+    overlay.showToolbar(context: _viewportKey.currentContext, contextMenuBuilder: (menuContext) {
+      final selection = _controller.selection?.normalized;
+      final render = renderTerminal;
+      final TextSelectionToolbarAnchors anchors;
+      if (_selectionMenuHasSelection && selection != null) {
+        final start = render.localToGlobal(render.selectionEndpoint(selection.begin));
+        final end = render.localToGlobal(render.selectionEndpoint(selection.end));
+        anchors = TextSelectionToolbarAnchors(
+          primaryAnchor: Offset((start.dx + end.dx) / 2, start.dy - render.lineHeight),
+          secondaryAnchor: Offset((start.dx + end.dx) / 2, end.dy),
+        );
+      } else {
+        anchors = TextSelectionToolbarAnchors(primaryAnchor: _toolbarAnchor!);
+      }
+      return _toolbarBuilder!(menuContext, anchors);
+    });
+  }
+
+  void _startHandleDrag(DragStartDetails details, bool start) {
+    final selection = _controller.selection?.normalized;
+    if (selection == null) return;
+    _draggingStart = start;
+    _dragFixed?.dispose();
+    _dragFixed = widget.terminal.buffer.createAnchorFromOffset(start ? selection.end : selection.begin);
+    _dragOrigin = details.globalPosition;
+    _dragEndpoint = renderTerminal.localToGlobal(renderTerminal.selectionEndpoint(start ? selection.begin : selection.end))
+        .translate(0, -renderTerminal.lineHeight / 2);
+    hideSelectionToolbar();
+  }
+
+  void _updateHandleDrag(DragUpdateDetails details) {
+    final fixed = _dragFixed;
+    if (fixed == null || !fixed.attached || _dragOrigin == null || _dragEndpoint == null) return;
+    final position = renderTerminal.globalToLocal(_dragEndpoint! + details.globalPosition - _dragOrigin!);
+    final scroll = _scrollableKey.currentState?.position;
+    if (scroll != null) {
+      final margin = renderTerminal.lineHeight;
+      final delta = position.dy < margin
+          ? position.dy - margin
+          : position.dy > renderTerminal.size.height - margin
+              ? position.dy - (renderTerminal.size.height - margin)
+              : 0.0;
+      if (delta != 0) {
+        scroll.jumpTo((scroll.pixels + delta).clamp(scroll.minScrollExtent, scroll.maxScrollExtent));
+      }
+    }
+    if (!widget.terminal.lineWrap) {
+      final margin = renderTerminal.cellSize.width * 2;
+      if (position.dx < margin) {
+        _scrollHorizontally(position.dx - margin);
+      } else if (position.dx > renderTerminal.size.width - margin) {
+        _scrollHorizontally(position.dx - (renderTerminal.size.width - margin));
+      }
+    }
+    final boundary = renderTerminal.getSelectionBoundary(position);
+    final fixedOffset = fixed.offset;
+    _handlesReversed = _draggingStart ? fixedOffset.isBefore(boundary) : boundary.isBefore(fixedOffset);
+    renderTerminal.selectionHandlesReversed = _handlesReversed;
+    _controller.setSelection(
+      widget.terminal.buffer.createAnchorFromOffset(fixedOffset),
+      widget.terminal.buffer.createAnchorFromOffset(boundary),
+    );
+  }
+
+  void _endHandleDrag(DragEndDetails details) {
+    _dragFixed?.dispose();
+    _dragFixed = null;
+    _dragOrigin = null;
+    _dragEndpoint = null;
+    _handlesReversed = false;
+    renderTerminal.selectionHandlesReversed = false;
+    _updateSelectionOverlay();
+    _showToolbar();
   }
 
   void requestKeyboard() {
@@ -485,6 +714,7 @@ class TerminalViewState extends State<TerminalView> {
   }
 
   void _onEditableRect(Rect rect, Rect caretRect) {
+    _scheduleSelectionUpdate();
     _customTextEditKey.currentState?.setEditableRect(rect, caretRect);
   }
 
@@ -493,6 +723,7 @@ class TerminalViewState extends State<TerminalView> {
     final render = _viewportKey.currentContext?.findRenderObject();
     if (render is RenderTerminal) {
       render.horizontalOffset = _horizontalController.offset;
+      _scheduleSelectionUpdate();
     }
   }
 
@@ -605,6 +836,8 @@ class _TerminalView extends LeafRenderObjectWidget {
     this.prepareCellDecoration,
     this.cellDecoration,
     this.onHorizontalMetrics,
+    required this.startHandleLink,
+    required this.endHandleLink,
   });
 
   final Terminal terminal;
@@ -638,6 +871,9 @@ class _TerminalView extends LeafRenderObjectWidget {
   final TerminalCellDecoration? Function(int x, int y)? cellDecoration;
 
   final HorizontalMetricsCallback? onHorizontalMetrics;
+  final LayerLink startHandleLink;
+  final LayerLink endHandleLink;
+
 
   @override
   RenderTerminal createRenderObject(BuildContext context) {
@@ -658,6 +894,8 @@ class _TerminalView extends LeafRenderObjectWidget {
       prepareCellDecoration: prepareCellDecoration,
       cellDecoration: cellDecoration,
       onHorizontalMetrics: onHorizontalMetrics,
+      startHandleLink: startHandleLink,
+      endHandleLink: endHandleLink,
     );
   }
 

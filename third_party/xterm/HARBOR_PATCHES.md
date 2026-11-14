@@ -152,31 +152,48 @@ CSI/OSC sequences, UTF-8 byte boundaries, Unicode, cursor restoration and
 scrolling logs. `test/terminal_geometry_input_test.dart` covers output,
 scrolling, resizing, font changes, Chinese composition and focus reconnection.
 
-## Android native selection menu
+## Android standard text selection
 
-`TerminalView.onSelectionMenuRequested` is an optional callback emitted by the
-existing touch long-press recognizer when selection ends. It carries the final
-global logical position after releasing the gesture anchor. Empty-space long
-presses also request the menu, so pasting does not require selecting a word.
-Mouse selection, horizontal scrolling and long-press drag selection retain
-their existing recognizers and buffer anchors.
+`TerminalView.onSelectionMenuRequested` is emitted by the existing touch
+long-press recognizer when selection ends. Empty-space long presses clear any
+old selection and request a toolbar without inventing selected text. Existing
+mouse selection, long-press drag selection and scrolling recognizers remain.
 
-Harbor SSH connects this callback to Android's floating `ActionMode`, not a
-Flutter imitation of the platform toolbar. Copy, paste and select-all actions
-are returned to the owning terminal through a request-scoped method channel.
-Copy and paste reuse the application's clipboard actions: disconnected output
-remains copyable, pasting requires a connected session, and multiline input
-still requires confirmation before `Terminal.paste` applies bracketed-paste
-framing. Terminal output is not editable, so no cut action is offered.
+`TerminalViewState.showSelectionToolbar` owns Flutter's `SelectionOverlay` and
+uses `materialTextSelectionHandleControls`, the same Material handles used by
+standard selectable text. `RenderTerminal` publishes the two handle leaders
+at buffer selection endpoints, converts pointer positions to half-open cell
+boundaries, and snaps wide-character boundaries without splitting a glyph.
+The handles follow surviving buffer anchors through vertical/horizontal
+scrolling and geometry changes; offscreen handles are hidden. Invalid anchors
+close the selection UI. Dragging can cross the fixed endpoint and scroll at
+viewport edges. Scrolling hides only the toolbar, not the active handle drag;
+finishing the drag shows the toolbar again.
 
-The menu closes on a new touch, selection change, scroll, pane replacement or
-disposal, and Activity pause. Request IDs and session identity checks reject
-late actions from another terminal. The terminal selection remains a buffer
-range, not the hidden IME input client's placeholder selection; keyboard-owned
-clipboard panels remain separate from this terminal context-menu flow.
+The application supplies `AdaptiveTextSelectionToolbar.buttonItems`, matching
+the standard selection toolbar used for AI messages. The previous Android
+`ActionMode` bridge has been removed. Copy and paste reuse the application's
+clipboard actions: disconnected output remains copyable, pasting requires a
+connected session, and multiline input requires confirmation before
+`Terminal.paste` applies bracketed-paste framing. Select-all preserves the
+existing terminal action's scope. No cut action is offered for terminal output.
 
-`test/terminal_test.dart` covers long-press drag copy, empty-space paste,
-multiline cancellation/confirmation, disconnected copy, stale menu replies and
-desktop isolation. The existing wrap and IME geometry flows remain covered by
-`test/terminal_wrap_test.dart` and `test/terminal_geometry_input_test.dart`.
+Share uses the platform's `Share.invoke` action. Android text-processing items
+are queried through `DefaultProcessTextService`, so labels and availability
+come from installed applications rather than hard-coded app names. Only an
+explicit action sends the selected text, with `readOnly: true`; returned text
+is never written back to terminal history or sent as SSH input. Optional menu
+queries cannot reopen a closed toolbar or act on a replacement session.
+
+Focus loss, pane replacement/disposal and mobile background lifecycle events
+close the selection UI. The selection remains a buffer range, not the hidden
+IME input client's placeholder selection; keyboard-owned clipboard panels are
+separate from this context-menu flow.
+
+`test/terminal_test.dart` covers copy/share/text processing, safe paste,
+disconnected and stale-session handling, and app-level handle edge scrolling.
+`test/terminal_geometry_input_test.dart` covers cross-line/reversed handle
+dragging, wide characters, scrolled geometry, blank selection and lifecycle
+cleanup. Existing wrap and IME behavior remains covered by these tests and
+`test/terminal_wrap_test.dart`.
 
