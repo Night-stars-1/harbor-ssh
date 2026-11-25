@@ -26,7 +26,11 @@ class WorkspaceModel extends ChangeNotifier {
     this.repository, {
     this.localDocumentsDirectory,
     this.aiHistoryStore,
-  });
+  }) {
+    // Rule edits from the page, dialogs and AI approvals all go through the
+    // repository; each one needs an upload like any other synced edit.
+    repository.portForwardEdits.addListener(_scheduleSync);
+  }
   final HostRepository repository;
   final Future<Directory> Function()? localDocumentsDirectory;
   final AiConversationStore? aiHistoryStore;
@@ -712,6 +716,11 @@ class WorkspaceModel extends ChangeNotifier {
     _notify();
     try {
       await repository.saveCredentials(host.id, null);
+      // Rules belong to the host; leaving them would resurrect them if the
+      // same host id ever came back.
+      await repository.withLocalData(
+        () => repository.savePortForwards(host.id, const []),
+      );
       final next = _hosts.where((h) => h.id != host.id).toList();
       await repository.saveHosts(next);
       _hosts = next;
@@ -972,6 +981,7 @@ class WorkspaceModel extends ChangeNotifier {
   @override
   void dispose() {
     _disposed = true;
+    repository.portForwardEdits.removeListener(_scheduleSync);
     _idleCompleter?.complete();
     _idleCompleter = null;
     _syncDelay?.cancel();

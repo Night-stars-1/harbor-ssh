@@ -69,7 +69,7 @@ void main() {
       final repository = memoryRepository();
       await repository.saveHosts([testHost]);
       if (!empty) {
-        await PortForwardStore(repository.preferences, testHost.id).save([
+        await PortForwardStore(repository, testHost.id).save([
           const PortForwardRule(
             id: 'db',
             name: '数据库',
@@ -200,6 +200,52 @@ void main() {
             home: const Scaffold(body: PortForwardEditor(hosts: [testHost])),
           ),
         ),
+      for (final (suffix, brightness, width) in [
+        ('light', Brightness.light, 760.0),
+        ('dark', Brightness.dark, 760.0),
+        ('mobile', Brightness.light, 360.0),
+      ])
+        (
+          'forward-editor-browser-path-$suffix',
+          Size(width, 900),
+          MaterialApp(
+            debugShowCheckedModeBanner: false,
+            theme: harborTheme(brightness: brightness),
+            home: const Scaffold(
+              body: PortForwardEditor(
+                hosts: [testHost],
+                rule: PortForwardRule(
+                  id: 'admin',
+                  name: '管理后台',
+                  type: PortForwardType.local,
+                  bindPort: 18080,
+                  targetPort: 8080,
+                  browserPath: '/admin/?tab=status',
+                ),
+              ),
+            ),
+          ),
+        ),
+      (
+        'forward-editor-browser-path-invalid',
+        const Size(760, 900),
+        MaterialApp(
+          debugShowCheckedModeBanner: false,
+          theme: harborTheme(),
+          home: const Scaffold(
+            body: PortForwardEditor(
+              hosts: [testHost],
+              rule: PortForwardRule(
+                id: 'admin',
+                name: '管理后台',
+                type: PortForwardType.local,
+                bindPort: 18080,
+                targetPort: 8080,
+              ),
+            ),
+          ),
+        ),
+      ),
     ]) {
       tester.view.physicalSize = size;
       final key = GlobalKey();
@@ -213,6 +259,13 @@ void main() {
         );
         await tester.ensureVisible(field);
         await tester.tap(field);
+        await tester.pumpAndSettle();
+      }
+      if (name.endsWith('browser-path-invalid')) {
+        final field = find.byKey(const ValueKey('forward-browser-path'));
+        await tester.ensureVisible(field);
+        await tester.enterText(field, 'admin page');
+        await tester.tap(find.text('保存规则'));
         await tester.pumpAndSettle();
       }
       expect(tester.takeException(), isNull);

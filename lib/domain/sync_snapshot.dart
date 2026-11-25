@@ -2,6 +2,7 @@ import 'dart:convert';
 
 import 'host.dart';
 import 'network_identity.dart';
+import 'port_forward.dart';
 
 enum SyncConflictChoice { local, remote }
 
@@ -28,10 +29,10 @@ class SyncSnapshot {
 
   factory SyncSnapshot.decode(String value) {
     final json = jsonDecode(value) as Map<String, dynamic>;
-    // Version 2 adds network identities; version 1 archives stay readable so
-    // the first sync after an upgrade still sees the previous baseline.
-    if ((json['version'] != 1 && json['version'] != 2) ||
-        json['records'] is! Map) {
+    // Version 2 adds network identities, version 3 port-forward rules; older
+    // archives stay readable so the first sync after an upgrade still sees the
+    // previous baseline.
+    if (![1, 2, 3].contains(json['version']) || json['records'] is! Map) {
       throw const FormatException('不支持的同步数据格式');
     }
     final records = <String, Map<String, dynamic>>{};
@@ -62,11 +63,20 @@ class SyncSnapshot {
             id != 'identity:${identity.id}') {
           throw const FormatException('无效的网络身份数据');
         }
+      } else if (id.startsWith('forward:')) {
+        final rule = PortForwardRule.fromJson(data);
+        final hostId = data['hostId'];
+        if (hostId is! String ||
+            hostId.isEmpty ||
+            id != forwardId(hostId, rule.id)) {
+          throw const FormatException('无效的端口转发数据');
+        }
       } else {
         throw const FormatException('不支持的同步记录');
       }
-      // Identities carry no credentials: never parse them as a `key:` record.
-      if (!id.startsWith('identity:') && record['secret'] != null) {
+      // Only connections and accounts carry credentials.
+      if ((id.startsWith('host:') || id.startsWith('key:')) &&
+          record['secret'] != null) {
         Credentials.fromJson(
           Map<String, dynamic>.from(record['secret'] as Map),
         );
@@ -76,13 +86,28 @@ class SyncSnapshot {
     return SyncSnapshot(records);
   }
 
-  /// Version 2 archives carry network identities. Older clients reject that
-  /// version instead of silently dropping them, while archives without
-  /// identities stay version 1 for interoperability.
+  /// Archives carrying newer record kinds get a higher version, so older
+  /// clients reject them instead of silently dropping those records, while
+  /// archives without them keep the lowest version for interoperability.
   String encode() => jsonEncode({
-    'version': records.keys.any((id) => id.startsWith('identity:')) ? 2 : 1,
+    'version': records.keys.any((id) => id.startsWith('forward:'))
+        ? 3
+        : records.keys.any((id) => id.startsWith('identity:'))
+        ? 2
+        : 1,
     'records': records,
   });
+
+  /// One record per rule, so rules added on two devices both survive a merge.
+  static String forwardId(String hostId, String ruleId) =>
+      'forward:$hostId:$ruleId';
+
+  static Map<String, dynamic> forwardRecord(
+    String hostId,
+    PortForwardRule rule,
+  ) => {
+    'data': {...rule.toJson(), 'hostId': hostId},
+  };
 
   static bool same(Object? a, Object? b) => _canonical(a) == _canonical(b);
   static String _canonical(Object? value) {

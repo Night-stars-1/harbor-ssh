@@ -16,7 +16,7 @@ class PortForwardWorkspace extends StatefulWidget {
     super.key,
     required this.hosts,
     required this.sessions,
-    required this.preferences,
+    required this.repository,
     required this.onConnect,
     required this.onHosts,
     this.requestedSessionId,
@@ -25,7 +25,7 @@ class PortForwardWorkspace extends StatefulWidget {
   });
   final List<Host> hosts;
   final List<SshConnection> sessions;
-  final KeyValueStore preferences;
+  final HostRepository repository;
   final Future<SshConnection?> Function(Host) onConnect;
   final VoidCallback onHosts;
   final String? requestedSessionId;
@@ -44,8 +44,6 @@ class _PortForwardWorkspaceState extends State<PortForwardWorkspace> {
   final _operationErrors = <(String, String), String>{};
   final _disposed = Completer<void>();
   Set<String> _knownHostIds = {};
-  final _watchedSessions = <SshConnection>{};
-  Map<String, int> _ruleRevisions = const {};
   int _loadVersion = 0;
   bool _loading = true, _saving = false;
   String? _error;
@@ -57,13 +55,13 @@ class _PortForwardWorkspaceState extends State<PortForwardWorkspace> {
         session.host.id: session.host,
   }.values.toList();
   PortForwardStore _store(String hostId) =>
-      PortForwardStore(widget.preferences, hostId);
+      PortForwardStore(widget.repository, hostId);
 
   @override
   void initState() {
     super.initState();
     _useRequestedSession();
-    _watchSessions();
+    widget.repository.portForwardRevision.addListener(_savedRulesChanged);
     unawaited(_load());
   }
 
@@ -77,38 +75,24 @@ class _PortForwardWorkspaceState extends State<PortForwardWorkspace> {
   @override
   void didUpdateWidget(PortForwardWorkspace oldWidget) {
     super.didUpdateWidget(oldWidget);
-    _watchSessions();
+    if (oldWidget.repository != widget.repository) {
+      oldWidget.repository.portForwardRevision.removeListener(
+        _savedRulesChanged,
+      );
+      widget.repository.portForwardRevision.addListener(_savedRulesChanged);
+    }
     if (oldWidget.request != widget.request ||
         oldWidget.requestedSessionId != widget.requestedSessionId) {
       _useRequestedSession();
     }
-    if (!setEquals(_knownHostIds, _hosts.map((h) => h.id).toSet()) ||
-        !mapEquals(_ruleRevisions, _currentRuleRevisions)) {
+    if (!setEquals(_knownHostIds, _hosts.map((h) => h.id).toSet())) {
       unawaited(_load());
     }
   }
 
-  Map<String, int> get _currentRuleRevisions => {
-    for (final session in widget.sessions)
-      session.id: session.savedPortForwardRevision,
-  };
-
-  void _watchSessions() {
-    final current = widget.sessions.toSet();
-    for (final session in _watchedSessions.difference(current)) {
-      session.removeListener(_savedRulesChanged);
-    }
-    for (final session in current.difference(_watchedSessions)) {
-      session.addListener(_savedRulesChanged);
-    }
-    _watchedSessions
-      ..clear()
-      ..addAll(current);
-  }
-
+  /// Any stored rule change — this page, an AI approval or a cloud sync.
   void _savedRulesChanged() {
-    if (!mounted || mapEquals(_ruleRevisions, _currentRuleRevisions)) return;
-    unawaited(_load());
+    if (mounted) unawaited(_load(clearError: false));
   }
 
   void _useRequestedSession() {
@@ -123,10 +107,7 @@ class _PortForwardWorkspaceState extends State<PortForwardWorkspace> {
 
   @override
   void dispose() {
-    for (final session in _watchedSessions) {
-      session.removeListener(_savedRulesChanged);
-    }
-    _watchedSessions.clear();
+    widget.repository.portForwardRevision.removeListener(_savedRulesChanged);
     _disposed.complete();
     super.dispose();
   }
@@ -135,7 +116,6 @@ class _PortForwardWorkspaceState extends State<PortForwardWorkspace> {
     final version = ++_loadVersion;
     final hosts = _hosts;
     _knownHostIds = hosts.map((h) => h.id).toSet();
-    _ruleRevisions = _currentRuleRevisions;
     setState(() {
       _loading = true;
       if (clearError) _error = null;

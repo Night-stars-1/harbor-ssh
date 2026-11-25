@@ -911,6 +911,9 @@ class _PortForwardEditorState extends State<PortForwardEditor> {
   late final _targetPort = TextEditingController(
     text: widget.rule == null ? '' : widget.rule!.targetPort.toString(),
   );
+  late final _browserPath = TextEditingController(
+    text: widget.rule?.browserPath ?? '',
+  );
   late PortForwardType _type = widget.rule?.type ?? PortForwardType.local;
   @override
   void dispose() {
@@ -920,6 +923,7 @@ class _PortForwardEditorState extends State<PortForwardEditor> {
       _bindPort,
       _targetHost,
       _targetPort,
+      _browserPath,
     ]) {
       controller.dispose();
     }
@@ -960,6 +964,9 @@ class _PortForwardEditorState extends State<PortForwardEditor> {
       targetPort: _type == PortForwardType.dynamic
           ? 0
           : int.parse(_targetPort.text.trim()),
+      browserPath: _type == PortForwardType.local
+          ? _browserPath.text.trim()
+          : '',
     );
     if (widget.onSaveForHost != null) {
       if (_hostId != null) widget.onSaveForHost!(result, _hostId!);
@@ -1157,6 +1164,20 @@ class _PortForwardEditorState extends State<PortForwardEditor> {
                   keyboardType: TextInputType.number,
                   decoration: const InputDecoration(labelText: '目标端口'),
                   validator: _port,
+                ),
+              ],
+              if (_type == PortForwardType.local) ...[
+                const SizedBox(height: 16),
+                TextFormField(
+                  key: const ValueKey('forward-browser-path'),
+                  controller: _browserPath,
+                  keyboardType: TextInputType.url,
+                  decoration: const InputDecoration(
+                    labelText: '浏览器打开路径（可选）',
+                    hintText: '/admin/?tab=status',
+                  ),
+                  validator: (value) =>
+                      PortForwardRule.browserPathError(value?.trim() ?? ''),
                 ),
               ],
             ],

@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 
 import 'package:flutter_test/flutter_test.dart';
+import 'package:harbor_ssh/data/host_repository.dart';
 import 'package:harbor_ssh/data/port_forward_manager.dart';
 import 'package:harbor_ssh/domain/port_forward.dart';
 
@@ -91,10 +92,11 @@ void main() {
   });
   test('stores per-host rules locally and surfaces write failures', () async {
     final memory = MemoryStore();
-    final store = PortForwardStore(memory, 'host-a');
+    final repository = HostRepository(preferences: memory, secrets: MemoryStore());
+    final store = PortForwardStore(repository, 'host-a');
     await store.save([rule()]);
     expect((await store.load()).single.id, 'one');
-    expect(await PortForwardStore(memory, 'host-b').load(), isEmpty);
+    expect(await PortForwardStore(repository, 'host-b').load(), isEmpty);
     memory.failWrites = true;
     await expectLater(store.save([]), throwsStateError);
     expect((await store.load()).length, 1);
@@ -103,7 +105,10 @@ void main() {
     'corrupt storage and duplicate IDs are not silently overwritten',
     () async {
       final memory = MemoryStore();
-      final store = PortForwardStore(memory, 'host');
+      final store = PortForwardStore(
+        HostRepository(preferences: memory, secrets: MemoryStore()),
+        'host',
+      );
       await expectLater(store.save([rule(), rule()]), throwsFormatException);
       memory.values['harbor.port-forwards.v1.host'] = 'invalid';
       await expectLater(store.load(), throwsFormatException);

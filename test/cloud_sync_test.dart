@@ -7,11 +7,13 @@ import 'package:harbor_ssh/data/ai_conversation_store.dart';
 import 'package:harbor_ssh/data/gist_sync.dart';
 import 'package:harbor_ssh/data/github_device_auth.dart';
 import 'package:harbor_ssh/data/host_repository.dart';
+import 'package:harbor_ssh/data/port_forward_manager.dart';
 import 'package:harbor_ssh/data/sync_cipher.dart';
 import 'package:harbor_ssh/data/sync_storage.dart';
 import 'package:harbor_ssh/data/webdav_sync.dart';
 import 'package:harbor_ssh/domain/host.dart';
 import 'package:harbor_ssh/domain/network_identity.dart';
+import 'package:harbor_ssh/domain/port_forward.dart';
 import 'package:harbor_ssh/domain/sync_snapshot.dart';
 import 'package:harbor_ssh/ui/workspace_model.dart';
 
@@ -1497,6 +1499,122 @@ void main() {
       SyncSnapshot.decode(await decryptSync(remote!, password)).records
           .containsKey('identity:identity-office'),
       isFalse,
+    );
+  }, timeout: const Timeout(Duration(minutes: 3)));
+
+  test('WebDAV 两设备同步端口转发规则：双端新增都保留，修改与删除传播，删除主机带走规则', () async {
+    final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+    addTearDown(() => server.close(force: true));
+    String? remote;
+    var revision = 0;
+    server.listen((request) async {
+      if (request.method == 'PROPFIND') {
+        request.response.statusCode = 207;
+      } else if (request.method == 'GET') {
+        request.response.statusCode = remote == null ? 404 : 200;
+        if (remote != null) {
+          request.response.headers.set('ETag', '"$revision"');
+          request.response.write(remote);
+        }
+      } else if (request.method == 'PUT') {
+        remote = await utf8.decoder.bind(request).join();
+        revision++;
+        request.response.statusCode = 201;
+      }
+      await request.response.close();
+    });
+    const password = 'shared-encryption-password';
+    final settings = WebDavSettings(
+      url: 'http://127.0.0.1:${server.port}/dav/',
+      username: 'test',
+      password: 'app-password',
+      encryptionPassword: password,
+    );
+    final a = memoryRepository(), b = memoryRepository();
+    final syncA = WebDavSync(a), syncB = WebDavSync(b);
+    addTearDown(syncA.dispose);
+    addTearDown(syncB.dispose);
+    await syncA.saveSettings(settings);
+    await syncB.saveSettings(settings);
+    await syncA.testConnection(settings);
+
+    const web = PortForwardRule(
+      id: 'web',
+      name: '管理后台',
+      type: PortForwardType.local,
+      bindPort: 18080,
+      targetPort: 8080,
+      browserPath: '/admin/?tab=status',
+    );
+    const proxy = PortForwardRule(
+      id: 'proxy',
+      name: '开发代理',
+      type: PortForwardType.dynamic,
+      bindPort: 1080,
+    );
+    await a.saveHosts([testHost]);
+    await PortForwardStore(a, testHost.id).save([web]);
+    await syncA.synchronize();
+    expect(
+      (jsonDecode(await decryptSync(remote!, password)) as Map)['version'],
+      3,
+    );
+
+    // B 先同步拿到主机与规则，随后各自新增一条：合并后两条都在。
+    final bRevision = b.portForwardRevision.value;
+    await syncB.synchronize();
+    expect(b.portForwardRevision.value, greaterThan(bRevision));
+    final received = (await PortForwardStore(b, testHost.id).load()).single;
+    expect(received.toJson(), web.toJson());
+    expect(
+      received.browserUri(actualPort: 18080).toString(),
+      'http://127.0.0.1:18080/admin/?tab=status',
+    );
+    await PortForwardStore(b, testHost.id).upsert(proxy);
+    final edited = PortForwardRule.fromJson({
+      ...web.toJson(),
+      'bindPort': 28080,
+      'browserPath': '/',
+    });
+    await PortForwardStore(a, testHost.id).upsert(edited);
+    await syncB.synchronize();
+    await syncA.synchronize();
+    await syncB.synchronize();
+    for (final repository in [a, b]) {
+      final rules = await PortForwardStore(repository, testHost.id).load();
+      expect(rules.map((rule) => rule.id).toSet(), {'web', 'proxy'});
+      expect(rules.firstWhere((rule) => rule.id == 'web').bindPort, 28080);
+    }
+
+    // 删除规则传播到另一端。
+    await PortForwardStore(b, testHost.id).remove('proxy');
+    await syncB.synchronize();
+    await syncA.synchronize();
+    expect(
+      (await PortForwardStore(a, testHost.id).load()).map((rule) => rule.id),
+      ['web'],
+    );
+
+    // 删除主机：本地规则一并删除，另一端同步后主机与规则都不再保留。
+    final model = WorkspaceModel(a);
+    addTearDown(model.dispose);
+    await model.initialize();
+    await model.deleteHost(testHost);
+    expect(await a.loadPortForwards(testHost.id), isEmpty);
+    await syncA.synchronize();
+    await syncB.synchronize();
+    expect(await b.loadHosts(), isEmpty);
+    expect(await b.loadPortForwards(testHost.id), isEmpty);
+    expect(
+      (b.preferences as MemoryStore).values.keys.where(
+        (key) => key.startsWith('harbor.port-forwards.'),
+      ),
+      isEmpty,
+    );
+    expect(
+      SyncSnapshot.decode(await decryptSync(remote!, password)).records.keys
+          .where((id) => id.startsWith('forward:')),
+      isEmpty,
     );
   }, timeout: const Timeout(Duration(minutes: 3)));
 

@@ -1659,8 +1659,7 @@ class _WorkspaceState extends State<Workspace> {
                                         ? PortForwardWorkspace(
                                             hosts: model.hosts,
                                             sessions: model.sessions,
-                                            preferences:
-                                                model.repository.preferences,
+                                            repository: model.repository,
                                             requestedSessionId:
                                                 model.portForwardSessionId,
                                             request: model.portForwardRequest,

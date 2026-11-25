@@ -6,6 +6,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 import '../domain/host.dart';
 import '../domain/network_identity.dart';
+import '../domain/port_forward.dart';
 
 abstract interface class KeyValueStore {
   Future<String?> read(String key);
@@ -160,6 +161,13 @@ class HostRepository {
   static const _identitiesKey = 'harbor.network-identities.v1';
   Future<void> _keyWrites = Future<void>.value();
 
+  /// Bumped after every stored port-forward change, cloud sync included, so
+  /// open rule lists reload.
+  final portForwardRevision = ValueNotifier<int>(0);
+
+  /// Bumped only for rule edits made on this device, which need an upload.
+  final portForwardEdits = ValueNotifier<int>(0);
+
   Future<T> _serializeKeys<T>(Future<T> Function() action) {
     final result = _keyWrites.then((_) => action());
     _keyWrites = result.then<void>((_) {}, onError: (Object _) {});
@@ -249,6 +257,46 @@ class HostRepository {
 
   Future<void> saveNetworkIdentities(NetworkIdentities value) =>
       preferences.write(_identitiesKey, jsonEncode(value.toJson()));
+
+  static String _portForwardsKey(String hostId) =>
+      'harbor.port-forwards.v1.$hostId';
+
+  /// Rule definitions sync with the host; listener state never leaves the
+  /// device. Raw read: callers mutating rules hold [withLocalData].
+  Future<List<PortForwardRule>> loadPortForwards(String hostId) async {
+    final raw = await preferences.read(_portForwardsKey(hostId));
+    if (raw == null) return [];
+    final values = (jsonDecode(raw) as List)
+        .map((v) => PortForwardRule.fromJson(v as Map<String, dynamic>))
+        .toList();
+    if (values.map((v) => v.id).toSet().length != values.length) {
+      throw const FormatException('端口转发规则 ID 重复');
+    }
+    return values;
+  }
+
+  /// Raw write; callers hold [withLocalData]. An empty list removes the key.
+  Future<void> savePortForwards(
+    String hostId,
+    List<PortForwardRule> rules,
+  ) async {
+    for (final rule in rules) {
+      rule.validate();
+    }
+    if (rules.map((v) => v.id).toSet().length != rules.length) {
+      throw const FormatException('端口转发规则 ID 重复');
+    }
+    final key = _portForwardsKey(hostId);
+    if (rules.isEmpty) {
+      await preferences.delete(key);
+    } else {
+      await preferences.write(
+        key,
+        jsonEncode(rules.map((r) => r.toJson()).toList()),
+      );
+    }
+    portForwardRevision.value++;
+  }
   String _hostKey(Host host) =>
       'harbor.known.${base64Url.encode(utf8.encode(host.endpoint))}';
   Future<bool> verifyHost(

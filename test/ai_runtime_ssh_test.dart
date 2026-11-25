@@ -239,7 +239,6 @@ void main() {
         expect(rules.single.type, PortForwardType.local);
         expect(rules.single.targetHost, '127.0.0.1');
         expect(rules.single.targetPort, targetPort);
-        expect(connection.savedPortForwardRevision, 1);
         expect(connection.portForwards.activeCount, 1);
       });
 
@@ -271,8 +270,8 @@ void main() {
         final secondSession = second.createAiExecutor() as AiSessionExecutor;
         expect(
           identical(
-            first.portForwardStore!.preferences,
-            second.portForwardStore!.preferences,
+            first.portForwardStore!.repository,
+            second.portForwardStore!.repository,
           ),
           isTrue,
         );
@@ -299,8 +298,6 @@ void main() {
         final rules = await first.portForwardStore!.load();
         expect(rules, hasLength(2));
         expect(rules.map((rule) => rule.id), containsAll(saved.map((r) => r.ruleId)));
-        expect(first.savedPortForwardRevision, 1);
-        expect(second.savedPortForwardRevision, 1);
       });
 
       test('保存失败如实报告且不留下未追踪的监听', () async {
@@ -345,7 +342,7 @@ void main() {
                 ),
           ),
         );
-        expect(connection.savedPortForwardRevision, 0);
+        expect(await connection.portForwardStore!.load(), isEmpty);
         expect(connection.portForwards.activeCount, 0);
 
         preferences.failWrites = false;
@@ -358,7 +355,10 @@ void main() {
           save: true,
         );
         expect(saved.saved, isTrue);
-        expect(connection.savedPortForwardRevision, 1);
+        expect(
+          (await connection.portForwardStore!.load()).single.id,
+          saved.ruleId,
+        );
       });
 
       test('完整 AI 对话使用真实端点上下文，恢复历史时刷新为当前网络身份', () async {
@@ -529,7 +529,6 @@ void main() {
         final rules = await connection.portForwardStore!.load();
         expect(rules, hasLength(1));
         expect(rules.single.bindHost, '127.0.0.1');
-        expect(connection.savedPortForwardRevision, 1);
         expect(connection.portForwards.activeCount, 1);
         final toolMessage = (model.requests[1]['messages'] as List).firstWhere(
           (message) => message['role'] == 'tool',

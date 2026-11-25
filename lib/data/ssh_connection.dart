@@ -172,7 +172,6 @@ class SshConnection extends ChangeNotifier {
   String _endpointAddress = '';
   int? _endpointPort;
   String _networkLabel = '';
-  int _savedPortForwardRevision = 0;
   static int _aiForwardSequence = 0;
   bool _closed = false;
   bool _disposed = false;
@@ -185,16 +184,12 @@ class SshConnection extends ChangeNotifier {
   (String, int)? get connectedEndpoint =>
       _endpointPort == null ? null : (_endpointAddress, _endpointPort!);
 
-  /// Preferences-backed rule store for this host's current connection.
+  /// Rule store for this host, backed by the connection's repository.
   PortForwardStore? get portForwardStore {
     final repository = _repository;
-    return repository == null
-        ? null
-        : PortForwardStore(repository.preferences, host.id);
+    return repository == null ? null : PortForwardStore(repository, host.id);
   }
 
-  /// Incremented after a rule is durably saved, so workspaces can refresh.
-  int get savedPortForwardRevision => _savedPortForwardRevision;
   String get statusLabel => switch (status) {
     ConnectionStatus.connecting => '正在连接',
     ConnectionStatus.connected => '已连接',
@@ -745,17 +740,14 @@ class SshConnection extends ChangeNotifier {
     }
   }
 
-  /// Persists [rule] for this host and bumps [savedPortForwardRevision] only
-  /// after the write succeeds. Throws with the real storage reason otherwise.
+  /// Persists [rule] for this host. Throws with the real storage reason; the
+  /// repository notifies open rule lists after a successful write.
   Future<void> savePortForwardRule(PortForwardRule rule) async {
     final store = portForwardStore;
     if (store == null) {
       throw StateError('尚未读取主机配置，无法保存端口转发规则');
     }
-    rule.validate();
     await store.upsert(rule);
-    _savedPortForwardRevision++;
-    _notify();
   }
 
   Future<AiForwardResult> _aiCreatePortForward(

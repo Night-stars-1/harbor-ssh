@@ -2,6 +2,7 @@ import 'dart:convert';
 
 import '../domain/host.dart';
 import '../domain/network_identity.dart';
+import '../domain/port_forward.dart';
 import '../domain/sync_snapshot.dart';
 import 'host_repository.dart';
 
@@ -17,6 +18,12 @@ class SyncStorage {
         host,
         await repository.credentials(host.id),
       );
+      // Rule definitions travel with their host; which rules run, and on
+      // which actual port, stays on this device.
+      for (final rule in await repository.loadPortForwards(host.id)) {
+        records[SyncSnapshot.forwardId(host.id, rule.id)] =
+            SyncSnapshot.forwardRecord(host.id, rule);
+      }
     }
     for (final user in await repository.loadUsers()) {
       records['key:${user.id}'] = {
@@ -85,11 +92,17 @@ class SyncStorage {
     final hosts = <Host>[];
     final users = <SshUser>[];
     final identities = <String, NetworkIdentity>{};
+    final forwards = <String, Map<String, PortForwardRule>>{};
     for (final entry in next.records.entries) {
       final data = Map<String, dynamic>.from(entry.value['data'] as Map);
       if (entry.key.startsWith('identity:')) {
         final identity = NetworkIdentity.fromJson(data);
         identities[identity.id] = identity;
+        continue;
+      }
+      if (entry.key.startsWith('forward:')) {
+        final rule = PortForwardRule.fromJson(data);
+        (forwards[data['hostId'] as String] ??= {})[rule.id] = rule;
         continue;
       }
       final value = entry.value['secret'];
@@ -124,6 +137,28 @@ class SyncStorage {
     }
     await repository.saveHosts(hosts);
     await repository.saveUsers(users);
+    // Rewrite each host whose rules either side carries. Local order is kept
+    // and newly synced rules are appended; rules of a host that is not in
+    // [next] are removed with it.
+    final hostIds = hosts.map((host) => host.id).toSet();
+    final touched = {
+      ...forwards.keys,
+      for (final id in previous.records.keys)
+        if (id.startsWith('forward:'))
+          (previous.records[id]!['data'] as Map)['hostId'] as String,
+    };
+    for (final hostId in touched) {
+      final incoming = {...?forwards[hostId]};
+      final ordered = <PortForwardRule>[];
+      if (hostIds.contains(hostId)) {
+        for (final rule in await repository.loadPortForwards(hostId)) {
+          final match = incoming.remove(rule.id);
+          if (match != null) ordered.add(match);
+        }
+        ordered.addAll(incoming.values);
+      }
+      await repository.savePortForwards(hostId, ordered);
+    }
     for (final id in previous.records.keys.where(
       (id) => !next.records.containsKey(id),
     )) {

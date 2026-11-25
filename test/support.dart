@@ -14,6 +14,7 @@ class MemoryStore implements KeyValueStore {
 
   @override
   Future<void> delete(String key) async {
+    if (failWrites) throw StateError('disk unavailable');
     values.remove(key);
   }
 }

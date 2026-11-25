@@ -16,10 +16,15 @@ class PortForwardRule {
     required this.bindPort,
     this.targetHost = '127.0.0.1',
     this.targetPort = 0,
+    this.browserPath = '',
   });
   final String id, name, bindHost, targetHost;
   final PortForwardType type;
   final int bindPort, targetPort;
+
+  /// Path, query and fragment opened in the browser for a local forward;
+  /// empty means `/`.
+  final String browserPath;
 
   String get description => switch (type) {
     PortForwardType.local => '本机监听，经 SSH 连接服务器侧目标',
@@ -47,12 +52,28 @@ class PortForwardRule {
       '::' => '::1',
       _ => bindHost,
     };
+    final target = Uri.parse(browserPath.isEmpty ? '/' : browserPath);
     return Uri(
       scheme: targetPort == 443 || targetPort == 8443 ? 'https' : 'http',
       host: host,
       port: port,
-      path: '/',
+      path: target.path,
+      query: target.hasQuery ? target.query : null,
+      fragment: target.hasFragment ? target.fragment : null,
     );
+  }
+
+  /// Null when [path] is empty or an absolute path on the forwarded origin.
+  /// `//` would be a network-path reference to another host.
+  static String? browserPathError(String path) {
+    if (path.isEmpty) return null;
+    if (!path.startsWith('/') ||
+        path.startsWith('//') ||
+        RegExp(r'[\s\\]').hasMatch(path) ||
+        Uri.tryParse(path) == null) {
+      return '浏览器路径须以 / 开头，且不含空格或反斜杠';
+    }
+    return null;
   }
 
   void validate() {
@@ -73,6 +94,9 @@ class PortForwardRule {
         throw const FormatException('目标端口须为 1–65535');
       }
     }
+    if (browserPathError(browserPath) case final error?) {
+      throw FormatException(error);
+    }
   }
 
   static bool _validHost(String value) =>
@@ -85,6 +109,7 @@ class PortForwardRule {
     'bindPort': bindPort,
     'targetHost': targetHost,
     'targetPort': targetPort,
+    if (browserPath.isNotEmpty) 'browserPath': browserPath,
   };
   factory PortForwardRule.fromJson(Map<String, dynamic> json) {
     final rule = PortForwardRule(
@@ -95,6 +120,7 @@ class PortForwardRule {
       bindPort: json['bindPort'] as int,
       targetHost: json['targetHost'] as String? ?? '127.0.0.1',
       targetPort: json['targetPort'] as int? ?? 0,
+      browserPath: json['browserPath'] as String? ?? '',
     );
     rule.validate();
     return rule;

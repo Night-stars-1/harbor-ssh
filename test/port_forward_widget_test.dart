@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:harbor_ssh/data/host_repository.dart';
 import 'package:harbor_ssh/data/port_forward_manager.dart';
 import 'package:harbor_ssh/data/ssh_connection.dart';
 import 'package:harbor_ssh/domain/port_forward.dart';
@@ -78,7 +79,10 @@ void main() {
     final session = _Session();
     addTearDown(session.dispose);
     final memory = MemoryStore();
-    final store = PortForwardStore(memory, testHost.id);
+    final store = PortForwardStore(
+      HostRepository(preferences: memory, secrets: MemoryStore()),
+      testHost.id,
+    );
     if (withRule) await store.save([_rule]);
     await tester.pumpWidget(
       MaterialApp(

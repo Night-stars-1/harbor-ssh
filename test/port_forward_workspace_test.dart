@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:harbor_ssh/data/host_repository.dart';
 import 'package:harbor_ssh/data/port_forward_manager.dart';
 import 'package:harbor_ssh/data/ssh_connection.dart';
 import 'package:harbor_ssh/domain/host.dart';
@@ -95,10 +96,21 @@ class _MoveFailStore extends MemoryStore {
   bool failSource = false;
   @override
   Future<void> write(String key, String value) async {
+    _check(key);
+    await super.write(key, value);
+  }
+
+  // Moving the only rule empties the source list, which deletes its key.
+  @override
+  Future<void> delete(String key) async {
+    _check(key);
+    await super.delete(key);
+  }
+
+  void _check(String key) {
     if (failSource && key == 'harbor.port-forwards.v1.host-1') {
       throw StateError('disk unavailable');
     }
-    await super.write(key, value);
   }
 }
 
@@ -139,7 +151,7 @@ void main() {
       addTearDown(tester.view.resetDevicePixelRatio);
       final repository = memoryRepository();
       await repository.saveHosts([testHost]);
-      await PortForwardStore(repository.preferences, testHost.id).save([_rule]);
+      await PortForwardStore(repository, testHost.id).save([_rule]);
       final session = _Session(id: 'one', host: testHost);
       final model = _Model(repository, [session]);
       await tester.pumpWidget(HarborApp(model: model));
@@ -183,7 +195,7 @@ void main() {
 
   Future<void> page(
     WidgetTester tester, {
-    required MemoryStore preferences,
+    required HostRepository repository,
     List<Host> hosts = const [testHost, _second],
     List<SshConnection> sessions = const [],
     Future<SshConnection?> Function(Host)? onConnect,
@@ -196,7 +208,7 @@ void main() {
           body: PortForwardWorkspace(
             hosts: hosts,
             sessions: sessions,
-            preferences: preferences,
+            repository: repository,
             onConnect: onConnect ?? (_) async => null,
             onHosts: () {},
             requestedSessionId: requestedSessionId,
@@ -208,11 +220,11 @@ void main() {
   }
 
   testWidgets('AI 保存的新规则立即加入已打开的端口转发页', (tester) async {
-    final preferences = MemoryStore();
+    final repository = memoryRepository();
     final session = _Session(id: 'ai-session', host: testHost)
-      ..ruleStore = PortForwardStore(preferences, testHost.id);
+      ..ruleStore = PortForwardStore(repository, testHost.id);
     addTearDown(session.dispose);
-    await page(tester, preferences: preferences, sessions: [session]);
+    await page(tester, repository: repository, sessions: [session]);
     expect(find.text('数据库隧道'), findsNothing);
 
     // The session publishes a revision only after its real rule store writes.
@@ -254,7 +266,7 @@ void main() {
       ..status = ConnectionStatus.failed
       ..error = 'SSHAuthAbortError(Connection closed before authentication)';
     addTearDown(failed.dispose);
-    await page(tester, preferences: MemoryStore(), sessions: [failed]);
+    await page(tester, repository: memoryRepository(), sessions: [failed]);
     expect(find.text('尚未添加转发规则'), findsOneWidget);
     expect(find.text('SSH 主机'), findsNothing);
     expect(find.text('转发规则'), findsNothing);
@@ -274,11 +286,11 @@ void main() {
   testWidgets('add chooses host and forwarding type without connecting', (
     tester,
   ) async {
-    final preferences = MemoryStore();
+    final repository = memoryRepository();
     var connections = 0;
     await page(
       tester,
-      preferences: preferences,
+      repository: repository,
       onConnect: (_) async {
         connections++;
         return null;
@@ -292,9 +304,9 @@ void main() {
     await enter(tester, 'forward-target-port', '8080');
     await tester.tap(find.text('保存规则'));
     await tester.pumpAndSettle();
-    expect(await PortForwardStore(preferences, testHost.id).load(), isEmpty);
+    expect(await PortForwardStore(repository, testHost.id).load(), isEmpty);
     final saved = (await PortForwardStore(
-      preferences,
+      repository,
       _second.id,
     ).load()).single;
     expect(saved.type, PortForwardType.remote);
@@ -307,18 +319,18 @@ void main() {
   testWidgets(
     'rules from all hosts remain visible and deletions are host scoped',
     (tester) async {
-      final preferences = MemoryStore();
-      await PortForwardStore(preferences, testHost.id).save([_rule]);
-      await PortForwardStore(preferences, _second.id).save([_rule]);
-      await page(tester, preferences: preferences);
+      final repository = memoryRepository();
+      await PortForwardStore(repository, testHost.id).save([_rule]);
+      await PortForwardStore(repository, _second.id).save([_rule]);
+      await page(tester, repository: repository);
       expect(find.text('数据库隧道'), findsNWidgets(2));
       final card = find.byKey(const ValueKey('forward-rule-other-db-null'));
       await ruleAction(tester, '删除规则', card: card);
       expect(
-        await PortForwardStore(preferences, testHost.id).load(),
+        await PortForwardStore(repository, testHost.id).load(),
         hasLength(1),
       );
-      expect(await PortForwardStore(preferences, _second.id).load(), isEmpty);
+      expect(await PortForwardStore(repository, _second.id).load(), isEmpty);
       expect(find.text('数据库隧道'), findsOneWidget);
     },
   );
@@ -326,18 +338,18 @@ void main() {
   testWidgets(
     'editing moves a stopped rule between hosts and updates its type',
     (tester) async {
-      final preferences = MemoryStore();
-      await PortForwardStore(preferences, testHost.id).save([_rule]);
-      await page(tester, preferences: preferences);
+      final repository = memoryRepository();
+      await PortForwardStore(repository, testHost.id).save([_rule]);
+      await page(tester, repository: repository);
       await ruleAction(tester, '编辑规则');
       await tester.pumpAndSettle();
       await choose(tester, 'forward-host', _second.name);
       await choose(tester, 'forward-type', 'SOCKS5 代理');
       await tester.tap(find.text('保存规则'));
       await tester.pumpAndSettle();
-      expect(await PortForwardStore(preferences, testHost.id).load(), isEmpty);
+      expect(await PortForwardStore(repository, testHost.id).load(), isEmpty);
       final saved = (await PortForwardStore(
-        preferences,
+        repository,
         _second.id,
       ).load()).single;
       expect(saved.type, PortForwardType.dynamic);
@@ -350,8 +362,12 @@ void main() {
     tester,
   ) async {
     final preferences = _MoveFailStore();
-    await PortForwardStore(preferences, testHost.id).save([_rule]);
-    await page(tester, preferences: preferences);
+    final repository = HostRepository(
+      preferences: preferences,
+      secrets: MemoryStore(),
+    );
+    await PortForwardStore(repository, testHost.id).save([_rule]);
+    await page(tester, repository: repository);
     await ruleAction(tester, '编辑规则');
     await tester.pumpAndSettle();
     await choose(tester, 'forward-host', _second.name);
@@ -359,10 +375,10 @@ void main() {
     await tester.tap(find.text('保存规则'));
     await tester.pumpAndSettle();
     expect(
-      await PortForwardStore(preferences, testHost.id).load(),
+      await PortForwardStore(repository, testHost.id).load(),
       hasLength(1),
     );
-    expect(await PortForwardStore(preferences, _second.id).load(), isEmpty);
+    expect(await PortForwardStore(repository, _second.id).load(), isEmpty);
     expect(find.textContaining('保存失败'), findsOneWidget);
     expect(find.text('数据库隧道'), findsOneWidget);
   });
@@ -370,15 +386,15 @@ void main() {
   testWidgets('start connects the rule host and waits for authentication', (
     tester,
   ) async {
-    final preferences = MemoryStore();
-    await PortForwardStore(preferences, _second.id).save([_rule]);
+    final repository = memoryRepository();
+    await PortForwardStore(repository, _second.id).save([_rule]);
     final session = _Session(id: 'new', host: _second)
       ..status = ConnectionStatus.closed;
     addTearDown(session.dispose);
     Host? requested;
     await page(
       tester,
-      preferences: preferences,
+      repository: repository,
       sessions: [session],
       onConnect: (host) async {
         requested = host;
@@ -405,8 +421,8 @@ void main() {
   testWidgets(
     'changed host address never reuses an old connection with the same id',
     (tester) async {
-      final preferences = MemoryStore();
-      await PortForwardStore(preferences, testHost.id).save([_rule]);
+      final repository = memoryRepository();
+      await PortForwardStore(repository, testHost.id).save([_rule]);
       final stale = _Session(
         id: 'stale',
         host: const Host(
@@ -420,7 +436,7 @@ void main() {
       Host? requested;
       await page(
         tester,
-        preferences: preferences,
+        repository: repository,
         sessions: [stale],
         onConnect: (host) async {
           requested = host;
@@ -437,12 +453,12 @@ void main() {
   testWidgets('cancelled login leaves saved rule stopped and retryable', (
     tester,
   ) async {
-    final preferences = MemoryStore();
-    await PortForwardStore(preferences, testHost.id).save([_rule]);
+    final repository = memoryRepository();
+    await PortForwardStore(repository, testHost.id).save([_rule]);
     var calls = 0;
     await page(
       tester,
-      preferences: preferences,
+      repository: repository,
       onConnect: (_) async {
         calls++;
         return null;
@@ -462,7 +478,7 @@ void main() {
       isNotNull,
     );
     expect(
-      await PortForwardStore(preferences, testHost.id).load(),
+      await PortForwardStore(repository, testHost.id).load(),
       hasLength(1),
     );
   });
@@ -470,15 +486,15 @@ void main() {
   testWidgets('authentication failure stays on the rule and permits retry', (
     tester,
   ) async {
-    final preferences = MemoryStore();
-    await PortForwardStore(preferences, testHost.id).save([_rule]);
+    final repository = memoryRepository();
+    await PortForwardStore(repository, testHost.id).save([_rule]);
     final session = _Session(id: 'retry', host: testHost)
       ..status = ConnectionStatus.closed;
     addTearDown(session.dispose);
     var calls = 0;
     await page(
       tester,
-      preferences: preferences,
+      repository: repository,
       sessions: [session],
       onConnect: (_) async {
         calls++;
@@ -504,12 +520,12 @@ void main() {
   testWidgets('disposing while authentication waits never starts a tunnel', (
     tester,
   ) async {
-    final preferences = MemoryStore();
-    await PortForwardStore(preferences, testHost.id).save([_rule]);
+    final repository = memoryRepository();
+    await PortForwardStore(repository, testHost.id).save([_rule]);
     final session = _Session(id: 'waiting', host: testHost)
       ..status = ConnectionStatus.connecting;
     addTearDown(session.dispose);
-    await page(tester, preferences: preferences, sessions: [session]);
+    await page(tester, repository: repository, sessions: [session]);
     await tester.tap(find.byTooltip('启动'));
     await tester.pump();
     await tester.pumpWidget(const SizedBox.shrink());
@@ -534,12 +550,12 @@ void main() {
       id: 'last', name: '最后一条', type: PortForwardType.local,
       bindPort: 15433, targetPort: 5432,
     );
-    final preferences = MemoryStore();
-    await PortForwardStore(preferences, testHost.id).save([first, _rule, last]);
+    final repository = memoryRepository();
+    await PortForwardStore(repository, testHost.id).save([first, _rule, last]);
     final session = _DelayedSession(id: 'delayed', host: testHost);
     final handle = _DelayedHandle();
     addTearDown(session.dispose);
-    await page(tester, preferences: preferences, sessions: [session]);
+    await page(tester, repository: repository, sessions: [session]);
 
     void expectOrder(PortForwardStatus status) {
       final cards = tester.widgetList<PortForwardRuleCard>(
@@ -573,9 +589,9 @@ void main() {
     tester.view.devicePixelRatio = 1;
     addTearDown(tester.view.resetPhysicalSize);
     addTearDown(tester.view.resetDevicePixelRatio);
-    final preferences = MemoryStore();
-    await PortForwardStore(preferences, testHost.id).save([_rule]);
-    await PortForwardStore(preferences, _second.id).save([_rule]);
+    final repository = memoryRepository();
+    await PortForwardStore(repository, testHost.id).save([_rule]);
+    await PortForwardStore(repository, _second.id).save([_rule]);
     final session = _Session(id: 'new-other', host: _second);
     addTearDown(session.dispose);
     var sessions = <SshConnection>[];
@@ -585,7 +601,7 @@ void main() {
         return PortForwardWorkspace(
           hosts: const [testHost, _second],
           sessions: sessions,
-          preferences: preferences,
+          repository: repository,
           onHosts: () {},
           onConnect: (host) async {
             setPageState(() => sessions = [session]);
@@ -626,8 +642,8 @@ void main() {
       id: 'temporary', name: '临时转发', type: PortForwardType.local,
       bindPort: 15434, targetPort: 5432,
     );
-    final preferences = MemoryStore();
-    await PortForwardStore(preferences, testHost.id).save([first, _rule]);
+    final repository = memoryRepository();
+    await PortForwardStore(repository, testHost.id).save([first, _rule]);
     final a = _Session(id: 'a', host: testHost);
     final b = _Session(id: 'b', host: testHost);
     addTearDown(a.dispose);
@@ -635,7 +651,7 @@ void main() {
     await a.portForwards.start(temporary);
     await a.portForwards.start(_rule);
     await b.portForwards.start(_rule);
-    await page(tester, preferences: preferences, sessions: [a, b]);
+    await page(tester, repository: repository, sessions: [a, b]);
     expect(
       tester.widgetList<PortForwardRuleCard>(find.byType(PortForwardRuleCard))
           .map((card) => card.rule.id),
@@ -698,7 +714,7 @@ void main() {
       addTearDown(tester.view.resetPhysicalSize);
       addTearDown(tester.view.resetDevicePixelRatio);
       addTearDown(tester.platformDispatcher.clearTextScaleFactorTestValue);
-      await page(tester, preferences: MemoryStore());
+      await page(tester, repository: memoryRepository());
       expect(tester.takeException(), isNull);
       await tester.tap(find.text('添加规则'));
       await tester.pumpAndSettle();
@@ -715,8 +731,8 @@ void main() {
   testWidgets('closing a selection menu with Escape preserves the rule draft', (
     tester,
   ) async {
-    final preferences = MemoryStore();
-    await page(tester, preferences: preferences);
+    final repository = memoryRepository();
+    await page(tester, repository: repository);
     await tester.tap(find.text('添加规则'));
     await tester.pumpAndSettle();
     await choose(tester, 'forward-host', _second.name);
@@ -732,7 +748,7 @@ void main() {
     await tester.tap(find.text('保存规则'));
     await tester.pumpAndSettle();
     final rule = (await PortForwardStore(
-      preferences,
+      repository,
       _second.id,
     ).load()).single;
     expect(rule.name, '保留草稿');
@@ -748,7 +764,7 @@ void main() {
           body: PortForwardWorkspace(
             hosts: const [],
             sessions: const [],
-            preferences: MemoryStore(),
+            repository: memoryRepository(),
             onConnect: (_) async => null,
             onHosts: () => opened = true,
           ),
